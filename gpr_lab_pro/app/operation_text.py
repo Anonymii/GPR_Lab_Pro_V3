@@ -1,0 +1,162 @@
+﻿from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class MenuPlacement:
+    top_level: str
+    sub_level: str | None = None
+
+
+OPERATION_LABELS: dict[str, str] = {
+    "dewow": "去直流漂移",
+    "t0": "零点校正(峰值对齐)",
+    "t0_fb": "零点校正(首波对齐)",
+    "phase_correction": "相位校正",
+    "interf_active": "有源干扰抑制",
+    "interf_passive": "无源干扰抑制",
+    "bg_mean": "全局均值去背景",
+    "bg_median": "全局中值去背景",
+    "bg_move": "滑动均值去背景",
+    "bg_svd": "SVD 去背景",
+    "bg_rpca": "RPCA 去背景",
+    "bg_top_mute": "浅层静音",
+    "bg_freq": "频域去背景",
+    "bg_highpass": "高通去背景",
+    "bg_adaptive": "自适应去背景",
+    "gain_lin": "线性增益",
+    "gain_exp": "指数增益",
+    "gain_sph": "球面扩散补偿",
+    "gain_sec": "SEC 增益",
+    "gain_agc": "AGC 增益",
+    "gain_tgc_agc": "TGC + AGC 复合增益",
+    "gain_bg_est": "背景估计增益",
+    "gain_ada_contrast": "自适应对比增强",
+    "filt_vert": "垂直滤波",
+    "filt_horz": "水平滤波",
+    "filt_bp_fft": "一维 FFT 带通",
+    "filt_decon": "预测反褶积",
+    "filt_med2": "二维中值滤波",
+    "filt_mean2": "二维均值滤波",
+    "filt_bp2d": "二维 FFT 带通",
+    "filt_fk": "FK Notch",
+    "filt_fk_shift": "FK Shift",
+    "filt_glp": "渐进低通",
+    "filt_smooth_fk": "平滑 FK",
+    "mig_kirchhoff": "Kirchhoff 迁移",
+    "mig_stolt": "Stolt 迁移",
+    "filt_grad": "水平梯度",
+    "filt_wiener": "Wiener 滤波",
+    "filt_notch": "Notch 陷波",
+    "filt_adapt": "自适应滤波",
+    "filt_hann_window": "Hann 窗",
+    "wav_swt1": "一维 SWT",
+    "wav_dwt2": "二维 DWT",
+    "freq_wavelet": "频域小波",
+    "cs_reconstruction": "压缩感知重构",
+}
+
+PARAMETER_LABELS: dict[str, str] = {
+    "win": "窗口长度",
+    "win_ns": "窗口大小(ns)",
+    "time": "目标时间(ns)",
+    "k": "阈值系数 K",
+    "f_start": "起始频率(MHz)",
+    "f_end": "终止频率(MHz)",
+    "thr": "阈值(dB)",
+    "ext": "扩展(bin)",
+    "hit": "命中比例",
+    "is_freq": "输入已是频域(1/0)",
+    "mode": "模式",
+    "removal": "去除强度(%)",
+    "start": "起始时间(ns)",
+    "transition": "过渡带(ns)",
+    "surface": "表面搜索窗(ns)",
+    "protect_start": "保护起点(ns)",
+    "protect_end": "保护终点(ns)",
+    "a0": "初始增益 A0",
+    "c": "常数 C",
+    "p": "指数 p",
+    "v": "速度(m/ns)",
+    "db": "增益强度(dB)",
+    "alpha": "Alpha",
+    "strength": "强度",
+    "low": "低频(MHz)",
+    "high": "高频(MHz)",
+    "len": "算子长度",
+    "step": "预测步长",
+    "end": "终止位置",
+    "inner": "内径",
+    "outer": "外径",
+    "width": "宽度",
+    "shift": "偏移量",
+    "dx": "道间距 dx(m)",
+    "r": "最大半径 Rmax(m)",
+    "a": "半开角(deg)",
+    "freq": "频率(MHz)",
+    "level": "分解层数",
+    "sampling": "采样率(%)",
+    "lambda": "正则参数",
+    "ov": "X 向重叠(Trace)",
+}
+
+MENU_PLACEMENTS: dict[str, MenuPlacement] = {
+    "dewow": MenuPlacement("预处理"),
+    "t0": MenuPlacement("预处理", "零点校正"),
+    "t0_fb": MenuPlacement("预处理", "零点校正"),
+    "phase_correction": MenuPlacement("预处理", "频域预处理"),
+    "interf_active": MenuPlacement("预处理", "干扰抑制"),
+    "interf_passive": MenuPlacement("预处理", "干扰抑制"),
+    "bg_mean": MenuPlacement("去背景"),
+    "bg_median": MenuPlacement("去背景"),
+    "bg_move": MenuPlacement("去背景"),
+    "bg_svd": MenuPlacement("去背景"),
+    "bg_rpca": MenuPlacement("去背景"),
+    "bg_top_mute": MenuPlacement("去背景"),
+    "bg_freq": MenuPlacement("去背景"),
+    "bg_highpass": MenuPlacement("去背景"),
+    "bg_adaptive": MenuPlacement("去背景"),
+    "gain_lin": MenuPlacement("增益补偿"),
+    "gain_exp": MenuPlacement("增益补偿"),
+    "gain_sph": MenuPlacement("增益补偿"),
+    "gain_sec": MenuPlacement("增益补偿"),
+    "gain_agc": MenuPlacement("增益补偿"),
+    "gain_tgc_agc": MenuPlacement("增益补偿"),
+    "gain_bg_est": MenuPlacement("增益补偿"),
+    "gain_ada_contrast": MenuPlacement("增益补偿"),
+    "filt_vert": MenuPlacement("滤波", "一维滤波"),
+    "filt_horz": MenuPlacement("滤波", "一维滤波"),
+    "filt_bp_fft": MenuPlacement("滤波", "一维滤波"),
+    "filt_decon": MenuPlacement("滤波", "一维滤波"),
+    "filt_med2": MenuPlacement("滤波", "二维滤波"),
+    "filt_mean2": MenuPlacement("滤波", "二维滤波"),
+    "filt_bp2d": MenuPlacement("滤波", "二维滤波"),
+    "filt_fk": MenuPlacement("滤波", "二维滤波"),
+    "filt_fk_shift": MenuPlacement("滤波", "二维滤波"),
+    "filt_glp": MenuPlacement("滤波", "二维滤波"),
+    "filt_smooth_fk": MenuPlacement("滤波", "二维滤波"),
+    "filt_grad": MenuPlacement("滤波", "高级滤波"),
+    "filt_wiener": MenuPlacement("滤波", "高级滤波"),
+    "filt_notch": MenuPlacement("滤波", "高级滤波"),
+    "filt_adapt": MenuPlacement("滤波", "高级滤波"),
+    "filt_hann_window": MenuPlacement("滤波", "高级滤波"),
+    "mig_kirchhoff": MenuPlacement("迁移成像"),
+    "mig_stolt": MenuPlacement("迁移成像"),
+    "wav_swt1": MenuPlacement("小波与重构"),
+    "wav_dwt2": MenuPlacement("小波与重构"),
+    "freq_wavelet": MenuPlacement("小波与重构"),
+    "cs_reconstruction": MenuPlacement("小波与重构"),
+}
+
+
+def get_operation_label(op_type: str, fallback: str | None = None) -> str:
+    return OPERATION_LABELS.get(op_type, fallback or op_type)
+
+
+def get_parameter_label(key: str, fallback: str | None = None) -> str:
+    return PARAMETER_LABELS.get(key, fallback or key)
+
+
+def get_menu_placement(op_type: str) -> MenuPlacement:
+    return MENU_PLACEMENTS.get(op_type, MenuPlacement("处理流程"))

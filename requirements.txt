@@ -1,0 +1,6 @@
+numpy>=1.23,<2
+scipy>=1.10,<1.14
+PyWavelets>=1.4,<1.7
+matplotlib>=3.7,<3.10
+PySide6>=6.7,<6.11
+pytest>=7.4,<9

@@ -1,0 +1,10 @@
+GPR Lab Pro PySide V2 Release Instructions
+
+1. Please extract the entire GPR_Lab_Pro_Pyside_V2.zip package to a normal folder first.
+2. Do not run the EXE directly from inside the zip archive.
+3. After extraction, open the GPR_Lab_Pro_Pyside_V2 folder.
+4. Double-click GPR_Lab_Pro_Pyside_V2.exe or release_launcher.bat.
+
+If the software still does not start:
+- Check whether startup_error.log is created next to the EXE.
+- Send that log file back to the developer for diagnosis.
