@@ -325,6 +325,36 @@ class GPRApplication(QtCore.QObject):
         )
         self.select_project_region(region_id)
 
+    def create_region_interface(self, region_id: str, *, name: str | None = None) -> str:
+        interface = self.project_controller.create_interface(region_id, name=name)
+        return interface.interface_id
+
+    def rename_region_interface(self, region_id: str, interface_id: str, new_name: str) -> None:
+        self.project_controller.rename_interface(region_id, interface_id, new_name)
+
+    def delete_region_interface(self, region_id: str, interface_id: str) -> None:
+        self.project_controller.delete_interface(region_id, interface_id)
+
+    def set_region_interface_visible(self, region_id: str, interface_id: str, visible: bool) -> None:
+        self.project_controller.set_interface_visible(region_id, interface_id, visible)
+
+    def set_region_interface_point(
+        self,
+        region_id: str,
+        interface_id: str,
+        *,
+        line_index: int,
+        trace_index: int,
+        sample_index: int | None,
+    ) -> None:
+        self.project_controller.set_interface_point(
+            region_id,
+            interface_id,
+            line_index=line_index,
+            trace_index=trace_index,
+            sample_index=sample_index,
+        )
+
     def select_project_region(self, region_id: str) -> None:
         self.project_controller.sync_active_region_runtime()
         self._cache_active_region_result_state()

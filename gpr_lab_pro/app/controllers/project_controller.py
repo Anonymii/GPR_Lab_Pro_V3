@@ -10,10 +10,19 @@ import numpy as np
 from gpr_lab_pro.app.context import ApplicationContext
 from gpr_lab_pro.domain.models.dataset import DatasetRecord
 from gpr_lab_pro.domain.models.display import DisplayState, SelectionState
-from gpr_lab_pro.domain.models.project import ProjectFileState, ProjectRegionState
+from gpr_lab_pro.domain.models.project import InterfaceTrace, ProjectFileState, ProjectRegionState
 
 
 class ProjectController:
+    _INTERFACE_COLORS = (
+        "#ff8c42",
+        "#00a8e8",
+        "#7b61ff",
+        "#00b894",
+        "#e63946",
+        "#ffb703",
+    )
+
     def __init__(self, context: ApplicationContext) -> None:
         self.context = context
 
@@ -246,6 +255,92 @@ class ProjectController:
         self.context.signals.project_changed.emit(self.state)
         return region
 
+    def create_interface(self, region_id: str, *, name: str | None = None) -> InterfaceTrace:
+        region = self.get_region(region_id)
+        if region is None:
+            raise ValueError("未找到区域。")
+        interface_name = self._next_interface_name(region, preferred=name)
+        interface = InterfaceTrace(
+            interface_id=uuid.uuid4().hex,
+            name=interface_name,
+            color=self._INTERFACE_COLORS[len(region.interfaces) % len(self._INTERFACE_COLORS)],
+            visible=True,
+        )
+        region.interfaces.append(interface)
+        self.context.signals.project_changed.emit(self.state)
+        return interface
+
+    def rename_interface(self, region_id: str, interface_id: str, new_name: str) -> InterfaceTrace:
+        region = self.get_region(region_id)
+        interface = self.get_interface(region_id, interface_id)
+        if region is None or interface is None:
+            raise ValueError("未找到界面。")
+        name = new_name.strip()
+        if not name:
+            raise ValueError("界面名称不能为空。")
+        if any(item.interface_id != interface_id and item.name == name for item in region.interfaces):
+            raise ValueError("当前区域下已存在同名界面。")
+        interface.name = name
+        self.context.signals.project_changed.emit(self.state)
+        return interface
+
+    def delete_interface(self, region_id: str, interface_id: str) -> None:
+        region = self.get_region(region_id)
+        if region is None:
+            raise ValueError("未找到区域。")
+        remaining = [item for item in region.interfaces if item.interface_id != interface_id]
+        if len(remaining) == len(region.interfaces):
+            raise ValueError("未找到界面。")
+        region.interfaces = remaining
+        self.context.signals.project_changed.emit(self.state)
+
+    def get_interface(self, region_id: str, interface_id: str) -> InterfaceTrace | None:
+        region = self.get_region(region_id)
+        if region is None:
+            return None
+        return next((item for item in region.interfaces if item.interface_id == interface_id), None)
+
+    def set_interface_visible(self, region_id: str, interface_id: str, visible: bool) -> InterfaceTrace:
+        interface = self.get_interface(region_id, interface_id)
+        if interface is None:
+            raise ValueError("未找到界面。")
+        interface.visible = bool(visible)
+        self.context.signals.project_changed.emit(self.state)
+        return interface
+
+    def set_interface_point(
+        self,
+        region_id: str,
+        interface_id: str,
+        *,
+        line_index: int,
+        trace_index: int,
+        sample_index: int | None,
+    ) -> InterfaceTrace:
+        region = self.get_region(region_id)
+        interface = self.get_interface(region_id, interface_id)
+        if region is None or interface is None:
+            raise ValueError("未找到界面。")
+        if region.trace_count() <= 0 or region.line_count() <= 0:
+            raise ValueError("当前区域范围无效。")
+        line_idx = int(np.clip(line_index, 0, max(region.line_count() - 1, 0)))
+        trace_idx = int(np.clip(trace_index, 0, max(region.trace_count() - 1, 0)))
+        sample_value: float | None
+        if sample_index is None:
+            sample_value = None
+        else:
+            sample_value = float(np.clip(sample_index, 0, max(region.sample_count() - 1, 0)))
+        line_key = str(line_idx)
+        values = list(interface.samples_by_line.get(line_key, []))
+        if len(values) < region.trace_count():
+            values.extend([None] * (region.trace_count() - len(values)))
+        elif len(values) > region.trace_count():
+            values = values[: region.trace_count()]
+        values[trace_idx] = sample_value
+        interface.samples_by_line[line_key] = values
+        self.context.signals.project_changed.emit(self.state)
+        return interface
+
     def save_project(self) -> str:
         if not self.state.is_open or not self.state.root_path:
             raise ValueError("请先新建工程或打开工程。")
@@ -387,3 +482,17 @@ class ProjectController:
         self.context.display_state.show_axes = True
         self.context.signals.pipeline_changed.emit([])
         self.context.signals.pipeline_applied.emit([])
+
+    @staticmethod
+    def _next_interface_name(region: ProjectRegionState, *, preferred: str | None = None) -> str:
+        if preferred:
+            clean = preferred.strip()
+            if clean and all(item.name != clean for item in region.interfaces):
+                return clean
+        used = {item.name for item in region.interfaces}
+        index = 1
+        while True:
+            candidate = f"Interface{index}"
+            if candidate not in used:
+                return candidate
+            index += 1

@@ -342,6 +342,7 @@ class OverviewMapWidget(QtWidgets.QWidget):
         self._active_trace = 0
         self._active_image: QtGui.QImage | None = None
         self._layout_rects: list[tuple[str, QtCore.QRectF, dict[str, object]]] = []
+        self._hover_region_id = ""
         self.setMinimumHeight(240)
         self.setMouseTracking(True)
 
@@ -369,6 +370,7 @@ class OverviewMapWidget(QtWidgets.QWidget):
         self._active_trace = int(active_trace)
         self._active_image = active_image
         self._layout_rects = []
+        self._hover_region_id = ""
         self.update()
 
     def paintEvent(self, _event: QtGui.QPaintEvent) -> None:
@@ -379,6 +381,9 @@ class OverviewMapWidget(QtWidgets.QWidget):
             return
 
         canvas = self.rect().adjusted(18, 18, -18, -18)
+        summary_rect = QtCore.QRectF(canvas.left(), canvas.top(), canvas.width(), 20.0)
+        self._draw_summary(painter, summary_rect)
+        canvas = canvas.adjusted(0, 24, 0, 0)
         rects = self._compute_layout(canvas)
         self._layout_rects = rects
         file_lanes: dict[str, tuple[QtCore.QRectF, dict[str, object]]] = {}
@@ -399,6 +404,13 @@ class OverviewMapWidget(QtWidgets.QWidget):
             label_rect = QtCore.QRectF(canvas.left(), lane_rect.top() - 18.0, 180.0, 16.0)
             painter.setPen(QtGui.QColor("#4f6478"))
             painter.drawText(label_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, str(file_item.get("file_name", "")))
+            stats_rect = QtCore.QRectF(lane_rect.right() + 8.0, lane_rect.top(), 94.0, lane_rect.height())
+            painter.setPen(QtGui.QColor("#6a7887"))
+            painter.drawText(
+                stats_rect,
+                QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
+                f"{int(file_item.get('processed_count', 0))}/{int(file_item.get('region_count', 0))}",
+            )
             painter.setPen(QtGui.QPen(QtGui.QColor("#c7d0da"), 1.0))
             painter.setBrush(QtGui.QColor("#edf2f7") if active_file else QtGui.QColor("#f5f7fa"))
             painter.drawRoundedRect(lane_rect, 9, 9)
@@ -421,6 +433,8 @@ class OverviewMapWidget(QtWidgets.QWidget):
             else:
                 painter.setBrush(QtGui.QColor(198, 206, 214, 90))
             border = QtGui.QColor("#1d8f63") if active else QtGui.QColor("#6d7782")
+            if region_id == self._hover_region_id and not active:
+                border = QtGui.QColor("#40586e")
             painter.setPen(QtGui.QPen(border, 2.0 if active else 1.0))
             painter.setBrush(QtCore.Qt.NoBrush)
             painter.drawRoundedRect(rect, 10, 10)
@@ -428,6 +442,17 @@ class OverviewMapWidget(QtWidgets.QWidget):
                 painter.fillRect(rect.adjusted(1, 1, -1, -1), QtGui.QColor(170, 208, 180, 105))
             elif not bool(item.get("has_result", False)):
                 painter.fillRect(rect.adjusted(1, 1, -1, -1), QtGui.QColor(210, 216, 224, 75))
+            interface_count = int(item.get("interface_count", 0))
+            if interface_count > 0:
+                badge_rect = QtCore.QRectF(rect.right() - 30.0, rect.top() + 4.0, 24.0, 14.0)
+                painter.setPen(QtCore.Qt.NoPen)
+                painter.setBrush(QtGui.QColor("#ffedd7"))
+                painter.drawRoundedRect(badge_rect, 7, 7)
+                painter.setPen(QtGui.QColor("#9b5a08"))
+                badge_font = QtGui.QFont("Microsoft YaHei UI", 7)
+                badge_font.setBold(True)
+                painter.setFont(badge_font)
+                painter.drawText(badge_rect, QtCore.Qt.AlignCenter, f"I{interface_count}")
             if active:
                 painter.setPen(QtGui.QPen(QtGui.QColor("#0d63ff"), 1.2))
                 painter.drawRect(rect.adjusted(0.5, 0.5, -0.5, -0.5))
@@ -436,6 +461,17 @@ class OverviewMapWidget(QtWidgets.QWidget):
                 painter.setPen(QtGui.QColor("#24313f"))
                 painter.drawText(text_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop, str(item.get("region_name", "")))
             painter.restore()
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() != QtCore.Qt.LeftButton:
+            super().mousePressEvent(event)
+            return
+        region = self._region_at(event.position())
+        if region is None:
+            super().mousePressEvent(event)
+            return
+        self.region_activated.emit(region[0])
+        event.accept()
 
     def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:
         region = self._region_at(event.position())
@@ -452,6 +488,36 @@ class OverviewMapWidget(QtWidgets.QWidget):
         self.point_selected.emit(region_id, trace_index, 0)
         event.accept()
 
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
+        region = self._region_at(event.position())
+        hover_region_id = region[0] if region is not None else ""
+        if hover_region_id != self._hover_region_id:
+            self._hover_region_id = hover_region_id
+            self.update()
+        if region is None:
+            self.unsetCursor()
+            QtWidgets.QToolTip.hideText()
+            super().mouseMoveEvent(event)
+            return
+        _, _, item = region
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        status = "已处理" if bool(item.get("has_result", False)) else "未处理"
+        interface_count = int(item.get("interface_count", 0))
+        tooltip = (
+            f"{item.get('file_name', '')}\n"
+            f"{item.get('region_name', '')} | 道 {int(item.get('trace_start', 0)) + 1}-{int(item.get('trace_stop', 0))}\n"
+            f"{status} | 界面 {interface_count}"
+        )
+        QtWidgets.QToolTip.showText(event.globalPosition().toPoint(), tooltip, self)
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event: QtCore.QEvent) -> None:
+        self._hover_region_id = ""
+        self.unsetCursor()
+        QtWidgets.QToolTip.hideText()
+        self.update()
+        super().leaveEvent(event)
+
     def _region_at(self, point: QtCore.QPointF) -> tuple[str, QtCore.QRectF, dict[str, object]] | None:
         for item in self._layout_rects:
             if item[1].contains(point):
@@ -462,11 +528,11 @@ class OverviewMapWidget(QtWidgets.QWidget):
         lane_gap = 40.0
         lane_height = 38.0
         label_width = 150.0
+        stats_width = 100.0
         file_count = max(len(self._files), 1)
         available_height = max(canvas.height() - (file_count - 1) * lane_gap, lane_height * file_count)
         lane_height = max(32.0, min(lane_height, available_height / file_count))
-        max_trace_count = max(max(float(item.get("trace_count", 1)), 1.0) for item in self._files)
-        lane_width = max(canvas.width() - label_width - 10.0, 180.0)
+        lane_width = max(canvas.width() - label_width - stats_width - 10.0, 180.0)
         rects: list[tuple[str, QtCore.QRectF, dict[str, object]]] = []
         y = float(canvas.top())
         for file_item in self._files:
@@ -486,9 +552,14 @@ class OverviewMapWidget(QtWidgets.QWidget):
                 item = {
                     "file_id": file_id,
                     "file_name": file_item.get("file_name", ""),
+                    "region_count": int(file_item.get("region_count", 0)),
+                    "processed_count": int(file_item.get("processed_count", 0)),
                     "region_id": region.get("region_id", ""),
                     "region_name": region.get("region_name", ""),
                     "has_result": bool(region.get("has_result", False)),
+                    "interface_count": int(region.get("interface_count", 0)),
+                    "trace_start": int(region.get("trace_start", 0)),
+                    "trace_stop": int(region.get("trace_stop", 0)),
                     "file_trace_count": int(trace_count),
                     "lane_left": lane_left,
                     "lane_top": lane_top,
@@ -498,6 +569,32 @@ class OverviewMapWidget(QtWidgets.QWidget):
                 rects.append((str(region.get("region_id", "")), rect, item))
             y += lane_height + lane_gap
         return rects
+
+    def _draw_summary(self, painter: QtGui.QPainter, rect: QtCore.QRectF) -> None:
+        file_count = len(self._files)
+        region_count = sum(len(item.get("regions", [])) for item in self._files)
+        processed_count = sum(
+            1
+            for file_item in self._files
+            for region in file_item.get("regions", [])
+            if bool(region.get("has_result", False))
+        )
+        interface_count = sum(
+            int(region.get("interface_count", 0))
+            for file_item in self._files
+            for region in file_item.get("regions", [])
+        )
+        painter.save()
+        painter.setPen(QtGui.QColor("#5a6b7e"))
+        summary_font = QtGui.QFont("Microsoft YaHei UI", 8)
+        summary_font.setBold(True)
+        painter.setFont(summary_font)
+        painter.drawText(
+            rect,
+            QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter,
+            f"文件 {file_count}  区域 {region_count}  已处理 {processed_count}  界面 {interface_count}",
+        )
+        painter.restore()
 
 
 class RasterViewportWidget(QtWidgets.QWidget):
@@ -537,6 +634,7 @@ class RasterViewportWidget(QtWidgets.QWidget):
         self._viewport_limit_y = (0.0, 1.0)
         self._vline: tuple[float, QtGui.QColor] | None = None
         self._hline: tuple[float, QtGui.QColor] | None = None
+        self._overlays: list[dict[str, object]] = []
         self._show_axes = True
         self._drag_state: dict[str, object] | None = None
         self._guide_grab_mode: str | None = None
@@ -547,6 +645,7 @@ class RasterViewportWidget(QtWidgets.QWidget):
         self._image = None
         self._vline = None
         self._hline = None
+        self._overlays = []
         self.update()
 
     def set_content(
@@ -576,6 +675,10 @@ class RasterViewportWidget(QtWidgets.QWidget):
             self._viewport_y = self._clamp_y_range(self._viewport_y, self._viewport_limit_y)
         self._vline = self._make_line(vertical_line)
         self._hline = self._make_line(horizontal_line)
+        self.update()
+
+    def set_overlays(self, overlays: list[dict[str, object]] | None) -> None:
+        self._overlays = list(overlays or [])
         self.update()
 
     def set_overlay_lines(
@@ -608,6 +711,7 @@ class RasterViewportWidget(QtWidgets.QWidget):
         self._draw_axes(painter, plot_rect)
         if self._image is not None and not self._image.isNull():
             self._draw_image_region(painter, plot_rect)
+        self._draw_overlays(painter, plot_rect)
         self._draw_crosshair(painter, plot_rect)
         self._draw_border(painter, plot_rect)
 
@@ -806,6 +910,67 @@ class RasterViewportWidget(QtWidgets.QWidget):
                 py = plot_rect.top() + (y - self._viewport_y[0]) / max(self._viewport_y[1] - self._viewport_y[0], 1e-9) * plot_rect.height()
                 painter.setPen(QtGui.QPen(color, 1.0))
                 painter.drawLine(QtCore.QPointF(plot_rect.left(), py), QtCore.QPointF(plot_rect.right(), py))
+        painter.restore()
+
+    def _draw_overlays(self, painter: QtGui.QPainter, plot_rect: QtCore.QRectF) -> None:
+        if not self._overlays:
+            return
+        painter.save()
+        painter.setClipRect(plot_rect)
+        for overlay in self._overlays:
+            color = QtGui.QColor(str(overlay.get("color", "#ff8c42")))
+            width = float(overlay.get("width", 2.0))
+            pen = QtGui.QPen(color, width)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            segments = overlay.get("segments", [])
+            if not isinstance(segments, list):
+                segments = []
+            for segment in segments:
+                if not isinstance(segment, list) or len(segment) < 2:
+                    continue
+                polyline = []
+                for point in segment:
+                    if not isinstance(point, (tuple, list)) or len(point) < 2:
+                        continue
+                    data_x = float(point[0])
+                    data_y = float(point[1])
+                    if not np.isfinite(data_x) or not np.isfinite(data_y):
+                        continue
+                    px = plot_rect.left() + (data_x - self._viewport_x[0]) / max(self._viewport_x[1] - self._viewport_x[0], 1e-9) * plot_rect.width()
+                    py = plot_rect.top() + (data_y - self._viewport_y[0]) / max(self._viewport_y[1] - self._viewport_y[0], 1e-9) * plot_rect.height()
+                    polyline.append(QtCore.QPointF(px, py))
+                if len(polyline) >= 2:
+                    painter.drawPolyline(polyline)
+            point_markers = overlay.get("points", [])
+            if isinstance(point_markers, list):
+                painter.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 0.8))
+                painter.setBrush(color)
+                for point in point_markers:
+                    if not isinstance(point, (tuple, list)) or len(point) < 2:
+                        continue
+                    data_x = float(point[0])
+                    data_y = float(point[1])
+                    if not np.isfinite(data_x) or not np.isfinite(data_y):
+                        continue
+                    px = plot_rect.left() + (data_x - self._viewport_x[0]) / max(self._viewport_x[1] - self._viewport_x[0], 1e-9) * plot_rect.width()
+                    py = plot_rect.top() + (data_y - self._viewport_y[0]) / max(self._viewport_y[1] - self._viewport_y[0], 1e-9) * plot_rect.height()
+                    painter.drawEllipse(QtCore.QPointF(px, py), 2.4, 2.4)
+            marker = overlay.get("marker")
+            if isinstance(marker, (tuple, list)) and len(marker) >= 2:
+                mx = float(marker[0])
+                my = float(marker[1])
+                if (
+                    np.isfinite(mx)
+                    and np.isfinite(my)
+                    and self._viewport_x[0] <= mx <= self._viewport_x[1]
+                    and self._viewport_y[0] <= my <= self._viewport_y[1]
+                ):
+                    px = plot_rect.left() + (mx - self._viewport_x[0]) / max(self._viewport_x[1] - self._viewport_x[0], 1e-9) * plot_rect.width()
+                    py = plot_rect.top() + (my - self._viewport_y[0]) / max(self._viewport_y[1] - self._viewport_y[0], 1e-9) * plot_rect.height()
+                    painter.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 1.0))
+                    painter.setBrush(color)
+                    painter.drawEllipse(QtCore.QPointF(px, py), 4.4, 4.4)
         painter.restore()
 
     def _draw_border(self, painter: QtGui.QPainter, plot_rect: QtCore.QRectF) -> None:
@@ -1304,6 +1469,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._selected_step_index = -1
         self.pipeline_dialog: QtWidgets.QDialog | None = None
         self._settings_html_cache: str | None = None
+        self._active_interface_by_region: dict[str, str] = {}
+        self._interface_pick_mode = False
 
         self.action_new_project: QtGui.QAction | None = None
         self.action_open_project: QtGui.QAction | None = None
@@ -1371,6 +1538,26 @@ class MainWindow(QtWidgets.QMainWindow):
             QPushButton#primaryAction:pressed {
                 background: #263241;
                 border-color: #202a36;
+            }
+            QToolButton#interfaceActionButton {
+                padding: 3px 10px;
+                min-height: 18px;
+                border-radius: 9px;
+                font-size: 9pt;
+            }
+            QToolButton#interfaceStateButton {
+                padding: 3px 10px;
+                min-height: 18px;
+                border-radius: 9px;
+                font-size: 9pt;
+                background: #f3f6f9;
+                border: 1px solid #c9d2dc;
+            }
+            QToolButton#interfaceStateButton:checked {
+                color: #ffffff;
+                border-color: #214667;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #5d7fa0, stop:1 #3e617f);
             }
             QPushButton#sectionAddButton {
                 min-width: 34px;
@@ -1603,6 +1790,58 @@ class MainWindow(QtWidgets.QMainWindow):
         explore_layout = QtWidgets.QVBoxLayout(explore_panel)
         explore_layout.setContentsMargins(14, 14, 14, 14)
         explore_layout.setSpacing(8)
+        interface_row = QtWidgets.QHBoxLayout()
+        interface_row.setContentsMargins(0, 0, 0, 0)
+        interface_row.setSpacing(8)
+        self.interface_combo = QtWidgets.QComboBox()
+        self.interface_combo.setMinimumWidth(170)
+        self.interface_combo.setMaximumWidth(230)
+        self.interface_combo.setFixedHeight(28)
+        self.interface_combo.currentIndexChanged.connect(self._on_interface_combo_changed)
+        interface_row.addWidget(self.interface_combo, stretch=1)
+        self.btn_interface_add = QtWidgets.QToolButton()
+        self.btn_interface_add.setText("新建")
+        self.btn_interface_add.setObjectName("interfaceActionButton")
+        self.btn_interface_add.clicked.connect(self._create_interface)
+        interface_row.addWidget(self.btn_interface_add)
+        self.btn_interface_rename = QtWidgets.QToolButton()
+        self.btn_interface_rename.setText("重命名")
+        self.btn_interface_rename.setObjectName("interfaceActionButton")
+        self.btn_interface_rename.clicked.connect(self._rename_interface)
+        interface_row.addWidget(self.btn_interface_rename)
+        self.btn_interface_delete = QtWidgets.QToolButton()
+        self.btn_interface_delete.setText("删除")
+        self.btn_interface_delete.setObjectName("interfaceActionButton")
+        self.btn_interface_delete.clicked.connect(self._delete_interface)
+        interface_row.addWidget(self.btn_interface_delete)
+        self.btn_interface_visible = QtWidgets.QToolButton()
+        self.btn_interface_visible.setCheckable(True)
+        self.btn_interface_visible.setText("显示中")
+        self.btn_interface_visible.setObjectName("interfaceStateButton")
+        self.btn_interface_visible.toggled.connect(self._toggle_interface_visible)
+        interface_row.addWidget(self.btn_interface_visible)
+        self.btn_interface_pick = QtWidgets.QToolButton()
+        self.btn_interface_pick.setCheckable(True)
+        self.btn_interface_pick.setText("拾取")
+        self.btn_interface_pick.setObjectName("interfaceStateButton")
+        self.btn_interface_pick.toggled.connect(self._toggle_interface_pick_mode)
+        interface_row.addWidget(self.btn_interface_pick)
+        self.btn_interface_clear_point = QtWidgets.QToolButton()
+        self.btn_interface_clear_point.setText("删点")
+        self.btn_interface_clear_point.setObjectName("interfaceActionButton")
+        self.btn_interface_clear_point.clicked.connect(self._clear_interface_point)
+        interface_row.addWidget(self.btn_interface_clear_point)
+        for button in (
+            self.btn_interface_add,
+            self.btn_interface_rename,
+            self.btn_interface_delete,
+            self.btn_interface_visible,
+            self.btn_interface_pick,
+            self.btn_interface_clear_point,
+        ):
+            button.setFixedHeight(26)
+        interface_row.addStretch(1)
+        explore_layout.addLayout(interface_row)
         top_row = QtWidgets.QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
         top_row.setSpacing(10)
@@ -1635,7 +1874,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.trace_view.setStyleSheet("background: #fafbfc; border: 1px solid #d0d7df; border-radius: 14px;")
         top_row.addWidget(self.trace_view, stretch=14)
-        explore_layout.addLayout(top_row, stretch=7)
+        explore_layout.addLayout(top_row, stretch=8)
 
         bottom_row = QtWidgets.QHBoxLayout()
         bottom_row.setContentsMargins(0, 0, 0, 0)
@@ -1655,20 +1894,22 @@ class MainWindow(QtWidgets.QMainWindow):
         bottom_right_panel = QtWidgets.QFrame()
         bottom_right_panel.setObjectName("sideCard")
         right_layout = QtWidgets.QVBoxLayout(bottom_right_panel)
-        right_layout.setContentsMargins(10, 10, 10, 10)
-        right_layout.setSpacing(6)
+        right_layout.setContentsMargins(8, 8, 8, 8)
+        right_layout.setSpacing(4)
         self.ax_s = None
 
         slider_group = QtWidgets.QGroupBox("联动切片")
         slider_layout = QtWidgets.QFormLayout(slider_group)
+        slider_layout.setContentsMargins(8, 8, 8, 8)
         slider_layout.setLabelAlignment(QtCore.Qt.AlignLeft)
-        slider_layout.setHorizontalSpacing(6)
-        slider_layout.setVerticalSpacing(4)
+        slider_layout.setHorizontalSpacing(5)
+        slider_layout.setVerticalSpacing(2)
         self.trace_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.trace_slider.valueChanged.connect(self._on_trace_slider_changed)
         self.trace_value_edit = QtWidgets.QLineEdit("0")
         self.trace_value_edit.setReadOnly(True)
         self.trace_value_edit.setMaximumWidth(86)
+        self.trace_value_edit.setFixedHeight(24)
         trace_row = QtWidgets.QHBoxLayout()
         trace_row.setSpacing(4)
         trace_row.addWidget(self.trace_slider, stretch=1)
@@ -1678,6 +1919,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.line_value_edit = QtWidgets.QLineEdit("0")
         self.line_value_edit.setReadOnly(True)
         self.line_value_edit.setMaximumWidth(86)
+        self.line_value_edit.setFixedHeight(24)
         line_row = QtWidgets.QHBoxLayout()
         line_row.setSpacing(4)
         line_row.addWidget(self.line_slider, stretch=1)
@@ -1687,6 +1929,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sample_value_edit = QtWidgets.QLineEdit("0")
         self.sample_value_edit.setReadOnly(True)
         self.sample_value_edit.setMaximumWidth(86)
+        self.sample_value_edit.setFixedHeight(24)
         sample_row = QtWidgets.QHBoxLayout()
         sample_row.setSpacing(4)
         sample_row.addWidget(self.sample_slider, stretch=1)
@@ -1695,24 +1938,27 @@ class MainWindow(QtWidgets.QMainWindow):
         slider_layout.addRow("Inline slice (Y)", line_row)
         slider_layout.addRow("Horizontal slice (Z)", sample_row)
         slider_group.setStyleSheet(
-            "QGroupBox { font-size: 11px; } "
-            "QLabel { font-size: 11px; } "
-            "QLineEdit { font-size: 11px; padding: 2px 4px; min-height: 18px; }"
+            "QGroupBox { font-size: 10px; } "
+            "QLabel { font-size: 10px; } "
+            "QLineEdit { font-size: 10px; padding: 1px 4px; min-height: 18px; }"
         )
         right_layout.addWidget(slider_group, stretch=1)
 
         info_group = QtWidgets.QGroupBox("当前设置")
         info_layout = QtWidgets.QVBoxLayout(info_group)
-        info_layout.setContentsMargins(8, 10, 8, 8)
+        info_layout.setContentsMargins(6, 8, 6, 6)
         self.trace_info = QtWidgets.QTextBrowser()
         self.trace_info.setOpenLinks(False)
         self.trace_info.setReadOnly(True)
-        self.trace_info.setStyleSheet("padding: 8px; background: #fafbfc; border: 1px solid #d0d7df; border-radius: 12px;")
+        self.trace_info.setStyleSheet(
+            "padding: 4px; background: #fafbfc; border: 1px solid #d0d7df; "
+            "border-radius: 12px; font-size: 10px;"
+        )
         info_layout.addWidget(self.trace_info)
-        info_group.setStyleSheet("QGroupBox { font-size: 11px; } QTextBrowser { font-size: 11px; }")
+        info_group.setStyleSheet("QGroupBox { font-size: 10px; } QTextBrowser { font-size: 10px; }")
         right_layout.addWidget(info_group, stretch=1)
         bottom_row.addWidget(bottom_right_panel, stretch=28)
-        explore_layout.addLayout(bottom_row, stretch=3)
+        explore_layout.addLayout(bottom_row, stretch=2)
 
         self.view_tabs.addTab(explore_panel, "Explore")
         self.main_splitter.addWidget(self.view_tabs)
@@ -2365,7 +2611,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_project_title()
         self._refresh_file_menu()
         self._refresh_project_tree()
+        self._refresh_interface_controls()
         self._refresh_overview_scene()
+        self._refresh_interface_overlays()
         if self.app_controller.dataset is None:
             self.display_data = None
             self._pipeline_configured = False
@@ -2423,6 +2671,9 @@ class MainWindow(QtWidgets.QMainWindow):
         active_region_id = project_state.active_region_id
         active_file_id = project_state.active_file_id
         active_trace = int(self.app_controller.selection_state.trace_index)
+        active_region = self.app_controller.project_controller.get_active_region()
+        if active_region is not None:
+            active_trace += int(active_region.trace_start)
         active_image: QtGui.QImage | None = None
         if self.display_data is not None and self.display_data.cscan.size:
             cmap = self.app_controller.display_state.colormap + (
@@ -2444,13 +2695,17 @@ class MainWindow(QtWidgets.QMainWindow):
                         "trace_start": region.trace_start,
                         "trace_stop": region.trace_stop,
                         "has_result": has_result,
+                        "interface_count": len(region.interfaces),
                     }
                 )
+            processed_count = sum(1 for item in region_items if bool(item["has_result"]))
             files.append(
                 {
                     "file_id": file_item.file_id,
                     "file_name": file_item.name,
                     "trace_count": max(trace_count, 1),
+                    "region_count": len(region_items),
+                    "processed_count": processed_count,
                     "regions": region_items,
                 }
             )
@@ -2461,6 +2716,206 @@ class MainWindow(QtWidgets.QMainWindow):
             active_trace=active_trace,
             active_image=active_image,
         )
+
+    def _refresh_interface_controls(self) -> None:
+        region = self.app_controller.project_controller.get_active_region()
+        interfaces = list(region.interfaces) if region is not None else []
+        current_region_id = region.region_id if region is not None else ""
+        active_interface_id = self._active_interface_by_region.get(current_region_id, "")
+        if not any(item.interface_id == active_interface_id for item in interfaces):
+            active_interface_id = interfaces[0].interface_id if interfaces else ""
+        if current_region_id:
+            if active_interface_id:
+                self._active_interface_by_region[current_region_id] = active_interface_id
+            else:
+                self._active_interface_by_region.pop(current_region_id, None)
+        self.interface_combo.blockSignals(True)
+        self.interface_combo.clear()
+        for interface in interfaces:
+            self.interface_combo.addItem(interface.name, interface.interface_id)
+        if active_interface_id:
+            index = max(0, self.interface_combo.findData(active_interface_id))
+            self.interface_combo.setCurrentIndex(index)
+        self.interface_combo.blockSignals(False)
+        active_interface = next((item for item in interfaces if item.interface_id == active_interface_id), None)
+        has_interface = active_interface is not None
+        self.interface_combo.setEnabled(bool(region))
+        self.btn_interface_add.setEnabled(bool(region) and not self._is_busy)
+        self.btn_interface_rename.setEnabled(has_interface and not self._is_busy)
+        self.btn_interface_delete.setEnabled(has_interface and not self._is_busy)
+        self.btn_interface_clear_point.setEnabled(has_interface and self._has_processed_result() and not self._is_busy)
+        self.btn_interface_visible.blockSignals(True)
+        self.btn_interface_visible.setEnabled(has_interface and not self._is_busy)
+        self.btn_interface_visible.setChecked(bool(active_interface.visible) if active_interface is not None else False)
+        self.btn_interface_visible.setText("显示中" if active_interface is not None and active_interface.visible else "已隐藏")
+        self.btn_interface_visible.blockSignals(False)
+        self.btn_interface_pick.blockSignals(True)
+        self.btn_interface_pick.setEnabled(has_interface and self._has_processed_result() and not self._is_busy)
+        if not has_interface or not self._has_processed_result():
+            self._interface_pick_mode = False
+        self.btn_interface_pick.setChecked(self._interface_pick_mode)
+        self.btn_interface_pick.setText("拾取中" if self._interface_pick_mode else "拾取")
+        self.btn_interface_pick.blockSignals(False)
+
+    def _active_interface(self):
+        region = self.app_controller.project_controller.get_active_region()
+        if region is None:
+            return None
+        interface_id = self._active_interface_by_region.get(region.region_id, "")
+        if not interface_id and region.interfaces:
+            interface_id = region.interfaces[0].interface_id
+            self._active_interface_by_region[region.region_id] = interface_id
+        return next((item for item in region.interfaces if item.interface_id == interface_id), None)
+
+    def _on_interface_combo_changed(self, index: int) -> None:
+        region = self.app_controller.project_controller.get_active_region()
+        if region is None or index < 0:
+            self._refresh_interface_controls()
+            self._refresh_interface_overlays()
+            return
+        interface_id = str(self.interface_combo.itemData(index) or "")
+        if interface_id:
+            self._active_interface_by_region[region.region_id] = interface_id
+        self._refresh_interface_controls()
+        self._refresh_interface_overlays()
+
+    def _create_interface(self) -> None:
+        region = self.app_controller.project_controller.get_active_region()
+        if region is None:
+            return
+        name, ok = QtWidgets.QInputDialog.getText(self, "新建界面", "界面名称")
+        if not ok:
+            return
+        try:
+            interface_id = self.app_controller.create_region_interface(region.region_id, name=name.strip() or None)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "界面", str(exc))
+            return
+        self._active_interface_by_region[region.region_id] = interface_id
+        self._refresh_interface_controls()
+        self._refresh_interface_overlays()
+
+    def _rename_interface(self) -> None:
+        region = self.app_controller.project_controller.get_active_region()
+        interface = self._active_interface()
+        if region is None or interface is None:
+            return
+        name, ok = QtWidgets.QInputDialog.getText(self, "重命名界面", "界面名称", text=interface.name)
+        if not ok:
+            return
+        try:
+            self.app_controller.rename_region_interface(region.region_id, interface.interface_id, name)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "界面", str(exc))
+            return
+        self._refresh_interface_controls()
+        self._refresh_interface_overlays()
+
+    def _delete_interface(self) -> None:
+        region = self.app_controller.project_controller.get_active_region()
+        interface = self._active_interface()
+        if region is None or interface is None:
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "删除界面",
+            f"删除界面“{interface.name}”？",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+        try:
+            self.app_controller.delete_region_interface(region.region_id, interface.interface_id)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "界面", str(exc))
+            return
+        self._active_interface_by_region.pop(region.region_id, None)
+        self._refresh_interface_controls()
+        self._refresh_interface_overlays()
+
+    def _toggle_interface_visible(self, visible: bool) -> None:
+        region = self.app_controller.project_controller.get_active_region()
+        interface = self._active_interface()
+        if region is None or interface is None:
+            return
+        try:
+            self.app_controller.set_region_interface_visible(region.region_id, interface.interface_id, visible)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "界面", str(exc))
+            return
+        self.btn_interface_visible.setText("显示中" if visible else "已隐藏")
+        self._refresh_interface_overlays()
+
+    def _toggle_interface_pick_mode(self, checked: bool) -> None:
+        self._interface_pick_mode = bool(checked)
+        self.btn_interface_pick.setText("拾取中" if self._interface_pick_mode else "拾取")
+
+    def _clear_interface_point(self) -> None:
+        region = self.app_controller.project_controller.get_active_region()
+        interface = self._active_interface()
+        if region is None or interface is None or self.display_data is None:
+            return
+        try:
+            self.app_controller.set_region_interface_point(
+                region.region_id,
+                interface.interface_id,
+                line_index=int(self.app_controller.selection_state.line_index),
+                trace_index=int(self.app_controller.selection_state.trace_index),
+                sample_index=None,
+            )
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "界面", str(exc))
+            return
+        self._refresh_interface_overlays()
+
+    def _build_bscan_interface_overlays(self, display: DisplayData | None) -> list[dict[str, object]]:
+        region = self.app_controller.project_controller.get_active_region()
+        if region is None or display is None or display.ascan_time_ns.size == 0:
+            return []
+        line_key = str(int(self.app_controller.selection_state.line_index))
+        overlays: list[dict[str, object]] = []
+        active_interface = self._active_interface()
+        current_trace = int(self.app_controller.selection_state.trace_index)
+        for interface in region.interfaces:
+            if not interface.visible:
+                continue
+            values = list(interface.samples_by_line.get(line_key, []))
+            if not values:
+                continue
+            segments: list[list[tuple[float, float]]] = []
+            current_segment: list[tuple[float, float]] = []
+            point_markers: list[tuple[float, float]] = []
+            for trace_idx, sample_value in enumerate(values):
+                if sample_value is None:
+                    if len(current_segment) >= 2:
+                        segments.append(current_segment)
+                    current_segment = []
+                    continue
+                sample_idx = int(np.clip(round(float(sample_value)), 0, display.ascan_time_ns.size - 1))
+                point = (float(trace_idx), float(display.ascan_time_ns[sample_idx]))
+                current_segment.append(point)
+                point_markers.append(point)
+            if len(current_segment) >= 2:
+                segments.append(current_segment)
+            marker = None
+            if 0 <= current_trace < len(values) and values[current_trace] is not None:
+                marker_sample = int(np.clip(round(float(values[current_trace])), 0, display.ascan_time_ns.size - 1))
+                marker = (float(current_trace), float(display.ascan_time_ns[marker_sample]))
+            overlays.append(
+                {
+                    "segments": segments,
+                    "points": point_markers,
+                    "color": interface.color,
+                    "width": 2.4 if active_interface is not None and interface.interface_id == active_interface.interface_id else 1.8,
+                    "marker": marker,
+                }
+            )
+        return overlays
+
+    def _refresh_interface_overlays(self) -> None:
+        overlays = self._build_bscan_interface_overlays(self.display_data)
+        self.bscan_view.set_overlays(overlays)
 
     def _activate_tree_item(self, item: QtWidgets.QTreeWidgetItem | None) -> None:
         if item is None:
@@ -2612,7 +3067,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.app_controller.select_project_region(region_id)
             if self.app_controller.project_state.active_region_id != region_id:
                 return
-        self.app_controller.select_trace(int(trace_index))
+        region = self.app_controller.project_controller.get_region(region_id)
+        if region is None:
+            return
+        local_trace = int(np.clip(trace_index - int(region.trace_start), 0, max(region.trace_count() - 1, 0)))
+        self.app_controller.select_trace(local_trace)
         self.app_controller.select_line(int(line_index))
 
     def _on_dataset_loaded(self, dataset) -> None:
@@ -2628,6 +3087,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._show_waiting_plots()
         self._refresh_project_tree()
         self._refresh_overview_scene()
+        self._refresh_interface_controls()
         if restoring_project:
             self._set_stage_status("工程恢复中")
             QtCore.QTimer.singleShot(0, self._complete_project_restore_ui)
@@ -2677,6 +3137,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_step_details()
     def _refresh_display(self, display: DisplayData) -> None:
         self.display_data = display
+        self._refresh_interface_controls()
         state = self.app_controller.display_state
         cmap = state.colormap + ("_r" if state.invert and not state.colormap.endswith("_r") else "")
         trace_count = int(display.meta.get("trace_count", display.bscan.shape[1] if display.bscan.ndim == 2 else 0))
@@ -2709,6 +3170,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sync_slice_controls(display)
         self.status_selection.setText(self._selection_text(display))
         self._refresh_overview_scene()
+        self._refresh_interface_overlays()
 
     def _update_bscan_view(
         self,
@@ -2883,12 +3345,12 @@ class MainWindow(QtWidgets.QMainWindow):
             safe_value = value or "&nbsp;"
             cells.append(
                 "<tr>"
-                f"<td style='padding:7px 10px; color:#5b6e84; font-weight:600; width:126px; border-bottom:1px solid #e6edf5;'>{label}</td>"
-                f"<td style='padding:7px 10px; color:#1f2f42; border-bottom:1px solid #e6edf5;'>{safe_value}</td>"
+                f"<td style='padding:4px 7px; color:#5b6e84; font-weight:600; width:112px; border-bottom:1px solid #e6edf5;'>{label}</td>"
+                f"<td style='padding:4px 7px; color:#1f2f42; border-bottom:1px solid #e6edf5;'>{safe_value}</td>"
                 "</tr>"
             )
         return (
-            "<html><body style='font-family:\"Microsoft YaHei UI\"; font-size:10pt; background:#fdfefe; color:#2a3744; margin:0;'>"
+            "<html><body style='font-family:\"Microsoft YaHei UI\"; font-size:8pt; line-height:1.15; background:#fdfefe; color:#2a3744; margin:0;'>"
             "<table cellspacing='0' cellpadding='0' style='width:100%; border-collapse:collapse;'>"
             + "".join(cells)
             + "</table></body></html>"
@@ -2917,6 +3379,7 @@ class MainWindow(QtWidgets.QMainWindow):
             slider.blockSignals(False)
             edit.setText("0")
         self._has_custom_viewport = False
+        self._refresh_interface_controls()
         self._refresh_overview_scene()
 
     def _set_trace_info_html(self, html: str) -> None:
@@ -3158,6 +3621,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         key = str(view_key)
         if key == "bscan":
+            if self._interface_pick_mode:
+                self._capture_interface_point(float(data_x), float(data_y))
+                return
             self.app_controller.select_from_bscan(int(round(data_x)), float(data_y))
             return
         if key == "width":
@@ -3180,6 +3646,27 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             sample_index = int(np.argmin(np.abs(self.display_data.ascan_time_ns - float(data_y))))
             self.app_controller.select_sample(sample_index)
+
+    def _capture_interface_point(self, trace_value: float, time_ns: float) -> None:
+        region = self.app_controller.project_controller.get_active_region()
+        interface = self._active_interface()
+        if region is None or interface is None or self.display_data is None or self.display_data.ascan_time_ns.size == 0:
+            return
+        trace_index = int(np.clip(round(trace_value), 0, max(region.trace_count() - 1, 0)))
+        sample_index = int(np.argmin(np.abs(self.display_data.ascan_time_ns - float(time_ns))))
+        try:
+            self.app_controller.set_region_interface_point(
+                region.region_id,
+                interface.interface_id,
+                line_index=int(self.app_controller.selection_state.line_index),
+                trace_index=trace_index,
+                sample_index=sample_index,
+            )
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "界面", str(exc))
+            return
+        self.app_controller.select_from_bscan(trace_index, float(self.display_data.ascan_time_ns[sample_index]))
+        self._refresh_interface_overlays()
 
     def _open_help_dir(self) -> None:
         target = self.app_controller.project_state.root_path or str(Path.cwd())
