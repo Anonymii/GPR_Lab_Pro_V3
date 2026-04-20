@@ -43,7 +43,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="GPR_Lab_Pro_Pyside_V2",
+    name="GPR_Lab_Pro_V3",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -58,5 +58,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="GPR_Lab_Pro_Pyside_V2",
+    name="GPR_Lab_Pro_V3",
 )

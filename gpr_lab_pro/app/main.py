@@ -15,7 +15,7 @@ def _runtime_root() -> Path:
 def _write_startup_error(message: str) -> Path | None:
     candidates = [
         _runtime_root(),
-        Path(os.environ.get("TEMP", ".")) / "GPR_V11_PySide",
+        Path(os.environ.get("TEMP", ".")) / "GPR_Lab_Pro_V3",
     ]
     for base in candidates:
         try:
@@ -28,11 +28,29 @@ def _write_startup_error(message: str) -> Path | None:
     return None
 
 
+def _configure_qt_runtime() -> None:
+    if getattr(sys, "frozen", False):
+        return
+    try:
+        import PySide6
+    except Exception:
+        return
+
+    pyside_root = Path(PySide6.__file__).resolve().parent
+    plugins_dir = pyside_root / "plugins"
+    platforms_dir = plugins_dir / "platforms"
+    if plugins_dir.exists():
+        os.environ["QT_PLUGIN_PATH"] = str(plugins_dir)
+    if platforms_dir.exists():
+        os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = str(platforms_dir)
+    os.environ.setdefault("QT_QPA_PLATFORM", "windows")
+
+
 def _show_startup_error(message: str) -> None:
     try:
         import ctypes
 
-        ctypes.windll.user32.MessageBoxW(None, message, "GPR V11 启动失败", 0x10)
+        ctypes.windll.user32.MessageBoxW(None, message, "GPR Lab Pro V3 启动失败", 0x10)
     except Exception:
         pass
 
@@ -40,9 +58,10 @@ def _show_startup_error(message: str) -> None:
 def main() -> None:
     try:
         if "MPLCONFIGDIR" not in os.environ:
-            mpl_cache_dir = Path(os.environ.get("TEMP", ".")) / "GPR_V11_PySide" / "mplconfig"
+            mpl_cache_dir = Path(os.environ.get("TEMP", ".")) / "GPR_Lab_Pro_V3" / "mplconfig"
             mpl_cache_dir.mkdir(parents=True, exist_ok=True)
             os.environ["MPLCONFIGDIR"] = str(mpl_cache_dir)
+        _configure_qt_runtime()
 
         from gpr_lab_pro.application import GPRApplication
         from gpr_lab_pro.infrastructure.logging import configure_logging
