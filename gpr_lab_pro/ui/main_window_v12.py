@@ -336,37 +336,37 @@ class OverviewMapWidget(QtWidgets.QWidget):
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
-        self._regions: list[dict[str, object]] = []
+        self._files: list[dict[str, object]] = []
         self._active_region_id = ""
+        self._active_file_id = ""
         self._active_trace = 0
-        self._active_line = 0
         self._active_image: QtGui.QImage | None = None
         self._layout_rects: list[tuple[str, QtCore.QRectF, dict[str, object]]] = []
         self.setMinimumHeight(240)
         self.setMouseTracking(True)
 
     def clear_scene(self) -> None:
-        self._regions = []
+        self._files = []
         self._active_region_id = ""
+        self._active_file_id = ""
         self._active_trace = 0
-        self._active_line = 0
         self._active_image = None
         self._layout_rects = []
         self.update()
 
     def set_scene(
         self,
-        regions: list[dict[str, object]],
+        files: list[dict[str, object]],
         *,
         active_region_id: str,
+        active_file_id: str,
         active_trace: int = 0,
-        active_line: int = 0,
         active_image: QtGui.QImage | None = None,
     ) -> None:
-        self._regions = list(regions)
+        self._files = list(files)
         self._active_region_id = active_region_id
+        self._active_file_id = active_file_id
         self._active_trace = int(active_trace)
-        self._active_line = int(active_line)
         self._active_image = active_image
         self._layout_rects = []
         self.update()
@@ -375,36 +375,66 @@ class OverviewMapWidget(QtWidgets.QWidget):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
         painter.fillRect(self.rect(), QtGui.QColor("#ffffff"))
-        if not self._regions:
+        if not self._files:
             return
 
-        canvas = self.rect().adjusted(14, 14, -14, -14)
+        canvas = self.rect().adjusted(18, 18, -18, -18)
         rects = self._compute_layout(canvas)
         self._layout_rects = rects
+        file_lanes: dict[str, tuple[QtCore.QRectF, dict[str, object]]] = {}
+        for region_id, rect, item in rects:
+            file_lanes[str(item.get("file_id", ""))] = (
+                QtCore.QRectF(
+                    float(item.get("lane_left", rect.left())),
+                    float(item.get("lane_top", rect.top())),
+                    float(item.get("lane_width", rect.width())),
+                    float(item.get("lane_height", rect.height())),
+                ),
+                item,
+            )
+
+        for file_id, (lane_rect, file_item) in file_lanes.items():
+            active_file = file_id == self._active_file_id
+            painter.save()
+            label_rect = QtCore.QRectF(canvas.left(), lane_rect.top() - 18.0, 180.0, 16.0)
+            painter.setPen(QtGui.QColor("#4f6478"))
+            painter.drawText(label_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, str(file_item.get("file_name", "")))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#c7d0da"), 1.0))
+            painter.setBrush(QtGui.QColor("#edf2f7") if active_file else QtGui.QColor("#f5f7fa"))
+            painter.drawRoundedRect(lane_rect, 9, 9)
+            if active_file:
+                total_trace_count = max(int(file_item.get("trace_count", 1)), 1)
+                cx = lane_rect.left() + np.clip(self._active_trace / max(total_trace_count - 1, 1), 0.0, 1.0) * lane_rect.width()
+                painter.setPen(QtGui.QPen(QtGui.QColor("#0d63ff"), 1.2))
+                painter.drawLine(QtCore.QPointF(cx, lane_rect.top()), QtCore.QPointF(cx, lane_rect.bottom()))
+            painter.restore()
+
         for region_id, rect, item in rects:
             active = region_id == self._active_region_id
             painter.save()
-            painter.setPen(QtGui.QPen(QtGui.QColor("#c7d0da"), 1.0))
-            painter.setBrush(QtGui.QColor("#eef2f5"))
-            painter.drawRoundedRect(rect, 10, 10)
             if active and self._active_image is not None and not self._active_image.isNull():
                 painter.setClipRect(rect.adjusted(1, 1, -1, -1))
                 painter.drawImage(rect, self._active_image)
                 painter.setClipping(False)
+            elif bool(item.get("has_result", False)):
+                painter.setBrush(QtGui.QColor(170, 208, 180, 120))
+            else:
+                painter.setBrush(QtGui.QColor(198, 206, 214, 90))
             border = QtGui.QColor("#1d8f63") if active else QtGui.QColor("#6d7782")
             painter.setPen(QtGui.QPen(border, 2.0 if active else 1.0))
             painter.setBrush(QtCore.Qt.NoBrush)
             painter.drawRoundedRect(rect, 10, 10)
+            if bool(item.get("has_result", False)) and not active:
+                painter.fillRect(rect.adjusted(1, 1, -1, -1), QtGui.QColor(170, 208, 180, 105))
+            elif not bool(item.get("has_result", False)):
+                painter.fillRect(rect.adjusted(1, 1, -1, -1), QtGui.QColor(210, 216, 224, 75))
             if active:
-                trace_count = max(int(item.get("trace_count", 1)), 1)
-                line_count = max(int(item.get("line_count", 1)), 1)
-                cx = rect.left() + np.clip(self._active_trace / max(trace_count - 1, 1), 0.0, 1.0) * rect.width()
-                cy = rect.top() + np.clip(self._active_line / max(line_count - 1, 1), 0.0, 1.0) * rect.height()
                 painter.setPen(QtGui.QPen(QtGui.QColor("#0d63ff"), 1.2))
-                painter.drawLine(QtCore.QPointF(cx, rect.top()), QtCore.QPointF(cx, rect.bottom()))
-                painter.drawLine(QtCore.QPointF(rect.left(), cy), QtCore.QPointF(rect.right(), cy))
-                painter.setBrush(QtGui.QColor("#0d63ff"))
-                painter.drawEllipse(QtCore.QPointF(cx, cy), 4.0, 4.0)
+                painter.drawRect(rect.adjusted(0.5, 0.5, -0.5, -0.5))
+            if rect.width() >= 72:
+                text_rect = rect.adjusted(6, 2, -6, -2)
+                painter.setPen(QtGui.QColor("#24313f"))
+                painter.drawText(text_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop, str(item.get("region_name", "")))
             painter.restore()
 
     def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:
@@ -414,13 +444,12 @@ class OverviewMapWidget(QtWidgets.QWidget):
             return
         region_id, rect, item = region
         self.region_activated.emit(region_id)
-        trace_count = max(int(item.get("trace_count", 1)), 1)
-        line_count = max(int(item.get("line_count", 1)), 1)
-        x_ratio = np.clip((event.position().x() - rect.left()) / max(rect.width(), 1e-9), 0.0, 1.0)
-        y_ratio = np.clip((event.position().y() - rect.top()) / max(rect.height(), 1e-9), 0.0, 1.0)
-        trace_index = int(round(x_ratio * max(trace_count - 1, 0)))
-        line_index = int(round(y_ratio * max(line_count - 1, 0)))
-        self.point_selected.emit(region_id, trace_index, line_index)
+        file_trace_count = max(int(item.get("file_trace_count", 1)), 1)
+        lane_left = float(item.get("lane_left", rect.left()))
+        lane_width = float(item.get("lane_width", rect.width()))
+        x_ratio = np.clip((event.position().x() - lane_left) / max(lane_width, 1e-9), 0.0, 1.0)
+        trace_index = int(round(x_ratio * max(file_trace_count - 1, 0)))
+        self.point_selected.emit(region_id, trace_index, 0)
         event.accept()
 
     def _region_at(self, point: QtCore.QPointF) -> tuple[str, QtCore.QRectF, dict[str, object]] | None:
@@ -430,24 +459,44 @@ class OverviewMapWidget(QtWidgets.QWidget):
         return None
 
     def _compute_layout(self, canvas: QtCore.QRect) -> list[tuple[str, QtCore.QRectF, dict[str, object]]]:
-        gap = 14.0
-        total_width_units = 0.0
-        max_height_units = 1.0
-        for item in self._regions:
-            total_width_units += max(float(item.get("trace_count", 1)), 1.0)
-            max_height_units = max(max_height_units, max(float(item.get("line_count", 1)), 1.0))
-        total_width_units += gap * max(len(self._regions) - 1, 0)
-        scale = min(canvas.width() / max(total_width_units, 1.0), canvas.height() / max(max_height_units, 1.0))
-        scale = max(scale, 1.0)
-        x = float(canvas.left())
-        y = float(canvas.top()) + (canvas.height() - max_height_units * scale) / 2.0
+        lane_gap = 40.0
+        lane_height = 38.0
+        label_width = 150.0
+        file_count = max(len(self._files), 1)
+        available_height = max(canvas.height() - (file_count - 1) * lane_gap, lane_height * file_count)
+        lane_height = max(32.0, min(lane_height, available_height / file_count))
+        max_trace_count = max(max(float(item.get("trace_count", 1)), 1.0) for item in self._files)
+        lane_width = max(canvas.width() - label_width - 10.0, 180.0)
         rects: list[tuple[str, QtCore.QRectF, dict[str, object]]] = []
-        for item in self._regions:
-            width = max(float(item.get("trace_count", 1)), 1.0) * scale
-            height = max(float(item.get("line_count", 1)), 1.0) * scale
-            rect = QtCore.QRectF(x, y, width, height)
-            rects.append((str(item.get("region_id", "")), rect, item))
-            x += width + gap
+        y = float(canvas.top())
+        for file_item in self._files:
+            file_id = str(file_item.get("file_id", ""))
+            trace_count = max(float(file_item.get("trace_count", 1)), 1.0)
+            lane_left = float(canvas.left()) + label_width
+            lane_top = y
+            lane_rect = QtCore.QRectF(lane_left, lane_top, lane_width, lane_height)
+            for region in file_item.get("regions", []):
+                start = float(region.get("trace_start", 0))
+                stop = float(region.get("trace_stop", start + 1))
+                x0 = lane_left + np.clip(start / max(trace_count, 1.0), 0.0, 1.0) * lane_width
+                x1 = lane_left + np.clip(stop / max(trace_count, 1.0), 0.0, 1.0) * lane_width
+                if x1 - x0 < 8.0:
+                    x1 = x0 + 8.0
+                rect = QtCore.QRectF(x0, lane_top, min(x1, lane_left + lane_width) - x0, lane_height)
+                item = {
+                    "file_id": file_id,
+                    "file_name": file_item.get("file_name", ""),
+                    "region_id": region.get("region_id", ""),
+                    "region_name": region.get("region_name", ""),
+                    "has_result": bool(region.get("has_result", False)),
+                    "file_trace_count": int(trace_count),
+                    "lane_left": lane_left,
+                    "lane_top": lane_top,
+                    "lane_width": lane_width,
+                    "lane_height": lane_height,
+                }
+                rects.append((str(region.get("region_id", "")), rect, item))
+            y += lane_height + lane_gap
         return rects
 
 
@@ -1960,6 +2009,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "提示", str(exc))
             return
         self.statusBar().showMessage(f"工程已保存到 {project_file}", 4000)
+        QtWidgets.QMessageBox.information(self, "保存工程", f"工程已保存。\n\n{project_file}")
 
     def _load_data(self) -> None:
         if not self.app_controller.project_state.is_open:
@@ -2369,10 +2419,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if not project_state.files:
             self.overview_map.clear_scene()
             return
-        regions: list[dict[str, object]] = []
+        files: list[dict[str, object]] = []
         active_region_id = project_state.active_region_id
+        active_file_id = project_state.active_file_id
         active_trace = int(self.app_controller.selection_state.trace_index)
-        active_line = int(self.app_controller.selection_state.line_index)
         active_image: QtGui.QImage | None = None
         if self.display_data is not None and self.display_data.cscan.size:
             cmap = self.app_controller.display_state.colormap + (
@@ -2380,22 +2430,35 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             active_image = self._array_to_qimage(self.display_data.cscan, cmap, self.display_data.cscan_limits)
         for file_item in project_state.files:
+            dataset = self.app_controller.project_controller.get_dataset_for_file(file_item.file_id)
+            trace_count = dataset.trace_count if dataset is not None else max((region.trace_stop for region in file_item.regions), default=1)
+            region_items: list[dict[str, object]] = []
             for region in file_item.regions:
-                regions.append(
+                has_result = region.region_id in self.app_controller.context.region_runtime_results and bool(
+                    self.app_controller.context.region_runtime_results[region.region_id]
+                )
+                region_items.append(
                     {
-                        "file_id": file_item.file_id,
-                        "file_name": file_item.name,
                         "region_id": region.region_id,
                         "region_name": region.name,
-                        "trace_count": max(region.trace_count(), 1),
-                        "line_count": max(region.line_count(), 1),
+                        "trace_start": region.trace_start,
+                        "trace_stop": region.trace_stop,
+                        "has_result": has_result,
                     }
                 )
+            files.append(
+                {
+                    "file_id": file_item.file_id,
+                    "file_name": file_item.name,
+                    "trace_count": max(trace_count, 1),
+                    "regions": region_items,
+                }
+            )
         self.overview_map.set_scene(
-            regions,
+            files,
             active_region_id=active_region_id,
+            active_file_id=active_file_id,
             active_trace=active_trace,
-            active_line=active_line,
             active_image=active_image,
         )
 
