@@ -79,6 +79,76 @@ class ImportSummaryDialog(QtWidgets.QDialog):
         layout.addWidget(buttons)
 
 
+class RegionBoundsDialog(QtWidgets.QDialog):
+    def __init__(
+        self,
+        *,
+        region_name: str,
+        trace_count: int,
+        line_count: int,
+        sample_count: int,
+        current_bounds: dict[str, int],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"区域范围 - {region_name}")
+        self.resize(420, 240)
+        layout = QtWidgets.QFormLayout(self)
+        layout.setLabelAlignment(QtCore.Qt.AlignRight)
+
+        self.trace_start_spin = self._make_spinbox(1, max(trace_count, 1), current_bounds["trace_start"] + 1)
+        self.trace_stop_spin = self._make_spinbox(1, max(trace_count, 1), current_bounds["trace_stop"])
+        self.line_start_spin = self._make_spinbox(1, max(line_count, 1), current_bounds["line_start"] + 1)
+        self.line_stop_spin = self._make_spinbox(1, max(line_count, 1), current_bounds["line_stop"])
+        self.sample_start_spin = self._make_spinbox(1, max(sample_count, 1), current_bounds["sample_start"] + 1)
+        self.sample_stop_spin = self._make_spinbox(1, max(sample_count, 1), current_bounds["sample_stop"])
+
+        layout.addRow("起始道", self._pair_row(self.trace_start_spin, self.trace_stop_spin))
+        layout.addRow("起始测线", self._pair_row(self.line_start_spin, self.line_stop_spin))
+        layout.addRow("起始采样", self._pair_row(self.sample_start_spin, self.sample_stop_spin))
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    @staticmethod
+    def _make_spinbox(minimum: int, maximum: int, value: int) -> QtWidgets.QSpinBox:
+        spin = QtWidgets.QSpinBox()
+        spin.setRange(minimum, maximum)
+        spin.setValue(int(np.clip(value, minimum, maximum)))
+        spin.setAccelerated(True)
+        return spin
+
+    @staticmethod
+    def _pair_row(start_spin: QtWidgets.QSpinBox, stop_spin: QtWidgets.QSpinBox) -> QtWidgets.QWidget:
+        widget = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        end_label = QtWidgets.QLabel("到")
+        row.addWidget(start_spin, stretch=1)
+        row.addWidget(end_label)
+        row.addWidget(stop_spin, stretch=1)
+        return widget
+
+    def values(self) -> dict[str, int]:
+        trace_start = min(self.trace_start_spin.value(), self.trace_stop_spin.value()) - 1
+        trace_stop = max(self.trace_start_spin.value(), self.trace_stop_spin.value())
+        line_start = min(self.line_start_spin.value(), self.line_stop_spin.value()) - 1
+        line_stop = max(self.line_start_spin.value(), self.line_stop_spin.value())
+        sample_start = min(self.sample_start_spin.value(), self.sample_stop_spin.value()) - 1
+        sample_stop = max(self.sample_start_spin.value(), self.sample_stop_spin.value())
+        return {
+            "trace_start": trace_start,
+            "trace_stop": trace_stop,
+            "line_start": line_start,
+            "line_stop": line_stop,
+            "sample_start": sample_start,
+            "sample_stop": sample_stop,
+        }
+
+
 class OperationDialog(QtWidgets.QDialog):
     def __init__(self, spec: OperationSpec, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1455,8 +1525,10 @@ class MainWindow(QtWidgets.QMainWindow):
         project_layout.addLayout(project_header)
         self.project_tree = QtWidgets.QTreeWidget()
         self.project_tree.setHeaderHidden(True)
+        self.project_tree.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.project_tree.itemActivated.connect(self._on_project_tree_item_activated)
         self.project_tree.itemClicked.connect(self._on_project_tree_item_clicked)
+        self.project_tree.customContextMenuRequested.connect(self._show_project_tree_menu)
         project_layout.addWidget(self.project_tree, stretch=1)
         self.main_splitter.addWidget(self.project_panel)
         self._apply_soft_shadow(self.project_panel)
@@ -2347,6 +2419,126 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_project_tree_item_activated(self, item: QtWidgets.QTreeWidgetItem, _column: int) -> None:
         self._activate_tree_item(item)
+
+    def _show_project_tree_menu(self, pos: QtCore.QPoint) -> None:
+        if self._is_busy:
+            return
+        item = self.project_tree.itemAt(pos)
+        if item is None:
+            return
+        self.project_tree.setCurrentItem(item)
+        payload = item.data(0, QtCore.Qt.UserRole)
+        if not isinstance(payload, tuple) or len(payload) != 2:
+            return
+        kind, object_id = payload
+        menu = QtWidgets.QMenu(self)
+        if kind == "file":
+            create_action = menu.addAction("新建区域")
+            chosen = menu.exec(self.project_tree.viewport().mapToGlobal(pos))
+            if chosen is create_action:
+                base_region_id = None
+                active_file = self.app_controller.project_controller.get_active_file()
+                active_region = self.app_controller.project_controller.get_active_region()
+                if active_file is not None and active_region is not None and active_file.file_id == str(object_id):
+                    base_region_id = active_region.region_id
+                self._create_region(str(object_id), base_region_id=base_region_id)
+            return
+        if kind == "region":
+            create_action = menu.addAction("新建区域")
+            rename_action = menu.addAction("重命名")
+            bounds_action = menu.addAction("编辑范围")
+            delete_action = menu.addAction("删除区域")
+            chosen = menu.exec(self.project_tree.viewport().mapToGlobal(pos))
+            region_id = str(object_id)
+            if chosen is create_action:
+                file_item = self.app_controller.project_controller.find_file_by_region_id(region_id)
+                if file_item is not None:
+                    self._create_region(file_item.file_id, base_region_id=region_id)
+            elif chosen is rename_action:
+                self._rename_region(region_id)
+            elif chosen is bounds_action:
+                self._edit_region_bounds(region_id)
+            elif chosen is delete_action:
+                self._delete_region(region_id)
+
+    def _create_region(self, file_id: str, *, base_region_id: str | None = None) -> None:
+        default_name = ""
+        if base_region_id:
+            base_region = self.app_controller.project_controller.get_region(base_region_id)
+            if base_region is not None:
+                default_name = f"{base_region.name}_copy"
+        name, ok = QtWidgets.QInputDialog.getText(self, "新建区域", "区域名称", text=default_name)
+        if not ok:
+            return
+        try:
+            region_id = self.app_controller.create_project_region(file_id, name=name.strip() or None, base_region_id=base_region_id)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "区域", str(exc))
+            return
+        self._edit_region_bounds(region_id, allow_cancel=True)
+
+    def _rename_region(self, region_id: str) -> None:
+        region = self.app_controller.project_controller.get_region(region_id)
+        if region is None:
+            return
+        name, ok = QtWidgets.QInputDialog.getText(self, "重命名区域", "区域名称", text=region.name)
+        if not ok:
+            return
+        try:
+            self.app_controller.rename_project_region(region_id, name)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "区域", str(exc))
+
+    def _delete_region(self, region_id: str) -> None:
+        region = self.app_controller.project_controller.get_region(region_id)
+        if region is None:
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "删除区域",
+            f"删除区域“{region.name}”？",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+        try:
+            self.app_controller.delete_project_region(region_id)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "区域", str(exc))
+
+    def _edit_region_bounds(self, region_id: str, *, allow_cancel: bool = False) -> None:
+        region = self.app_controller.project_controller.get_region(region_id)
+        file_item = self.app_controller.project_controller.find_file_by_region_id(region_id)
+        if region is None or file_item is None:
+            return
+        dataset = self.app_controller.project_controller.get_dataset_for_file(file_item.file_id)
+        if dataset is None:
+            QtWidgets.QMessageBox.warning(self, "区域", "请先激活该文件并完成数据加载。")
+            return
+        dialog = RegionBoundsDialog(
+            region_name=region.name,
+            trace_count=dataset.trace_count,
+            line_count=dataset.line_count,
+            sample_count=dataset.sample_count,
+            current_bounds={
+                "trace_start": region.trace_start,
+                "trace_stop": region.trace_stop,
+                "line_start": region.line_start,
+                "line_stop": region.line_stop,
+                "sample_start": region.sample_start,
+                "sample_stop": region.sample_stop,
+            },
+            parent=self,
+        )
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            if not allow_cancel:
+                return
+            return
+        try:
+            self.app_controller.update_project_region_bounds(region_id, **dialog.values())
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "区域", str(exc))
 
     def _on_overview_region_activated(self, region_id: str) -> None:
         self.app_controller.select_project_region(region_id)

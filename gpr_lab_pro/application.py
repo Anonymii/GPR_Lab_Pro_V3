@@ -279,6 +279,43 @@ class GPRApplication(QtCore.QObject):
     def save_project(self) -> str:
         return self.project_controller.save_project()
 
+    def create_project_region(self, file_id: str, *, name: str | None = None, base_region_id: str | None = None) -> str:
+        self.project_controller.sync_active_region_runtime()
+        region = self.project_controller.create_region(file_id, name=name, base_region_id=base_region_id)
+        self.select_project_region(region.region_id)
+        return region.region_id
+
+    def rename_project_region(self, region_id: str, new_name: str) -> None:
+        self.project_controller.rename_region(region_id, new_name)
+
+    def delete_project_region(self, region_id: str) -> None:
+        self.project_controller.sync_active_region_runtime()
+        fallback_region_id = self.project_controller.delete_region(region_id)
+        self.select_project_region(fallback_region_id)
+
+    def update_project_region_bounds(
+        self,
+        region_id: str,
+        *,
+        trace_start: int,
+        trace_stop: int,
+        line_start: int,
+        line_stop: int,
+        sample_start: int,
+        sample_stop: int,
+    ) -> None:
+        self.project_controller.sync_active_region_runtime()
+        self.project_controller.update_region_bounds(
+            region_id,
+            trace_start=trace_start,
+            trace_stop=trace_stop,
+            line_start=line_start,
+            line_stop=line_stop,
+            sample_start=sample_start,
+            sample_stop=sample_stop,
+        )
+        self.select_project_region(region_id)
+
     def select_project_region(self, region_id: str) -> None:
         self.project_controller.sync_active_region_runtime()
         region = self.project_controller.set_active_region(region_id)

@@ -5,6 +5,8 @@ from pathlib import Path
 import shutil
 import uuid
 
+import numpy as np
+
 from gpr_lab_pro.app.context import ApplicationContext
 from gpr_lab_pro.domain.models.dataset import DatasetRecord
 from gpr_lab_pro.domain.models.display import DisplayState, SelectionState
@@ -82,6 +84,9 @@ class ProjectController:
             return self.state.files[0] if self.state.files else None
         return next((item for item in self.state.files if item.file_id == self.state.active_file_id), None)
 
+    def get_file(self, file_id: str) -> ProjectFileState | None:
+        return next((item for item in self.state.files if item.file_id == file_id), None)
+
     def get_active_region(self) -> ProjectRegionState | None:
         active_file = self.get_active_file()
         if active_file is None:
@@ -89,6 +94,13 @@ class ProjectController:
         if not self.state.active_region_id and active_file.regions:
             return active_file.regions[0]
         return next((item for item in active_file.regions if item.region_id == self.state.active_region_id), None)
+
+    def get_region(self, region_id: str) -> ProjectRegionState | None:
+        for file_item in self.state.files:
+            for region in file_item.regions:
+                if region.region_id == region_id:
+                    return region
+        return None
 
     def set_active_region(self, region_id: str) -> ProjectRegionState | None:
         for file_item in self.state.files:
@@ -107,6 +119,12 @@ class ProjectController:
             if any(region.region_id == region_id for region in file_item.regions):
                 return file_item
         return None
+
+    def get_dataset_for_file(self, file_id: str) -> DatasetRecord | None:
+        file_item = self.get_file(file_id)
+        if file_item is None:
+            return None
+        return self.context.dataset_state.datasets_by_id.get(file_item.dataset_id)
 
     def build_active_region_dataset(self) -> DatasetRecord | None:
         region = self.get_active_region()
@@ -134,6 +152,96 @@ class ProjectController:
         region.pipeline_dirty = bool(self.context.pipeline_state.has_unapplied_changes)
         region.display_state = deepcopy(self.context.display_state)
         region.selection_state = deepcopy(self.context.selection_state)
+
+    def create_region(self, file_id: str, *, name: str | None = None, base_region_id: str | None = None) -> ProjectRegionState:
+        file_item = self.get_file(file_id)
+        if file_item is None:
+            raise ValueError("未找到对应数据文件。")
+        dataset = self.get_dataset_for_file(file_id)
+        if dataset is None:
+            raise ValueError("请先激活该文件并完成数据加载。")
+
+        base_region = self.get_region(base_region_id) if base_region_id else None
+        region_name = self._next_region_name(file_item, preferred=name)
+        if base_region is not None and base_region.dataset_id == file_item.dataset_id:
+            region = deepcopy(base_region)
+            region.region_id = uuid.uuid4().hex
+            region.name = region_name
+        else:
+            region = self._create_default_region(dataset)
+            region.name = region_name
+        region.dataset_id = file_item.dataset_id
+        file_item.regions.append(region)
+        self.state.active_file_id = file_item.file_id
+        self.state.active_region_id = region.region_id
+        self.context.signals.project_changed.emit(self.state)
+        return region
+
+    def rename_region(self, region_id: str, new_name: str) -> ProjectRegionState:
+        region = self.get_region(region_id)
+        if region is None:
+            raise ValueError("未找到区域。")
+        name = new_name.strip()
+        if not name:
+            raise ValueError("区域名称不能为空。")
+        file_item = self.find_file_by_region_id(region_id)
+        if file_item is not None:
+            for item in file_item.regions:
+                if item.region_id != region_id and item.name == name:
+                    raise ValueError("同一文件下已存在同名区域。")
+        region.name = name
+        self.context.signals.project_changed.emit(self.state)
+        return region
+
+    def delete_region(self, region_id: str) -> str:
+        file_item = self.find_file_by_region_id(region_id)
+        if file_item is None:
+            raise ValueError("未找到区域。")
+        if len(file_item.regions) <= 1:
+            raise ValueError("每个文件至少保留一个区域。")
+        index = next((idx for idx, item in enumerate(file_item.regions) if item.region_id == region_id), -1)
+        if index < 0:
+            raise ValueError("未找到区域。")
+        file_item.regions.pop(index)
+        fallback = file_item.regions[min(index, len(file_item.regions) - 1)]
+        self.state.active_file_id = file_item.file_id
+        self.state.active_region_id = fallback.region_id
+        self.context.signals.project_changed.emit(self.state)
+        return fallback.region_id
+
+    def update_region_bounds(
+        self,
+        region_id: str,
+        *,
+        trace_start: int,
+        trace_stop: int,
+        line_start: int,
+        line_stop: int,
+        sample_start: int,
+        sample_stop: int,
+    ) -> ProjectRegionState:
+        region = self.get_region(region_id)
+        file_item = self.find_file_by_region_id(region_id)
+        if region is None or file_item is None:
+            raise ValueError("未找到区域。")
+        dataset = self.get_dataset_for_file(file_item.file_id)
+        if dataset is None:
+            raise ValueError("请先激活该文件并完成数据加载。")
+
+        trace0, trace1 = self._normalize_bounds(trace_start, trace_stop, dataset.trace_count)
+        line0, line1 = self._normalize_bounds(line_start, line_stop, dataset.line_count)
+        sample0, sample1 = self._normalize_bounds(sample_start, sample_stop, dataset.sample_count)
+        region.trace_start = trace0
+        region.trace_stop = trace1
+        region.line_start = line0
+        region.line_stop = line1
+        region.sample_start = sample0
+        region.sample_stop = sample1
+        region.selection_state.trace_index = int(np.clip(region.selection_state.trace_index, 0, max(region.trace_count() - 1, 0)))
+        region.selection_state.line_index = int(np.clip(region.selection_state.line_index, 0, max(region.line_count() - 1, 0)))
+        region.selection_state.sample_index = int(np.clip(region.selection_state.sample_index, 0, max(region.sample_count() - 1, 0)))
+        self.context.signals.project_changed.emit(self.state)
+        return region
 
     def save_project(self) -> str:
         if not self.state.is_open or not self.state.root_path:
@@ -227,6 +335,28 @@ class ProjectController:
         if source.resolve() != target.resolve():
             shutil.copy2(source, target)
         return str(target)
+
+    @staticmethod
+    def _normalize_bounds(start: int, stop: int, full_count: int) -> tuple[int, int]:
+        if full_count <= 0:
+            return (0, 1)
+        start_idx = int(max(0, min(int(start), full_count - 1)))
+        stop_idx = int(max(start_idx + 1, min(int(stop), full_count)))
+        return (start_idx, stop_idx)
+
+    @staticmethod
+    def _next_region_name(file_item: ProjectFileState, *, preferred: str | None = None) -> str:
+        if preferred:
+            clean = preferred.strip()
+            if clean and all(region.name != clean for region in file_item.regions):
+                return clean
+        used = {region.name for region in file_item.regions}
+        index = 1
+        while True:
+            candidate = f"Region{index}"
+            if candidate not in used:
+                return candidate
+            index += 1
 
     def _reset_runtime_state(self) -> None:
         self.context.snapshot_cache.clear()
