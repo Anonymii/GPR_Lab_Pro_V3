@@ -22,6 +22,7 @@ class ProjectRegionState:
     region_id: str
     dataset_id: str
     name: str
+    result_relpath: str = ""
     trace_start: int = 0
     trace_stop: int = 0
     line_start: int = 0

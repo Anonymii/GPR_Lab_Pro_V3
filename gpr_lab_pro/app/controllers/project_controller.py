@@ -172,6 +172,7 @@ class ProjectController:
             region.name = region_name
         region.dataset_id = file_item.dataset_id
         file_item.regions.append(region)
+        self.context.region_runtime_results.pop(region.region_id, None)
         self.state.active_file_id = file_item.file_id
         self.state.active_region_id = region.region_id
         self.context.signals.project_changed.emit(self.state)
@@ -203,6 +204,7 @@ class ProjectController:
         if index < 0:
             raise ValueError("未找到区域。")
         file_item.regions.pop(index)
+        self.context.region_runtime_results.pop(region_id, None)
         fallback = file_item.regions[min(index, len(file_item.regions) - 1)]
         self.state.active_file_id = file_item.file_id
         self.state.active_region_id = fallback.region_id
@@ -237,6 +239,7 @@ class ProjectController:
         region.line_stop = line1
         region.sample_start = sample0
         region.sample_stop = sample1
+        self.context.region_runtime_results.pop(region_id, None)
         region.selection_state.trace_index = int(np.clip(region.selection_state.trace_index, 0, max(region.trace_count() - 1, 0)))
         region.selection_state.line_index = int(np.clip(region.selection_state.line_index, 0, max(region.line_count() - 1, 0)))
         region.selection_state.sample_index = int(np.clip(region.selection_state.sample_index, 0, max(region.sample_count() - 1, 0)))
@@ -266,6 +269,7 @@ class ProjectController:
             pipeline_dirty=self.context.pipeline_state.has_unapplied_changes,
             display_state=self.context.display_state,
             selection_state=self.context.selection_state,
+            region_results=self.context.region_runtime_results,
         )
         self.context.signals.project_changed.emit(self.state)
         return str(project_file)
@@ -368,6 +372,7 @@ class ProjectController:
         self.context.pipeline_state.has_unapplied_changes = False
         self.context.result_state.history = []
         self.context.result_state.active_snapshot = None
+        self.context.region_runtime_results = {}
         self.context.selection_state.line_index = 0
         self.context.selection_state.trace_index = 0
         self.context.selection_state.sample_index = 0

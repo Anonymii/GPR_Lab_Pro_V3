@@ -55,10 +55,13 @@ class GPRApplication(QtCore.QObject):
 
     def open_project(self, project_file: str) -> None:
         loaded = self.project_controller.open_project(project_file)
+        self.context.region_runtime_results = dict(loaded.get("region_results", {}))
         dataset_source_path = str(loaded.get("dataset_source_path", "") or "")
         if dataset_source_path:
             self._pending_project_restore = loaded
             self._restoring_project = True
+            active_region_id = str(self.project_state.active_region_id or "")
+            self._pending_region_selection = active_region_id or None
             self.import_data(dataset_source_path, loaded.get("dataset_import_params"))
             return
         self._pending_project_restore = None
@@ -86,10 +89,7 @@ class GPRApplication(QtCore.QObject):
             self._pending_region_selection = None
         region_dataset = self.project_controller.build_active_region_dataset() or dataset
         self.dataset_state.current_dataset = region_dataset
-        self.context.snapshot_cache.clear()
-        initial_snapshot = self.context.pipeline_executor.create_initial_snapshot(region_dataset)
-        self.result_state.history = [initial_snapshot]
-        self.result_state.active_snapshot = initial_snapshot
+        self._restore_region_result_state(active_region.region_id, region_dataset)
         if active_region.pipeline_applied or active_region.pipeline_draft:
             self.pipeline_controller.restore_project_state(
                 active_region.pipeline_draft,
@@ -102,6 +102,10 @@ class GPRApplication(QtCore.QObject):
         self.display_controller.select_line(int(active_region.selection_state.line_index))
         self.display_controller.select_trace(int(active_region.selection_state.trace_index))
         self.display_controller.select_sample(int(active_region.selection_state.sample_index))
+        if self._has_renderable_result():
+            self.display_controller.publish_display()
+        else:
+            self.signals.display_cleared.emit()
         if self._pending_project_restore is not None:
             self._apply_pending_project_restore()
 
@@ -179,6 +183,7 @@ class GPRApplication(QtCore.QObject):
 
     def _on_pipeline_success(self, snapshots: list) -> None:
         self.pipeline_controller.apply_execution_result(snapshots)
+        self._cache_active_region_result_state()
         self.display_controller.publish_display()
         self.signals.processing_finished.emit()
 
@@ -277,10 +282,12 @@ class GPRApplication(QtCore.QObject):
         self.export_controller.save_processed_data(path)
 
     def save_project(self) -> str:
+        self._cache_active_region_result_state()
         return self.project_controller.save_project()
 
     def create_project_region(self, file_id: str, *, name: str | None = None, base_region_id: str | None = None) -> str:
         self.project_controller.sync_active_region_runtime()
+        self._cache_active_region_result_state()
         region = self.project_controller.create_region(file_id, name=name, base_region_id=base_region_id)
         self.select_project_region(region.region_id)
         return region.region_id
@@ -290,6 +297,7 @@ class GPRApplication(QtCore.QObject):
 
     def delete_project_region(self, region_id: str) -> None:
         self.project_controller.sync_active_region_runtime()
+        self._cache_active_region_result_state()
         fallback_region_id = self.project_controller.delete_region(region_id)
         self.select_project_region(fallback_region_id)
 
@@ -305,6 +313,7 @@ class GPRApplication(QtCore.QObject):
         sample_stop: int,
     ) -> None:
         self.project_controller.sync_active_region_runtime()
+        self.context.region_runtime_results.pop(region_id, None)
         self.project_controller.update_region_bounds(
             region_id,
             trace_start=trace_start,
@@ -318,6 +327,7 @@ class GPRApplication(QtCore.QObject):
 
     def select_project_region(self, region_id: str) -> None:
         self.project_controller.sync_active_region_runtime()
+        self._cache_active_region_result_state()
         region = self.project_controller.set_active_region(region_id)
         if region is None:
             return
@@ -329,10 +339,7 @@ class GPRApplication(QtCore.QObject):
                 self.import_data(file_item.source_path, file_item.import_params)
             return
         self.dataset_state.current_dataset = region_dataset
-        self.context.snapshot_cache.clear()
-        initial_snapshot = self.context.pipeline_executor.create_initial_snapshot(region_dataset)
-        self.result_state.history = [initial_snapshot]
-        self.result_state.active_snapshot = initial_snapshot
+        self._restore_region_result_state(region.region_id, region_dataset)
         if region.pipeline_applied or region.pipeline_draft:
             self.pipeline_controller.restore_project_state(
                 region.pipeline_draft,
@@ -350,6 +357,8 @@ class GPRApplication(QtCore.QObject):
         self.display_controller.select_sample(int(region.selection_state.sample_index))
         if self._has_renderable_result():
             self.display_controller.publish_display()
+        else:
+            self.signals.display_cleared.emit()
 
     @property
     def is_restoring_project(self) -> bool:
@@ -377,3 +386,24 @@ class GPRApplication(QtCore.QObject):
     def _has_renderable_result(self) -> bool:
         snapshot = self.result_state.active_snapshot
         return snapshot is not None and snapshot.pipeline_index > 0
+
+    def _cache_active_region_result_state(self) -> None:
+        region = self.project_controller.get_active_region()
+        if region is None:
+            return
+        if not self.result_state.history or not self._has_renderable_result():
+            self.context.region_runtime_results.pop(region.region_id, None)
+            return
+        self.context.region_runtime_results[region.region_id] = list(self.result_state.history)
+
+    def _restore_region_result_state(self, region_id: str, dataset: DatasetRecord) -> None:
+        cached = self.context.region_runtime_results.get(region_id)
+        self.context.snapshot_cache.clear()
+        if cached:
+            self.result_state.history = list(cached)
+            self.result_state.active_snapshot = self.result_state.history[-1]
+            self.context.snapshot_cache.store_many(self.result_state.history)
+            return
+        initial_snapshot = self.context.pipeline_executor.create_initial_snapshot(dataset)
+        self.result_state.history = [initial_snapshot]
+        self.result_state.active_snapshot = initial_snapshot

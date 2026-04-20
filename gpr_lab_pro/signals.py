@@ -7,6 +7,7 @@ class AppSignals(QtCore.QObject):
     project_changed = QtCore.Signal(object)
     dataset_loaded = QtCore.Signal(object)
     display_ready = QtCore.Signal(object)
+    display_cleared = QtCore.Signal()
     pipeline_changed = QtCore.Signal(object)
     pipeline_applied = QtCore.Signal(object)
     processing_finished = QtCore.Signal()

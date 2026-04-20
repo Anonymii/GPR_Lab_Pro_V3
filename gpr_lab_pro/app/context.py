@@ -7,6 +7,7 @@ from gpr_lab_pro.domain.models import (
     DisplayState,
     PipelineState,
     ProjectState,
+    ResultSnapshot,
     ResultState,
     SelectionState,
 )
@@ -40,3 +41,4 @@ class ApplicationContext:
         self.result_state = ResultState()
         self.display_state = DisplayState()
         self.selection_state = SelectionState()
+        self.region_runtime_results: dict[str, list[ResultSnapshot]] = {}

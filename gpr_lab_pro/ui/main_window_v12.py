@@ -1912,6 +1912,7 @@ class MainWindow(QtWidgets.QMainWindow):
         signals.project_changed.connect(self._on_project_changed)
         signals.dataset_loaded.connect(self._on_dataset_loaded)
         signals.display_ready.connect(self._refresh_display)
+        signals.display_cleared.connect(self._show_waiting_plots)
         signals.pipeline_changed.connect(lambda _steps: self._refresh_pipeline_draft())
         signals.pipeline_applied.connect(lambda _steps: self._refresh_pipeline_draft())
         signals.processing_finished.connect(self._on_processing_finished)
