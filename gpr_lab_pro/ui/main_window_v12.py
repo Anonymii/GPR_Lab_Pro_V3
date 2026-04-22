@@ -408,69 +408,61 @@ class OverviewMapWidget(QtWidgets.QWidget):
             )
 
         for file_id, (lane_rect, file_item) in file_lanes.items():
-            active_file = file_id == self._active_file_id
             painter.save()
             label_rect = QtCore.QRectF(canvas.left(), lane_rect.top() - 18.0, 180.0, 16.0)
             painter.setPen(QtGui.QColor("#4f6478"))
             painter.drawText(label_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, str(file_item.get("file_name", "")))
-            stats_rect = QtCore.QRectF(lane_rect.right() + 8.0, lane_rect.top(), 94.0, lane_rect.height())
-            painter.setPen(QtGui.QColor("#6a7887"))
-            painter.drawText(
-                stats_rect,
-                QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
-                f"{int(file_item.get('processed_count', 0))}/{int(file_item.get('region_count', 0))}",
-            )
             painter.setPen(QtGui.QPen(QtGui.QColor("#d7dce3"), 1.0))
             painter.setBrush(QtCore.Qt.NoBrush)
             mid_y = lane_rect.center().y()
             painter.drawLine(QtCore.QPointF(lane_rect.left(), mid_y), QtCore.QPointF(lane_rect.right(), mid_y))
-            if active_file:
-                total_trace_count = max(int(file_item.get("trace_count", 1)), 1)
-                cx = lane_rect.left() + np.clip(self._active_trace / max(total_trace_count - 1, 1), 0.0, 1.0) * lane_rect.width()
-                painter.setPen(QtGui.QPen(QtGui.QColor("#0d63ff"), 1.2))
-                painter.drawLine(QtCore.QPointF(cx, lane_rect.top()), QtCore.QPointF(cx, lane_rect.bottom()))
             painter.restore()
 
-        for region_id, rect, item in rects:
+        inactive_regions = [entry for entry in rects if entry[0] != self._active_region_id]
+        active_regions = [entry for entry in rects if entry[0] == self._active_region_id]
+        region_draw_order = inactive_regions + active_regions
+        for region_id, rect, item in region_draw_order:
             active = region_id == self._active_region_id
             painter.save()
             preview_image = item.get("preview_image")
             region_fill_path = QtGui.QPainterPath()
             region_fill_path.addRoundedRect(rect.adjusted(1, 1, -1, -1), 9, 9)
+            has_result = bool(item.get("has_result", False))
             if isinstance(preview_image, QtGui.QImage) and not preview_image.isNull():
                 painter.setClipPath(region_fill_path)
                 painter.drawImage(rect, preview_image)
                 painter.setClipping(False)
-            elif bool(item.get("has_result", False)):
+            elif has_result:
                 painter.fillPath(region_fill_path, QtGui.QColor(160, 160, 160, 78))
             else:
                 painter.fillPath(region_fill_path, QtGui.QColor("#ffffff"))
             if active:
                 border = QtGui.QColor("#ff9f1a")
-            elif bool(item.get("has_result", False)):
+            elif has_result:
                 border = QtGui.QColor("#2b8b57")
             else:
                 border = QtGui.QColor("#0d63ff")
             if region_id == self._hover_region_id and not active:
                 border = QtGui.QColor("#40586e")
-            painter.setPen(QtGui.QPen(border, 2.0 if active else 1.0))
+            if active:
+                glow_path = QtGui.QPainterPath()
+                glow_path.addRoundedRect(rect.adjusted(-2, -2, 2, 2), 12, 12)
+                painter.fillPath(glow_path, QtGui.QColor(255, 159, 26, 26))
+            border_pen = QtGui.QPen(border, 2.0 if active else 1.0)
+            if not has_result and not active:
+                border_pen.setStyle(QtCore.Qt.DashLine)
+            painter.setPen(border_pen)
             painter.setBrush(QtCore.Qt.NoBrush)
             painter.drawRoundedRect(rect, 10, 10)
-            interface_count = int(item.get("interface_count", 0))
-            if interface_count > 0:
-                badge_rect = QtCore.QRectF(rect.right() - 30.0, rect.top() + 4.0, 24.0, 14.0)
-                painter.setPen(QtCore.Qt.NoPen)
-                painter.setBrush(QtGui.QColor("#ffedd7"))
-                painter.drawRoundedRect(badge_rect, 7, 7)
-                painter.setPen(QtGui.QColor("#9b5a08"))
-                badge_font = QtGui.QFont("Microsoft YaHei UI", 7)
-                badge_font.setBold(True)
-                painter.setFont(badge_font)
-                painter.drawText(badge_rect, QtCore.Qt.AlignCenter, f"I{interface_count}")
+            if region_id == self._hover_region_id:
+                painter.fillPath(region_fill_path, QtGui.QColor(13, 99, 255, 18 if not active else 10))
             if rect.width() >= 72:
-                text_rect = rect.adjusted(6, 2, -6, -2)
-                painter.setPen(QtGui.QColor("#24313f"))
-                painter.drawText(text_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop, str(item.get("region_name", "")))
+                label_rect = QtCore.QRectF(rect.left() + 12.0, rect.top() + 4.0, rect.width() - 20.0, 16.0)
+                painter.setPen(QtGui.QColor("#7a4700") if active else QtGui.QColor("#24313f"))
+                label_font = QtGui.QFont("Microsoft YaHei UI", 8)
+                label_font.setBold(active)
+                painter.setFont(label_font)
+                painter.drawText(label_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, str(item.get("region_name", "")))
             painter.restore()
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
@@ -539,7 +531,7 @@ class OverviewMapWidget(QtWidgets.QWidget):
         lane_gap = 40.0
         lane_height = 38.0
         label_width = 150.0
-        stats_width = 100.0
+        stats_width = 12.0
         file_count = max(len(self._files), 1)
         available_height = max(canvas.height() - (file_count - 1) * lane_gap, lane_height * file_count)
         lane_height = max(32.0, min(lane_height, available_height / file_count))
@@ -1984,6 +1976,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_interface_rename.setObjectName("interfaceActionButton")
         self.btn_interface_rename.clicked.connect(self._rename_interface)
         interface_row.addWidget(self.btn_interface_rename)
+        self.btn_interface_duplicate = QtWidgets.QToolButton()
+        self.btn_interface_duplicate.setText("复制")
+        self.btn_interface_duplicate.setObjectName("interfaceActionButton")
+        self.btn_interface_duplicate.clicked.connect(self._duplicate_interface)
+        interface_row.addWidget(self.btn_interface_duplicate)
         self.btn_interface_delete = QtWidgets.QToolButton()
         self.btn_interface_delete.setText("删除")
         self.btn_interface_delete.setObjectName("interfaceActionButton")
@@ -2029,6 +2026,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for button in (
             self.btn_interface_add,
             self.btn_interface_rename,
+            self.btn_interface_duplicate,
             self.btn_interface_delete,
             self.btn_interface_visible,
             self.btn_interface_pick,
@@ -2865,8 +2863,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 for interface in region.interfaces:
                     interface_node = QtWidgets.QTreeWidgetItem([interface.name])
                     interface_node.setData(0, QtCore.Qt.UserRole, ("interface", region.region_id, interface.interface_id))
+                    interface_node.setIcon(0, self._color_chip_icon(interface.color, size=10))
                     if not interface.visible:
                         interface_node.setForeground(0, QtGui.QBrush(QtGui.QColor("#8a8f99")))
+                    if region.region_id == current_region_id and interface.interface_id == active_interface_id:
+                        font = interface_node.font(0)
+                        font.setBold(True)
+                        interface_node.setFont(0, font)
                     region_node.addChild(interface_node)
                     if region.region_id == current_region_id and interface.interface_id == active_interface_id:
                         target_item = interface_node
@@ -2965,7 +2968,8 @@ class MainWindow(QtWidgets.QMainWindow):
         cscan, _ = build_cscan(snapshot.data, display_state, selection)
         if cscan.size == 0:
             return None
-        image = self._array_to_qimage(cscan, "gray", self._preview_image_limits(cscan))
+        cscan_view = self._smooth_image(cscan, axis=0)
+        image = self._array_to_qimage(cscan_view, "gray", self._preview_image_limits(cscan_view))
         self._overview_region_preview_cache[cache_key] = image
         self._overview_region_preview_by_region[region.region_id] = image
         return image
@@ -2984,10 +2988,11 @@ class MainWindow(QtWidgets.QMainWindow):
             int(state.slice_thickness),
             str(state.cscan_attr),
         )
+        cscan_view = self._smooth_image(display.cscan, axis=0)
         self._overview_region_preview_cache[cache_key] = self._array_to_qimage(
-            display.cscan,
+            cscan_view,
             "gray",
-            self._preview_image_limits(display.cscan),
+            self._preview_image_limits(cscan_view),
         )
         self._overview_region_preview_by_region[region.region_id] = self._overview_region_preview_cache[cache_key]
 
@@ -3006,7 +3011,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.interface_combo.blockSignals(True)
         self.interface_combo.clear()
         for interface in interfaces:
-            self.interface_combo.addItem(interface.name, interface.interface_id)
+            self.interface_combo.addItem(self._color_chip_icon(interface.color), interface.name, interface.interface_id)
         if active_interface_id:
             index = max(0, self.interface_combo.findData(active_interface_id))
             self.interface_combo.setCurrentIndex(index)
@@ -3016,6 +3021,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.interface_combo.setEnabled(bool(region))
         self.btn_interface_add.setEnabled(bool(region) and not self._is_busy)
         self.btn_interface_rename.setEnabled(has_interface and not self._is_busy)
+        self.btn_interface_duplicate.setEnabled(has_interface and not self._is_busy)
         self.btn_interface_delete.setEnabled(has_interface and not self._is_busy)
         self.btn_interface_clear_point.setEnabled(has_interface and self._has_processed_result() and not self._is_busy)
         self.btn_interface_clear_line.setEnabled(has_interface and self._has_processed_result() and not self._is_busy)
@@ -3106,6 +3112,22 @@ class MainWindow(QtWidgets.QMainWindow):
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, "界面", str(exc))
             return
+        self._refresh_project_tree()
+        self._refresh_interface_controls()
+        self._refresh_overview_scene()
+        self._refresh_interface_overlays()
+
+    def _duplicate_interface(self) -> None:
+        region = self.app_controller.project_controller.get_active_region()
+        interface = self._active_interface()
+        if region is None or interface is None:
+            return
+        try:
+            interface_id = self.app_controller.duplicate_region_interface(region.region_id, interface.interface_id)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "界面", str(exc))
+            return
+        self._active_interface_by_region[region.region_id] = interface_id
         self._refresh_project_tree()
         self._refresh_interface_controls()
         self._refresh_overview_scene()
@@ -3468,6 +3490,7 @@ class MainWindow(QtWidgets.QMainWindow):
             interface = self._active_interface()
             toggle_text = "隐藏界面" if interface is not None and interface.visible else "显示界面"
             rename_action = menu.addAction("重命名")
+            duplicate_action = menu.addAction("复制界面")
             toggle_action = menu.addAction(toggle_text)
             clear_line_action = menu.addAction("清空当前测线")
             clear_all_action = menu.addAction("清空界面")
@@ -3475,6 +3498,8 @@ class MainWindow(QtWidgets.QMainWindow):
             chosen = menu.exec(self.project_tree.viewport().mapToGlobal(pos))
             if chosen is rename_action:
                 self._rename_interface()
+            elif chosen is duplicate_action:
+                self._duplicate_interface()
             elif chosen is toggle_action and interface is not None:
                 self._toggle_interface_visible(not interface.visible)
             elif chosen is clear_line_action:
@@ -3894,6 +3919,19 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._settings_html_cache = html
         self.trace_info.setHtml(html)
+
+    @staticmethod
+    def _color_chip_icon(color: str, *, size: int = 12) -> QtGui.QIcon:
+        pixmap = QtGui.QPixmap(size, size)
+        pixmap.fill(QtCore.Qt.transparent)
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 1))
+        painter.setBrush(QtGui.QColor(color))
+        inset = 1.0 if size <= 12 else 1.5
+        painter.drawRoundedRect(QtCore.QRectF(inset, inset, size - inset * 2, size - inset * 2), 2.5, 2.5)
+        painter.end()
+        return QtGui.QIcon(pixmap)
 
     @staticmethod
     def _array_to_qimage(

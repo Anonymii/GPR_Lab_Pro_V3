@@ -270,6 +270,24 @@ class ProjectController:
         self.context.signals.project_changed.emit(self.state)
         return interface
 
+    def duplicate_interface(self, region_id: str, interface_id: str) -> InterfaceTrace:
+        region = self.get_region(region_id)
+        interface = self.get_interface(region_id, interface_id)
+        if region is None or interface is None:
+            raise ValueError("未找到界面。")
+        new_interface = deepcopy(interface)
+        new_interface.interface_id = uuid.uuid4().hex
+        new_interface.name = self._next_interface_name(region, preferred=f"{interface.name}_copy")
+        new_interface.color = self._INTERFACE_COLORS[len(region.interfaces) % len(self._INTERFACE_COLORS)]
+        new_interface.visible = True
+        new_interface.samples_by_line = {
+            key: list(values)
+            for key, values in interface.samples_by_line.items()
+        }
+        region.interfaces.append(new_interface)
+        self.context.signals.project_changed.emit(self.state)
+        return new_interface
+
     def rename_interface(self, region_id: str, interface_id: str, new_name: str) -> InterfaceTrace:
         region = self.get_region(region_id)
         interface = self.get_interface(region_id, interface_id)

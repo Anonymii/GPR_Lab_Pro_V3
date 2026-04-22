@@ -329,6 +329,10 @@ class GPRApplication(QtCore.QObject):
         interface = self.project_controller.create_interface(region_id, name=name)
         return interface.interface_id
 
+    def duplicate_region_interface(self, region_id: str, interface_id: str) -> str:
+        interface = self.project_controller.duplicate_interface(region_id, interface_id)
+        return interface.interface_id
+
     def rename_region_interface(self, region_id: str, interface_id: str, new_name: str) -> None:
         self.project_controller.rename_interface(region_id, interface_id, new_name)
 
