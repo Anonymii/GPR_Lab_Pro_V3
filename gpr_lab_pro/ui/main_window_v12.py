@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import os
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -341,24 +342,27 @@ class OverviewMapWidget(QtWidgets.QWidget):
         self._active_region_id = ""
         self._active_file_id = ""
         self._active_trace = 0
-        self._active_image: QtGui.QImage | None = None
         self._active_region_name = ""
         self._active_interface_name = ""
-        self._layout_rects: list[tuple[str, QtCore.QRectF, dict[str, object]]] = []
+        self._map_image: QtGui.QImage | None = None
+        self._layout_rects: list[tuple[str, QtGui.QPainterPath, dict[str, object]]] = []
         self._hover_region_id = ""
+        self._scene_cache: QtGui.QImage | None = None
+        self._scene_cache_size = QtCore.QSize()
+        self._scene_dirty = True
         self.setMinimumHeight(240)
-        self.setMouseTracking(True)
 
     def clear_scene(self) -> None:
         self._files = []
         self._active_region_id = ""
         self._active_file_id = ""
         self._active_trace = 0
-        self._active_image = None
         self._active_region_name = ""
         self._active_interface_name = ""
+        self._map_image = None
         self._layout_rects = []
-        self.update()
+        self._hover_region_id = ""
+        self._invalidate_scene_cache()
 
     def set_scene(
         self,
@@ -367,7 +371,7 @@ class OverviewMapWidget(QtWidgets.QWidget):
         active_region_id: str,
         active_file_id: str,
         active_trace: int = 0,
-        active_image: QtGui.QImage | None = None,
+        map_image: QtGui.QImage | None = None,
         active_region_name: str = "",
         active_interface_name: str = "",
     ) -> None:
@@ -375,67 +379,121 @@ class OverviewMapWidget(QtWidgets.QWidget):
         self._active_region_id = active_region_id
         self._active_file_id = active_file_id
         self._active_trace = int(active_trace)
-        self._active_image = active_image
+        self._map_image = map_image
         self._active_region_name = active_region_name
         self._active_interface_name = active_interface_name
         self._layout_rects = []
         self._hover_region_id = ""
-        self.update()
+        self._invalidate_scene_cache()
 
     def paintEvent(self, _event: QtGui.QPaintEvent) -> None:
+        if not self._files:
+            painter = QtGui.QPainter(self)
+            painter.fillRect(self.rect(), QtGui.QColor("#ffffff"))
+            return
+        self._ensure_scene_cache()
         painter = QtGui.QPainter(self)
+        painter.fillRect(self.rect(), QtGui.QColor("#ffffff"))
+        if self._scene_cache is not None and not self._scene_cache.isNull():
+            painter.drawImage(QtCore.QPoint(0, 0), self._scene_cache)
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        self._invalidate_scene_cache()
+        super().resizeEvent(event)
+
+    def _invalidate_scene_cache(self) -> None:
+        self._scene_dirty = True
+        self._scene_cache = None
+        self._scene_cache_size = QtCore.QSize()
+        self.update()
+
+    def _ensure_scene_cache(self) -> None:
+        if (
+            not self._scene_dirty
+            and self._scene_cache is not None
+            and not self._scene_cache.isNull()
+            and self._scene_cache_size == self.size()
+        ):
+            return
+        if self.width() <= 0 or self.height() <= 0:
+            return
+        image = QtGui.QImage(self.size(), QtGui.QImage.Format_ARGB32_Premultiplied)
+        image.fill(QtGui.QColor("#ffffff"))
+        painter = QtGui.QPainter(image)
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        self._render_scene(painter)
+        painter.end()
+        self._scene_cache = image
+        self._scene_cache_size = self.size()
+        self._scene_dirty = False
+
+    def _render_scene(self, painter: QtGui.QPainter) -> None:
         painter.fillRect(self.rect(), QtGui.QColor("#ffffff"))
         if not self._files:
+            self._layout_rects = []
             return
 
         canvas = self.rect().adjusted(18, 18, -18, -18)
         summary_rect = QtCore.QRectF(canvas.left(), canvas.top(), canvas.width(), 20.0)
         self._draw_summary(painter, summary_rect)
         canvas = canvas.adjusted(0, 24, 0, 0)
-        rects = self._compute_layout(canvas)
-        self._layout_rects = rects
-        file_lanes: dict[str, tuple[QtCore.QRectF, dict[str, object]]] = {}
-        for region_id, rect, item in rects:
-            file_lanes[str(item.get("file_id", ""))] = (
-                QtCore.QRectF(
-                    float(item.get("lane_left", rect.left())),
-                    float(item.get("lane_top", rect.top())),
-                    float(item.get("lane_width", rect.width())),
-                    float(item.get("lane_height", rect.height())),
-                ),
-                item,
-            )
-
-        for file_id, (lane_rect, file_item) in file_lanes.items():
+        if isinstance(self._map_image, QtGui.QImage) and not self._map_image.isNull():
             painter.save()
-            label_rect = QtCore.QRectF(canvas.left(), lane_rect.top() - 18.0, 180.0, 16.0)
-            painter.setPen(QtGui.QColor("#4f6478"))
-            painter.drawText(label_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, str(file_item.get("file_name", "")))
-            painter.setPen(QtGui.QPen(QtGui.QColor("#d7dce3"), 1.0))
+            painter.setOpacity(0.92)
+            painter.drawImage(QtCore.QRectF(canvas), self._map_image)
+            painter.restore()
+        else:
+            painter.save()
+            painter.fillRect(canvas, QtGui.QColor("#f7f9fb"))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#e5e9ef"), 1.0))
+            grid_step = 48
+            for x in range(int(canvas.left()), int(canvas.right()) + 1, grid_step):
+                painter.drawLine(QtCore.QPointF(x, canvas.top()), QtCore.QPointF(x, canvas.bottom()))
+            for y in range(int(canvas.top()), int(canvas.bottom()) + 1, grid_step):
+                painter.drawLine(QtCore.QPointF(canvas.left(), y), QtCore.QPointF(canvas.right(), y))
+            painter.restore()
+
+        rects, file_paths = self._compute_layout(canvas)
+        self._layout_rects = rects
+
+        for file_item in self._files:
+            file_id = str(file_item.get("file_id", ""))
+            file_path = file_paths.get(file_id)
+            if file_path is None or file_path.isEmpty():
+                continue
+            painter.save()
+            painter.setPen(QtGui.QPen(QtGui.QColor("#98a5b3"), 1.1))
             painter.setBrush(QtCore.Qt.NoBrush)
-            mid_y = lane_rect.center().y()
-            painter.drawLine(QtCore.QPointF(lane_rect.left(), mid_y), QtCore.QPointF(lane_rect.right(), mid_y))
+            painter.drawPath(file_path)
             painter.restore()
 
         inactive_regions = [entry for entry in rects if entry[0] != self._active_region_id]
         active_regions = [entry for entry in rects if entry[0] == self._active_region_id]
         region_draw_order = inactive_regions + active_regions
-        for region_id, rect, item in region_draw_order:
+        for region_id, path, item in region_draw_order:
             active = region_id == self._active_region_id
             painter.save()
+            rect = path.boundingRect()
             preview_image = item.get("preview_image")
-            region_fill_path = QtGui.QPainterPath()
-            region_fill_path.addRoundedRect(rect.adjusted(1, 1, -1, -1), 9, 9)
             has_result = bool(item.get("has_result", False))
             if isinstance(preview_image, QtGui.QImage) and not preview_image.isNull():
-                painter.setClipPath(region_fill_path)
-                painter.drawImage(rect, preview_image)
+                painter.setClipPath(path)
+                geometry = self._region_screen_geometry(item)
+                if geometry is not None:
+                    painter.save()
+                    painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
+                    painter.translate(geometry["center"])
+                    painter.rotate(geometry["angle_deg"])
+                    target = geometry["target_rect_local"]
+                    painter.drawImage(target, preview_image)
+                    painter.restore()
+                else:
+                    painter.drawImage(rect, preview_image)
                 painter.setClipping(False)
             elif has_result:
-                painter.fillPath(region_fill_path, QtGui.QColor(160, 160, 160, 78))
+                painter.fillPath(path, QtGui.QColor(160, 160, 160, 78))
             else:
-                painter.fillPath(region_fill_path, QtGui.QColor("#ffffff"))
+                painter.fillPath(path, QtGui.QColor("#ffffff"))
             if active:
                 border = QtGui.QColor("#ff9f1a")
             elif has_result:
@@ -445,24 +503,35 @@ class OverviewMapWidget(QtWidgets.QWidget):
             if region_id == self._hover_region_id and not active:
                 border = QtGui.QColor("#40586e")
             if active:
-                glow_path = QtGui.QPainterPath()
-                glow_path.addRoundedRect(rect.adjusted(-2, -2, 2, 2), 12, 12)
+                glow_path = self._stroked_path(path, 4.0)
                 painter.fillPath(glow_path, QtGui.QColor(255, 159, 26, 26))
             border_pen = QtGui.QPen(border, 2.0 if active else 1.0)
             if not has_result and not active:
                 border_pen.setStyle(QtCore.Qt.DashLine)
             painter.setPen(border_pen)
             painter.setBrush(QtCore.Qt.NoBrush)
-            painter.drawRoundedRect(rect, 10, 10)
+            painter.drawPath(path)
             if region_id == self._hover_region_id:
-                painter.fillPath(region_fill_path, QtGui.QColor(13, 99, 255, 18 if not active else 10))
-            if rect.width() >= 72:
-                label_rect = QtCore.QRectF(rect.left() + 12.0, rect.top() + 4.0, rect.width() - 20.0, 16.0)
+                painter.fillPath(path, QtGui.QColor(13, 99, 255, 18 if not active else 10))
+            geometry = self._region_screen_geometry(item)
+            if geometry is not None:
+                painter.save()
                 painter.setPen(QtGui.QColor("#7a4700") if active else QtGui.QColor("#24313f"))
                 label_font = QtGui.QFont("Microsoft YaHei UI", 8)
                 label_font.setBold(active)
                 painter.setFont(label_font)
-                painter.drawText(label_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, str(item.get("region_name", "")))
+                painter.translate(geometry["label_anchor"])
+                painter.rotate(geometry["label_angle_deg"])
+                file_name = str(item.get("file_name", "") or "")
+                file_label = Path(file_name).stem if file_name else ""
+                region_label = str(item.get("region_name", ""))
+                full_label = f"{file_label}  {region_label}".strip()
+                painter.drawText(
+                    QtCore.QRectF(0.0, -10.0, 280.0, 20.0),
+                    QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
+                    full_label,
+                )
+                painter.restore()
             painter.restore()
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
@@ -483,96 +552,267 @@ class OverviewMapWidget(QtWidgets.QWidget):
             return
         region_id, rect, item = region
         self.region_activated.emit(region_id)
-        file_trace_count = max(int(item.get("file_trace_count", 1)), 1)
-        lane_left = float(item.get("lane_left", rect.left()))
-        lane_width = float(item.get("lane_width", rect.width()))
-        x_ratio = np.clip((event.position().x() - lane_left) / max(lane_width, 1e-9), 0.0, 1.0)
-        trace_index = int(round(x_ratio * max(file_trace_count - 1, 0)))
+        samples = item.get("navigation_samples", [])
+        trace_index = int(item.get("trace_start", 0))
+        if isinstance(samples, list) and samples:
+            click = event.position()
+            best = min(
+                samples,
+                key=lambda sample: (float(sample["screen_x"]) - click.x()) ** 2 + (float(sample["screen_y"]) - click.y()) ** 2,
+            )
+            trace_index = int(best.get("trace_index", trace_index))
         self.point_selected.emit(region_id, trace_index, 0)
         event.accept()
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
         region = self._region_at(event.position())
-        hover_region_id = region[0] if region is not None else ""
-        if hover_region_id != self._hover_region_id:
-            self._hover_region_id = hover_region_id
-            self.update()
-        if region is None:
-            self.unsetCursor()
-            QtWidgets.QToolTip.hideText()
-            super().mouseMoveEvent(event)
-            return
-        _, _, item = region
-        self.setCursor(QtCore.Qt.PointingHandCursor)
-        status = "已处理" if bool(item.get("has_result", False)) else "未处理"
-        interface_count = int(item.get("interface_count", 0))
-        tooltip = (
-            f"{item.get('file_name', '')}\n"
-            f"{item.get('region_name', '')} | 道 {int(item.get('trace_start', 0)) + 1}-{int(item.get('trace_stop', 0))}\n"
-            f"{status} | 界面 {interface_count}"
-        )
-        QtWidgets.QToolTip.showText(event.globalPosition().toPoint(), tooltip, self)
+        self.setCursor(QtCore.Qt.PointingHandCursor if region is not None else QtCore.Qt.ArrowCursor)
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event: QtCore.QEvent) -> None:
-        self._hover_region_id = ""
         self.unsetCursor()
-        QtWidgets.QToolTip.hideText()
-        self.update()
         super().leaveEvent(event)
 
-    def _region_at(self, point: QtCore.QPointF) -> tuple[str, QtCore.QRectF, dict[str, object]] | None:
-        for item in self._layout_rects:
+    def _region_at(self, point: QtCore.QPointF) -> tuple[str, QtGui.QPainterPath, dict[str, object]] | None:
+        for item in reversed(self._layout_rects):
             if item[1].contains(point):
                 return item
         return None
 
-    def _compute_layout(self, canvas: QtCore.QRect) -> list[tuple[str, QtCore.QRectF, dict[str, object]]]:
-        lane_gap = 40.0
-        lane_height = 38.0
-        label_width = 150.0
-        stats_width = 12.0
-        file_count = max(len(self._files), 1)
-        available_height = max(canvas.height() - (file_count - 1) * lane_gap, lane_height * file_count)
-        lane_height = max(32.0, min(lane_height, available_height / file_count))
-        lane_width = max(canvas.width() - label_width - stats_width - 10.0, 180.0)
-        rects: list[tuple[str, QtCore.QRectF, dict[str, object]]] = []
-        y = float(canvas.top())
+    def _compute_layout(
+        self,
+        canvas: QtCore.QRect,
+    ) -> tuple[list[tuple[str, QtGui.QPainterPath, dict[str, object]]], dict[str, QtGui.QPainterPath]]:
+        world_bounds = self._world_bounds()
+        rects: list[tuple[str, QtGui.QPainterPath, dict[str, object]]] = []
+        file_paths: dict[str, QtGui.QPainterPath] = {}
         for file_item in self._files:
             file_id = str(file_item.get("file_id", ""))
-            trace_count = max(float(file_item.get("trace_count", 1)), 1.0)
-            lane_left = float(canvas.left()) + label_width
-            lane_top = y
-            lane_rect = QtCore.QRectF(lane_left, lane_top, lane_width, lane_height)
+            navigation_samples = file_item.get("navigation_samples", [])
+            if not isinstance(navigation_samples, list) or not navigation_samples:
+                continue
+            file_width = max(
+                2.8,
+                max((float(region.get("render_width", 0.0)) for region in file_item.get("regions", [])), default=0.0),
+            )
+            file_polygon_points = self._region_polygon_points(navigation_samples, file_width)
+            if file_polygon_points:
+                file_polygon = QtGui.QPolygonF(
+                    [
+                        self._world_to_canvas(
+                            float(point["x"]),
+                            float(point["y"]),
+                            world_bounds,
+                            QtCore.QRectF(canvas),
+                        )
+                        for point in file_polygon_points
+                    ]
+                )
+                file_path = QtGui.QPainterPath()
+                if not file_polygon.isEmpty():
+                    file_path.moveTo(file_polygon.first())
+                    for idx in range(1, file_polygon.size()):
+                        file_path.lineTo(file_polygon.at(idx))
+                    file_path.closeSubpath()
+                file_paths[file_id] = file_path
             for region in file_item.get("regions", []):
-                start = float(region.get("trace_start", 0))
-                stop = float(region.get("trace_stop", start + 1))
-                x0 = lane_left + np.clip(start / max(trace_count, 1.0), 0.0, 1.0) * lane_width
-                x1 = lane_left + np.clip(stop / max(trace_count, 1.0), 0.0, 1.0) * lane_width
-                if x1 - x0 < 8.0:
-                    x1 = x0 + 8.0
-                rect = QtCore.QRectF(x0, lane_top, min(x1, lane_left + lane_width) - x0, lane_height)
-                item = {
-                    "file_id": file_id,
-                    "file_name": file_item.get("file_name", ""),
-                    "region_count": int(file_item.get("region_count", 0)),
-                    "processed_count": int(file_item.get("processed_count", 0)),
-                    "region_id": region.get("region_id", ""),
-                    "region_name": region.get("region_name", ""),
-                    "has_result": bool(region.get("has_result", False)),
-                    "interface_count": int(region.get("interface_count", 0)),
-                    "trace_start": int(region.get("trace_start", 0)),
-                    "trace_stop": int(region.get("trace_stop", 0)),
-                    "preview_image": region.get("preview_image"),
-                    "file_trace_count": int(trace_count),
-                    "lane_left": lane_left,
-                    "lane_top": lane_top,
-                    "lane_width": lane_width,
-                    "lane_height": lane_height,
-                }
-                rects.append((str(region.get("region_id", "")), rect, item))
-            y += lane_height + lane_gap
-        return rects
+                polygon_points = region.get("polygon", [])
+                if not isinstance(polygon_points, list) or len(polygon_points) < 3:
+                    continue
+                polygon = QtGui.QPolygonF(
+                    [
+                        self._world_to_canvas(
+                            float(point["x"]),
+                            float(point["y"]),
+                            world_bounds,
+                            QtCore.QRectF(canvas),
+                        )
+                        for point in polygon_points
+                    ]
+                )
+                path = QtGui.QPainterPath()
+                if not polygon.isEmpty():
+                    path.moveTo(polygon.first())
+                    for idx in range(1, polygon.size()):
+                        path.lineTo(polygon.at(idx))
+                    path.closeSubpath()
+                item = dict(region)
+                item["file_id"] = file_id
+                item["file_name"] = file_item.get("file_name", "")
+                item["navigation_samples"] = [
+                    {
+                        **sample,
+                        "screen_x": self._world_to_canvas(
+                            float(sample.get("x", 0.0)),
+                            float(sample.get("y", 0.0)),
+                            world_bounds,
+                            QtCore.QRectF(canvas),
+                        ).x(),
+                        "screen_y": self._world_to_canvas(
+                            float(sample.get("x", 0.0)),
+                            float(sample.get("y", 0.0)),
+                            world_bounds,
+                            QtCore.QRectF(canvas),
+                        ).y(),
+                    }
+                    for sample in region.get("navigation_samples", [])
+                ]
+                item["screen_polygon"] = [polygon.at(idx) for idx in range(polygon.size())]
+                rects.append((str(region.get("region_id", "")), path, item))
+        return rects, file_paths
+
+    def _world_bounds(self) -> tuple[float, float, float, float]:
+        points: list[tuple[float, float]] = []
+        for file_item in self._files:
+            for sample in file_item.get("navigation_samples", []):
+                points.append((float(sample.get("x", 0.0)), float(sample.get("y", 0.0))))
+            for region in file_item.get("regions", []):
+                for point in region.get("polygon", []):
+                    points.append((float(point.get("x", 0.0)), float(point.get("y", 0.0))))
+        if not points:
+            return (0.0, 0.0, 1.0, 1.0)
+        xs = np.array([point[0] for point in points], dtype=float)
+        ys = np.array([point[1] for point in points], dtype=float)
+        min_x = float(xs.min())
+        max_x = float(xs.max())
+        min_y = float(ys.min())
+        max_y = float(ys.max())
+        pad_x = max((max_x - min_x) * 0.08, 4.0)
+        pad_y = max((max_y - min_y) * 0.08, 4.0)
+        return (min_x - pad_x, min_y - pad_y, max_x + pad_x, max_y + pad_y)
+
+    @staticmethod
+    def _world_to_canvas(
+        x: float,
+        y: float,
+        world_bounds: tuple[float, float, float, float],
+        canvas_rect: QtCore.QRectF,
+    ) -> QtCore.QPointF:
+        min_x, min_y, max_x, max_y = world_bounds
+        world_w = max(max_x - min_x, 1e-6)
+        world_h = max(max_y - min_y, 1e-6)
+        scale = min(canvas_rect.width() / world_w, canvas_rect.height() / world_h)
+        draw_w = world_w * scale
+        draw_h = world_h * scale
+        offset_x = canvas_rect.left() + (canvas_rect.width() - draw_w) * 0.5
+        offset_y = canvas_rect.top() + (canvas_rect.height() - draw_h) * 0.5
+        px = offset_x + (x - min_x) * scale
+        py = offset_y + (max_y - y) * scale
+        return QtCore.QPointF(px, py)
+
+    @staticmethod
+    def _stroked_path(path: QtGui.QPainterPath, width: float) -> QtGui.QPainterPath:
+        stroker = QtGui.QPainterPathStroker()
+        stroker.setWidth(width)
+        stroker.setJoinStyle(QtCore.Qt.RoundJoin)
+        stroker.setCapStyle(QtCore.Qt.RoundCap)
+        return stroker.createStroke(path)
+
+    @staticmethod
+    def _region_polygon_points(
+        samples: list[dict[str, float | int]],
+        width_m: float,
+    ) -> list[dict[str, float]]:
+        if len(samples) < 2:
+            return []
+        points = np.array([[float(sample["x"]), float(sample["y"])] for sample in samples], dtype=float)
+        half_width = max(width_m * 0.5, 0.5)
+        normals = []
+        for idx in range(points.shape[0]):
+            p_prev = points[idx - 1] if idx > 0 else points[idx]
+            p_next = points[idx + 1] if idx < points.shape[0] - 1 else points[idx]
+            tangent = p_next - p_prev
+            norm = float(np.hypot(tangent[0], tangent[1]))
+            if norm < 1e-9:
+                tangent = np.array([1.0, 0.0], dtype=float)
+                norm = 1.0
+            tangent /= norm
+            normals.append(np.array([-tangent[1], tangent[0]], dtype=float))
+        upper = [point + normal * half_width for point, normal in zip(points, normals)]
+        lower = [point - normal * half_width for point, normal in zip(points, normals)]
+        polygon = upper + list(reversed(lower))
+        return [{"x": float(point[0]), "y": float(point[1])} for point in polygon]
+
+    @staticmethod
+    def _region_screen_geometry(item: dict[str, object]) -> dict[str, object] | None:
+        samples = item.get("navigation_samples", [])
+        screen_polygon = item.get("screen_polygon", [])
+        if not isinstance(samples, list) or len(samples) < 2:
+            return None
+        if not isinstance(screen_polygon, list) or len(screen_polygon) < 4:
+            return None
+        start = QtCore.QPointF(float(samples[0]["screen_x"]), float(samples[0]["screen_y"]))
+        end = QtCore.QPointF(float(samples[-1]["screen_x"]), float(samples[-1]["screen_y"]))
+        dx = end.x() - start.x()
+        dy = end.y() - start.y()
+        length = float(np.hypot(dx, dy))
+        if length < 1e-6:
+            return None
+        direction = np.array([dx / length, dy / length], dtype=float)
+        angle = float(np.degrees(np.arctan2(dy, dx)))
+        normal = np.array([-direction[1], direction[0]], dtype=float)
+        upper_start = screen_polygon[0]
+        upper_end = screen_polygon[max((len(screen_polygon) // 2) - 1, 0)]
+        lower_start = screen_polygon[-1]
+        lower_end = screen_polygon[len(screen_polygon) // 2]
+        outward = np.array(
+            [
+                ((upper_start.x() + upper_end.x()) * 0.5) - ((lower_start.x() + lower_end.x()) * 0.5),
+                ((upper_start.y() + upper_end.y()) * 0.5) - ((lower_start.y() + lower_end.y()) * 0.5),
+            ],
+            dtype=float,
+        )
+        outward_norm = float(np.hypot(outward[0], outward[1]))
+        if outward_norm < 1e-6:
+            outward = normal.copy()
+            outward_norm = 1.0
+        outward /= outward_norm
+        if float(np.dot(normal, outward)) < 0.0:
+            direction *= -1.0
+            normal *= -1.0
+            angle += 180.0
+        center = QtCore.QPointF((start.x() + end.x()) * 0.5, (start.y() + end.y()) * 0.5)
+        local_points: list[tuple[float, float]] = []
+        for point in screen_polygon:
+            vec = np.array([point.x() - center.x(), point.y() - center.y()], dtype=float)
+            local_points.append((float(np.dot(vec, direction)), float(np.dot(vec, normal))))
+        min_u = min(point[0] for point in local_points)
+        max_u = max(point[0] for point in local_points)
+        min_v = min(point[1] for point in local_points)
+        max_v = max(point[1] for point in local_points)
+        target_rect_local = QtCore.QRectF(
+            float(min_u),
+            float(min_v),
+            float(max(max_u - min_u, 1.0)),
+            float(max(max_v - min_v, 1.0)),
+        )
+        upper_left = upper_start
+        upper_right = upper_end
+        if upper_left.x() > upper_right.x():
+            upper_left, upper_right = upper_right, upper_left
+        label_vec = np.array([upper_right.x() - upper_left.x(), upper_right.y() - upper_left.y()], dtype=float)
+        label_vec_norm = float(np.hypot(label_vec[0], label_vec[1]))
+        if label_vec_norm < 1e-6:
+            label_vec = np.array([1.0, 0.0], dtype=float)
+            label_vec_norm = 1.0
+        label_vec /= label_vec_norm
+        label_normal = outward.copy()
+        if label_normal[1] > 0.0:
+            label_normal *= -1.0
+        label_angle = float(np.degrees(np.arctan2(label_vec[1], label_vec[0])))
+        label_anchor = QtCore.QPointF(
+            float(upper_left.x() + label_normal[0] * 10.0 - label_vec[0] * 2.0),
+            float(upper_left.y() + label_normal[1] * 10.0 - label_vec[1] * 2.0),
+        )
+        return {
+            "center": center,
+            "angle_deg": angle,
+            "length_px": max(target_rect_local.width(), 1.0),
+            "thickness_px": max(target_rect_local.height(), 1.0),
+            "target_rect_local": target_rect_local,
+            "label_anchor": label_anchor,
+            "label_angle_deg": label_angle,
+        }
 
     def _draw_summary(self, painter: QtGui.QPainter, rect: QtCore.QRectF) -> None:
         file_count = len(self._files)
@@ -1638,6 +1878,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._interface_drag_state: dict[str, object] | None = None
         self._overview_region_preview_cache: dict[tuple[object, ...], QtGui.QImage] = {}
         self._overview_region_preview_by_region: dict[str, QtGui.QImage] = {}
+        self._overview_map_image_cache: tuple[str, QtGui.QImage | None] = ("", None)
+        self._overview_depth_text_editing = False
+        self._overview_depth_pending_value: int | None = None
+        self._overview_depth_refresh_timer = QtCore.QTimer(self)
+        self._overview_depth_refresh_timer.setSingleShot(True)
+        self._overview_depth_refresh_timer.setInterval(45)
+        self._overview_depth_refresh_timer.timeout.connect(self._flush_overview_depth_refresh)
 
         self.action_new_project: QtGui.QAction | None = None
         self.action_open_project: QtGui.QAction | None = None
@@ -1945,6 +2192,36 @@ class MainWindow(QtWidgets.QMainWindow):
         overview_layout = QtWidgets.QVBoxLayout(overview_panel)
         overview_layout.setContentsMargins(14, 14, 14, 14)
         overview_layout.setSpacing(8)
+        overview_toolbar = QtWidgets.QHBoxLayout()
+        overview_toolbar.setContentsMargins(0, 0, 0, 0)
+        overview_toolbar.setSpacing(8)
+        self.btn_overview_load_map = QtWidgets.QToolButton()
+        self.btn_overview_load_map.setText("加载底图")
+        self.btn_overview_load_map.setObjectName("interfaceActionButton")
+        self.btn_overview_load_map.clicked.connect(self._load_overview_map)
+        overview_toolbar.addWidget(self.btn_overview_load_map)
+        self.btn_overview_clear_map = QtWidgets.QToolButton()
+        self.btn_overview_clear_map.setText("清除底图")
+        self.btn_overview_clear_map.setObjectName("interfaceActionButton")
+        self.btn_overview_clear_map.clicked.connect(self._clear_overview_map)
+        overview_toolbar.addWidget(self.btn_overview_clear_map)
+        overview_toolbar.addSpacing(10)
+        overview_depth_label = QtWidgets.QLabel("Overview 深度")
+        overview_toolbar.addWidget(overview_depth_label)
+        self.overview_depth_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.overview_depth_slider.setRange(0, 0)
+        self.overview_depth_slider.valueChanged.connect(self._on_overview_depth_changed)
+        self.overview_depth_slider.sliderReleased.connect(self._flush_overview_depth_refresh)
+        overview_toolbar.addWidget(self.overview_depth_slider, stretch=1)
+        self.overview_depth_value = QtWidgets.QLineEdit("0.000")
+        self.overview_depth_value.setFixedWidth(90)
+        self.overview_depth_value.setAlignment(QtCore.Qt.AlignCenter)
+        self.overview_depth_value.setValidator(QtGui.QDoubleValidator(0.0, 1000000.0, 3, self))
+        self.overview_depth_value.textEdited.connect(self._on_overview_depth_text_edited)
+        self.overview_depth_value.returnPressed.connect(self._apply_overview_depth_text)
+        self.overview_depth_value.editingFinished.connect(self._apply_overview_depth_text)
+        overview_toolbar.addWidget(self.overview_depth_value)
+        overview_layout.addLayout(overview_toolbar)
         self.overview_map = OverviewMapWidget()
         self.overview_map.setStyleSheet("background: #fafbfc; border: 1px solid #d0d7df; border-radius: 14px;")
         self.overview_map.region_activated.connect(self._on_overview_region_activated)
@@ -2407,6 +2684,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _connect_signals(self) -> None:
         signals = self.app_controller.signals
         signals.project_changed.connect(self._on_project_changed)
+        signals.overview_changed.connect(lambda _state: self._refresh_overview_controls())
         signals.dataset_loaded.connect(self._on_dataset_loaded)
         signals.display_ready.connect(self._refresh_display)
         signals.display_cleared.connect(self._show_waiting_plots)
@@ -2458,6 +2736,108 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.statusBar().showMessage(f"工程已保存到 {project_file}", 4000)
         QtWidgets.QMessageBox.information(self, "保存工程", f"工程已保存。\n\n{project_file}")
+
+    def _load_overview_map(self) -> None:
+        project_root = self.app_controller.project_state.root_path or ""
+        start_dir = project_root or ""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "选择 Overview 底图",
+            start_dir,
+            "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)",
+        )
+        if not path:
+            return
+        self.app_controller.set_overview_map_image_path(path)
+        self._refresh_overview_scene()
+
+    def _clear_overview_map(self) -> None:
+        self.app_controller.clear_overview_map_image_path()
+        self._refresh_overview_scene()
+
+    def _on_overview_depth_changed(self, value: int) -> None:
+        applied = self.app_controller.set_overview_depth_sample_index(value)
+        if applied != value:
+            self.overview_depth_slider.blockSignals(True)
+            self.overview_depth_slider.setValue(applied)
+            self.overview_depth_slider.blockSignals(False)
+        self._overview_depth_pending_value = applied
+        self._refresh_overview_controls()
+        self._overview_depth_refresh_timer.start()
+
+    def _on_overview_depth_text_edited(self, _text: str) -> None:
+        self._overview_depth_text_editing = True
+
+    def _apply_overview_depth_text(self) -> None:
+        region = self.app_controller.project_controller.get_active_region()
+        if region is None or region.sample_count() <= 0:
+            self._overview_depth_text_editing = False
+            self._refresh_overview_controls()
+            return
+        raw_text = self.overview_depth_value.text().strip().lower().replace("ns", "").strip()
+        try:
+            depth_ns = float(raw_text)
+        except ValueError:
+            self._overview_depth_text_editing = False
+            self._refresh_overview_controls()
+            return
+        dt_ns = max(self.app_controller.current_dt_ns(), 1e-9)
+        target_index = int(round(depth_ns / dt_ns))
+        applied = self.app_controller.set_overview_depth_sample_index(target_index)
+        self.overview_depth_slider.blockSignals(True)
+        self.overview_depth_slider.setValue(applied)
+        self.overview_depth_slider.blockSignals(False)
+        self._overview_depth_pending_value = applied
+        self._overview_depth_text_editing = False
+        self._refresh_overview_controls()
+        self._flush_overview_depth_refresh()
+
+    def _flush_overview_depth_refresh(self) -> None:
+        self._overview_depth_refresh_timer.stop()
+        pending = self._overview_depth_pending_value
+        self._overview_depth_pending_value = None
+        if pending is None:
+            pending = int(self.app_controller.project_state.overview_state.depth_sample_index)
+        applied = self.app_controller.set_overview_depth_sample_index(int(pending))
+        if self.overview_depth_slider.value() != applied:
+            self.overview_depth_slider.blockSignals(True)
+            self.overview_depth_slider.setValue(applied)
+            self.overview_depth_slider.blockSignals(False)
+        self._refresh_overview_controls()
+        self._refresh_overview_scene()
+
+    def _refresh_overview_controls(self) -> None:
+        region = self.app_controller.project_controller.get_active_region()
+        sample_count = region.sample_count() if region is not None else 0
+        maximum = max(sample_count - 1, 0)
+        current = int(np.clip(self.app_controller.project_state.overview_state.depth_sample_index, 0, maximum))
+        self.overview_depth_slider.blockSignals(True)
+        self.overview_depth_slider.setRange(0, maximum)
+        self.overview_depth_slider.setValue(current)
+        self.overview_depth_slider.blockSignals(False)
+        dt_ns = self.app_controller.current_dt_ns()
+        if not self._overview_depth_text_editing and not self.overview_depth_value.hasFocus():
+            self.overview_depth_value.setText(f"{current * dt_ns:.3f}")
+        has_project = self.app_controller.project_state.is_open
+        self.btn_overview_load_map.setEnabled(has_project and not self._is_busy)
+        self.btn_overview_clear_map.setEnabled(bool(self.app_controller.project_state.overview_state.map_image_path) and not self._is_busy)
+        self.overview_depth_slider.setEnabled(sample_count > 0 and not self._is_busy)
+        self.overview_depth_value.setEnabled(sample_count > 0 and not self._is_busy)
+
+    def _load_overview_map_image(self) -> QtGui.QImage | None:
+        map_path = str(self.app_controller.project_state.overview_state.map_image_path or "")
+        cached_path, cached_image = self._overview_map_image_cache
+        if map_path == cached_path:
+            return cached_image
+        if not map_path:
+            self._overview_map_image_cache = ("", None)
+            return None
+        image = QtGui.QImage(map_path)
+        if image.isNull():
+            self._overview_map_image_cache = (map_path, None)
+            return None
+        self._overview_map_image_cache = (map_path, image)
+        return image
 
     def _load_data(self) -> None:
         if not self.app_controller.project_state.is_open:
@@ -2816,6 +3196,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_file_menu()
         self._refresh_project_tree()
         self._refresh_interface_controls()
+        self._refresh_overview_controls()
         self._refresh_overview_scene()
         self._refresh_interface_overlays()
         if self.app_controller.dataset is None:
@@ -2889,7 +3270,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if not project_state.files:
             self.overview_map.clear_scene()
             return
-        self.app_controller.project_controller.sync_active_region_runtime()
         files: list[dict[str, object]] = []
         active_region_id = project_state.active_region_id
         active_file_id = project_state.active_file_id
@@ -2898,18 +3278,16 @@ class MainWindow(QtWidgets.QMainWindow):
         active_interface = self._active_interface()
         if active_region is not None:
             active_trace += int(active_region.trace_start)
+        map_image = self._load_overview_map_image()
         for file_item in project_state.files:
             dataset = self.app_controller.project_controller.get_dataset_for_file(file_item.file_id)
+            navigation = self.app_controller.project_controller.get_navigation_for_file(file_item.file_id)
             trace_count = dataset.trace_count if dataset is not None else max((region.trace_stop for region in file_item.regions), default=1)
             region_items: list[dict[str, object]] = []
             for region in file_item.regions:
                 preview_image = self._build_region_overview_preview(region)
-                has_result = (
-                    (region.region_id in self.app_controller.context.region_runtime_results and bool(
-                        self.app_controller.context.region_runtime_results[region.region_id]
-                    ))
-                    or (preview_image is not None and not preview_image.isNull())
-                )
+                has_result = self._region_has_processed_result(region.region_id, preview_image)
+                navigation_samples = self._navigation_samples_for_region(navigation, region.trace_start, region.trace_stop)
                 region_items.append(
                     {
                         "region_id": region.region_id,
@@ -2919,6 +3297,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         "has_result": has_result,
                         "interface_count": len(region.interfaces),
                         "preview_image": preview_image,
+                        "navigation_samples": navigation_samples,
+                        "render_width": self._region_render_width(region),
+                        "polygon": self._region_polygon_points(navigation_samples, self._region_render_width(region)),
                     }
                 )
             processed_count = sum(1 for item in region_items if bool(item["has_result"]))
@@ -2929,6 +3310,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     "trace_count": max(trace_count, 1),
                     "region_count": len(region_items),
                     "processed_count": processed_count,
+                    "navigation_samples": self._navigation_track_points(navigation),
                     "regions": region_items,
                 }
             )
@@ -2937,15 +3319,12 @@ class MainWindow(QtWidgets.QMainWindow):
             active_region_id=active_region_id,
             active_file_id=active_file_id,
             active_trace=active_trace,
-            active_image=None,
+            map_image=map_image,
             active_region_name=active_region.name if active_region is not None else "",
             active_interface_name=active_interface.name if active_interface is not None else "",
         )
 
     def _build_region_overview_preview(self, region) -> QtGui.QImage | None:
-        cached_region = self._overview_region_preview_by_region.get(region.region_id)
-        if cached_region is not None and not cached_region.isNull():
-            return cached_region
         snapshots = self.app_controller.context.region_runtime_results.get(region.region_id) or []
         if not snapshots:
             return None
@@ -2953,12 +3332,18 @@ class MainWindow(QtWidgets.QMainWindow):
         dataset = self.app_controller.project_controller.build_region_dataset(region)
         if dataset is None:
             return None
-        selection = region.selection_state
+        selection = deepcopy(region.selection_state)
+        overview_sample = int(np.clip(
+            self.app_controller.project_state.overview_state.depth_sample_index,
+            0,
+            max(region.sample_count() - 1, 0),
+        ))
+        selection.sample_index = overview_sample
         display_state = region.display_state
         cache_key = (
             region.region_id,
             snapshot.snapshot_id,
-            int(selection.sample_index),
+            int(overview_sample),
             int(display_state.slice_thickness),
             str(display_state.cscan_attr),
         )
@@ -2981,10 +3366,17 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         state = self.app_controller.display_state
         selection = self.app_controller.selection_state
+        overview_sample = int(np.clip(
+            self.app_controller.project_state.overview_state.depth_sample_index,
+            0,
+            max(region.sample_count() - 1, 0),
+        ))
+        if int(selection.sample_index) != overview_sample:
+            return
         cache_key = (
             region.region_id,
             snapshot.snapshot_id,
-            int(selection.sample_index),
+            int(overview_sample),
             int(state.slice_thickness),
             str(state.cscan_attr),
         )
@@ -2995,6 +3387,67 @@ class MainWindow(QtWidgets.QMainWindow):
             self._preview_image_limits(cscan_view),
         )
         self._overview_region_preview_by_region[region.region_id] = self._overview_region_preview_cache[cache_key]
+
+    def _region_has_processed_result(self, region_id: str, preview_image: QtGui.QImage | None) -> bool:
+        if isinstance(preview_image, QtGui.QImage) and not preview_image.isNull():
+            return True
+        active_region = self.app_controller.project_controller.get_active_region()
+        if active_region is not None and active_region.region_id == region_id and self._has_processed_result():
+            return True
+        cached = self.app_controller.context.region_runtime_results.get(region_id) or []
+        return bool(cached)
+
+    @staticmethod
+    def _navigation_track_points(navigation) -> list[dict[str, float | int]]:
+        if navigation is None:
+            return []
+        return [
+            {"trace_index": int(sample.trace_index), "x": float(sample.x), "y": float(sample.y)}
+            for sample in navigation.samples
+        ]
+
+    @staticmethod
+    def _navigation_samples_for_region(navigation, trace_start: int, trace_stop: int) -> list[dict[str, float | int]]:
+        if navigation is None or not navigation.samples:
+            return []
+        start = int(max(0, trace_start))
+        stop = int(max(start + 1, trace_stop))
+        subset = navigation.samples[start:stop]
+        if len(subset) == 1:
+            subset = subset + subset
+        return [
+            {"trace_index": int(sample.trace_index), "x": float(sample.x), "y": float(sample.y)}
+            for sample in subset
+        ]
+
+    @staticmethod
+    def _region_render_width(region) -> float:
+        return max(2.4, float(region.line_count()) * 0.45)
+
+    @staticmethod
+    def _region_polygon_points(
+        samples: list[dict[str, float | int]],
+        width_m: float,
+    ) -> list[dict[str, float]]:
+        if len(samples) < 2:
+            return []
+        points = np.array([[float(sample["x"]), float(sample["y"])] for sample in samples], dtype=float)
+        half_width = max(width_m * 0.5, 0.5)
+        normals = []
+        for idx in range(points.shape[0]):
+            p_prev = points[idx - 1] if idx > 0 else points[idx]
+            p_next = points[idx + 1] if idx < points.shape[0] - 1 else points[idx]
+            tangent = p_next - p_prev
+            norm = float(np.hypot(tangent[0], tangent[1]))
+            if norm < 1e-9:
+                tangent = np.array([1.0, 0.0], dtype=float)
+                norm = 1.0
+            tangent /= norm
+            normals.append(np.array([-tangent[1], tangent[0]], dtype=float))
+        upper = [point + normal * half_width for point, normal in zip(points, normals)]
+        lower = [point - normal * half_width for point, normal in zip(points, normals)]
+        polygon = upper + list(reversed(lower))
+        return [{"x": float(point[0]), "y": float(point[1])} for point in polygon]
 
     def _refresh_interface_controls(self) -> None:
         region = self.app_controller.project_controller.get_active_region()
@@ -3451,6 +3904,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if kind == "file":
             object_id = payload[1]
             create_action = menu.addAction("新建区域")
+            remove_action = menu.addAction("从工程中移除数据")
             chosen = menu.exec(self.project_tree.viewport().mapToGlobal(pos))
             if chosen is create_action:
                 base_region_id = None
@@ -3459,6 +3913,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 if active_file is not None and active_region is not None and active_file.file_id == str(object_id):
                     base_region_id = active_region.region_id
                 self._create_region(str(object_id), base_region_id=base_region_id)
+            elif chosen is remove_action:
+                self._delete_project_file(str(object_id))
             return
         if kind == "region":
             object_id = payload[1]
@@ -3555,6 +4011,24 @@ class MainWindow(QtWidgets.QMainWindow):
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, "区域", str(exc))
 
+    def _delete_project_file(self, file_id: str) -> None:
+        file_item = self.app_controller.project_controller.get_file(file_id)
+        if file_item is None:
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "移除数据文件",
+            f"将“{file_item.name}”从当前工程中移除？\n\n此操作不会删除工程目录中的原始数据文件。",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+        try:
+            self.app_controller.delete_project_file(file_id)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "工程", str(exc))
+
     def _edit_region_bounds(self, region_id: str, *, allow_cancel: bool = False) -> None:
         region = self.app_controller.project_controller.get_region(region_id)
         file_item = self.app_controller.project_controller.find_file_by_region_id(region_id)
@@ -3615,6 +4089,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_settings_info()
         self._show_waiting_plots()
         self._refresh_project_tree()
+        self._refresh_overview_controls()
         self._refresh_overview_scene()
         self._refresh_interface_controls()
         if restoring_project:
@@ -3663,6 +4138,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_set_transform.setEnabled(has_dataset and not self._is_busy)
         self.btn_add_time.setEnabled(has_dataset and not self._is_busy)
         self.pipeline_step_list.setEnabled(has_dataset and not self._is_busy)
+        self._refresh_overview_controls()
         self._refresh_step_details()
     def _refresh_display(self, display: DisplayData) -> None:
         self.display_data = display

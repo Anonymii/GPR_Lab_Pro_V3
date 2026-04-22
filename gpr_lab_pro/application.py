@@ -285,6 +285,15 @@ class GPRApplication(QtCore.QObject):
         self._cache_active_region_result_state()
         return self.project_controller.save_project()
 
+    def set_overview_depth_sample_index(self, sample_index: int) -> int:
+        return self.project_controller.set_overview_depth_sample_index(sample_index)
+
+    def set_overview_map_image_path(self, path: str) -> None:
+        self.project_controller.set_overview_map_image_path(path)
+
+    def clear_overview_map_image_path(self) -> None:
+        self.project_controller.clear_overview_map_image_path()
+
     def create_project_region(self, file_id: str, *, name: str | None = None, base_region_id: str | None = None) -> str:
         self.project_controller.sync_active_region_runtime()
         self._cache_active_region_result_state()
@@ -324,6 +333,22 @@ class GPRApplication(QtCore.QObject):
             sample_stop=sample_stop,
         )
         self.select_project_region(region_id)
+
+    def delete_project_file(self, file_id: str) -> None:
+        self.project_controller.sync_active_region_runtime()
+        self._cache_active_region_result_state()
+        fallback_region_id = self.project_controller.delete_file(file_id)
+        if fallback_region_id:
+            self.select_project_region(fallback_region_id)
+            return
+        self.dataset_state.current_dataset = None
+        self.pipeline_state.draft_steps.clear()
+        self.pipeline_state.applied_steps.clear()
+        self.pipeline_state.has_unapplied_changes = False
+        self.result_state.history.clear()
+        self.result_state.active_snapshot = None
+        self.signals.display_cleared.emit()
+        self.signals.pipeline_changed.emit(list(self.pipeline_state.draft_steps))
 
     def create_region_interface(self, region_id: str, *, name: str | None = None) -> str:
         interface = self.project_controller.create_interface(region_id, name=name)

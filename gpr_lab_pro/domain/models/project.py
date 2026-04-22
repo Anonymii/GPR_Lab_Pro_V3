@@ -18,6 +18,30 @@ class InterfaceTrace:
 
 
 @dataclass
+class NavigationSample:
+    trace_index: int
+    x: float
+    y: float
+    timestamp_s: float | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+
+
+@dataclass
+class NavigationTrack:
+    mode: str = "simulated"
+    source_path: str = ""
+    samples: list[NavigationSample] = field(default_factory=list)
+
+
+@dataclass
+class OverviewState:
+    depth_sample_index: int = 0
+    map_image_path: str = ""
+    map_opacity: float = 1.0
+
+
+@dataclass
 class ProjectRegionState:
     region_id: str
     dataset_id: str
@@ -53,6 +77,7 @@ class ProjectFileState:
     name: str
     source_path: str = ""
     import_params: dict[str, Any] = field(default_factory=dict)
+    navigation: NavigationTrack = field(default_factory=NavigationTrack)
     regions: list[ProjectRegionState] = field(default_factory=list)
 
 
@@ -66,6 +91,7 @@ class ProjectState:
     files: list[ProjectFileState] = field(default_factory=list)
     active_file_id: str = ""
     active_region_id: str = ""
+    overview_state: OverviewState = field(default_factory=OverviewState)
 
 
 @dataclass

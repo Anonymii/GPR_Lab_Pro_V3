@@ -10,7 +10,13 @@ import numpy as np
 from gpr_lab_pro.app.context import ApplicationContext
 from gpr_lab_pro.domain.models.dataset import DatasetRecord
 from gpr_lab_pro.domain.models.display import DisplayState, SelectionState
-from gpr_lab_pro.domain.models.project import InterfaceTrace, ProjectFileState, ProjectRegionState
+from gpr_lab_pro.domain.models.project import (
+    InterfaceTrace,
+    NavigationSample,
+    NavigationTrack,
+    ProjectFileState,
+    ProjectRegionState,
+)
 
 
 class ProjectController:
@@ -80,6 +86,7 @@ class ProjectController:
                 existing_file.regions.append(self._create_default_region(dataset))
             for region in existing_file.regions:
                 region.dataset_id = existing_file.dataset_id
+            self._ensure_navigation_for_file(existing_file, dataset)
 
         self.state.is_open = True
         self.state.last_opened_file = dataset.filename
@@ -139,6 +146,9 @@ class ProjectController:
         region = self.get_active_region()
         if region is None:
             return None
+        return self.build_region_dataset(region)
+
+    def build_region_dataset(self, region: ProjectRegionState) -> DatasetRecord | None:
         dataset = self.context.dataset_state.datasets_by_id.get(region.dataset_id)
         if dataset is None:
             return None
@@ -151,6 +161,54 @@ class ProjectController:
             line_stop=region.line_stop,
             region_name=f"{dataset.filename} - {region.name}",
         )
+
+    def overview_depth_sample_index(self) -> int:
+        return int(self.state.overview_state.depth_sample_index)
+
+    def set_overview_depth_sample_index(self, sample_index: int) -> int:
+        value = max(0, int(sample_index))
+        region = self.get_active_region()
+        if region is not None:
+            value = int(np.clip(value, 0, max(region.sample_count() - 1, 0)))
+        self.state.overview_state.depth_sample_index = value
+        self.context.signals.overview_changed.emit(self.state.overview_state)
+        return value
+
+    def set_overview_map_image_path(self, path: str) -> None:
+        self.state.overview_state.map_image_path = path.strip()
+        self.context.signals.overview_changed.emit(self.state.overview_state)
+
+    def clear_overview_map_image_path(self) -> None:
+        self.state.overview_state.map_image_path = ""
+        self.context.signals.overview_changed.emit(self.state.overview_state)
+
+    def delete_file(self, file_id: str) -> str | None:
+        index = next((idx for idx, item in enumerate(self.state.files) if item.file_id == file_id), -1)
+        if index < 0:
+            raise ValueError("未找到数据文件。")
+        file_item = self.state.files.pop(index)
+        for region in file_item.regions:
+            self.context.region_runtime_results.pop(region.region_id, None)
+        if not self.state.files:
+            self.state.active_file_id = ""
+            self.state.active_region_id = ""
+            self.state.last_opened_file = ""
+            self.context.signals.project_changed.emit(self.state)
+            return None
+        fallback_file = self.state.files[min(index, len(self.state.files) - 1)]
+        fallback_region = fallback_file.regions[0] if fallback_file.regions else None
+        self.state.active_file_id = fallback_file.file_id
+        self.state.active_region_id = fallback_region.region_id if fallback_region is not None else ""
+        self.state.last_opened_file = fallback_file.name
+        self.context.signals.project_changed.emit(self.state)
+        return self.state.active_region_id or None
+
+    def get_navigation_for_file(self, file_id: str) -> NavigationTrack | None:
+        file_item = self.get_file(file_id)
+        if file_item is None:
+            return None
+        dataset = self.get_dataset_for_file(file_id)
+        return self._ensure_navigation_for_file(file_item, dataset)
 
     def sync_active_region_runtime(self) -> None:
         region = self.get_active_region()
@@ -513,12 +571,14 @@ class ProjectController:
         dataset_id = dataset.dataset_id or uuid.uuid4().hex
         dataset.dataset_id = dataset_id
         region = self._create_default_region(dataset)
+        navigation = self._create_simulated_navigation(dataset, file_index=len(self.state.files))
         return ProjectFileState(
             file_id=file_id,
             dataset_id=dataset_id,
             name=dataset.filename,
             source_path=dataset.source_path,
             import_params=dict(dataset.import_params),
+            navigation=navigation,
             regions=[region],
         )
 
@@ -560,6 +620,45 @@ class ProjectController:
         if source.resolve() != target.resolve():
             shutil.copy2(source, target)
         return str(target)
+
+    def _ensure_navigation_for_file(
+        self,
+        file_item: ProjectFileState,
+        dataset: DatasetRecord | None,
+    ) -> NavigationTrack:
+        trace_count = dataset.trace_count if dataset is not None else 0
+        if trace_count <= 0:
+            return file_item.navigation
+        if file_item.navigation.samples and len(file_item.navigation.samples) == trace_count:
+            return file_item.navigation
+        file_index = next((idx for idx, item in enumerate(self.state.files) if item.file_id == file_item.file_id), 0)
+        file_item.navigation = self._create_simulated_navigation(dataset, file_index=file_index)
+        return file_item.navigation
+
+    def _create_simulated_navigation(self, dataset: DatasetRecord, *, file_index: int) -> NavigationTrack:
+        trace_count = max(int(dataset.trace_count), 1)
+        spacing_m = 0.05
+        total_length = max(trace_count - 1, 1) * spacing_m
+        angle = np.deg2rad(12.0 + (file_index % 5) * 7.5)
+        base_x = 12.0 + file_index * 16.0
+        base_y = 12.0 + file_index * 10.0
+        direction = np.array([np.cos(angle), np.sin(angle)], dtype=float)
+        normal = np.array([-direction[1], direction[0]], dtype=float)
+        samples: list[NavigationSample] = []
+        for trace_idx in range(trace_count):
+            t = trace_idx / max(trace_count - 1, 1)
+            along = total_length * t
+            lateral = 1.2 * np.sin(t * np.pi * 1.35 + file_index * 0.35)
+            point = np.array([base_x, base_y], dtype=float) + direction * along + normal * lateral
+            samples.append(
+                NavigationSample(
+                    trace_index=trace_idx,
+                    x=float(point[0]),
+                    y=float(point[1]),
+                    timestamp_s=float(trace_idx * 0.05),
+                )
+            )
+        return NavigationTrack(mode="simulated", samples=samples)
 
     @staticmethod
     def _normalize_bounds(start: int, stop: int, full_count: int) -> tuple[int, int]:

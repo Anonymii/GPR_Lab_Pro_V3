@@ -10,6 +10,9 @@ from gpr_lab_pro.domain.models.display import DisplayState, SelectionState
 from gpr_lab_pro.domain.models.pipeline import PipelineStep
 from gpr_lab_pro.domain.models.project import (
     InterfaceTrace,
+    NavigationSample,
+    NavigationTrack,
+    OverviewState,
     ProjectFileState,
     ProjectRegionState,
     ProjectState,
@@ -47,6 +50,7 @@ class ProjectStore:
                         "project_file": path.name,
                         "active_file_id": project.active_file_id,
                         "active_region_id": project.active_region_id,
+                        "overview_state": self._serialize_overview_state(project.overview_state, project_root),
                         "files": [self._serialize_file(item, project_root, result_relpaths) for item in project.files],
                     },
                     "dataset": {
@@ -103,6 +107,7 @@ class ProjectStore:
                 files=files,
                 active_file_id=active_file_id,
                 active_region_id=active_region_id,
+                overview_state=self._deserialize_overview_state(project_payload.get("overview_state", {}), project_root),
             ),
             "dataset_source_path": self._resolve_project_path(dataset_payload.get("source_path", ""), project_root),
             "dataset_import_params": self._deserialize_import_params(dataset_payload.get("import_params")),
@@ -138,6 +143,7 @@ class ProjectStore:
             "name": item.name,
             "source_path": self._to_project_relative(item.source_path, project_root),
             "import_params": self._serialize_import_params(item.import_params),
+            "navigation": self._serialize_navigation(item.navigation, project_root),
             "regions": [self._serialize_region(region, result_relpaths) for region in item.regions],
         }
 
@@ -171,6 +177,31 @@ class ProjectStore:
             "samples_by_line": item.samples_by_line,
         }
 
+    def _serialize_navigation(self, item: NavigationTrack, project_root: Path) -> dict[str, object]:
+        return {
+            "mode": item.mode,
+            "source_path": self._to_project_relative(item.source_path, project_root),
+            "samples": [self._serialize_navigation_sample(sample) for sample in item.samples],
+        }
+
+    @staticmethod
+    def _serialize_navigation_sample(item: NavigationSample) -> dict[str, object]:
+        return {
+            "trace_index": int(item.trace_index),
+            "x": float(item.x),
+            "y": float(item.y),
+            "timestamp_s": None if item.timestamp_s is None else float(item.timestamp_s),
+            "latitude": None if item.latitude is None else float(item.latitude),
+            "longitude": None if item.longitude is None else float(item.longitude),
+        }
+
+    def _serialize_overview_state(self, item: OverviewState, project_root: Path) -> dict[str, object]:
+        return {
+            "depth_sample_index": int(item.depth_sample_index),
+            "map_image_path": self._to_project_relative(item.map_image_path, project_root),
+            "map_opacity": float(item.map_opacity),
+        }
+
     @staticmethod
     def _deserialize_step(payload: dict[str, object]) -> PipelineStep:
         return PipelineStep(
@@ -190,6 +221,7 @@ class ProjectStore:
             name=str(payload.get("name", "")),
             source_path=self._resolve_project_path(payload.get("source_path", ""), project_root),
             import_params=self._serialize_import_params(payload.get("import_params")),
+            navigation=self._deserialize_navigation(payload.get("navigation", {}), project_root),
             regions=[self._deserialize_region(item) for item in payload.get("regions", [])],
         )
 
@@ -222,6 +254,39 @@ class ProjectStore:
             color=str(payload.get("color", "#ff8c42")),
             visible=bool(payload.get("visible", True)),
             samples_by_line=dict(samples) if isinstance(samples, dict) else {},
+        )
+
+    def _deserialize_navigation(self, payload: dict[str, object], project_root: Path) -> NavigationTrack:
+        if not isinstance(payload, dict):
+            return NavigationTrack()
+        return NavigationTrack(
+            mode=str(payload.get("mode", "simulated") or "simulated"),
+            source_path=self._resolve_project_path(payload.get("source_path", ""), project_root),
+            samples=[
+                self._deserialize_navigation_sample(item)
+                for item in payload.get("samples", [])
+                if isinstance(item, dict)
+            ],
+        )
+
+    @staticmethod
+    def _deserialize_navigation_sample(payload: dict[str, object]) -> NavigationSample:
+        return NavigationSample(
+            trace_index=int(payload.get("trace_index", 0)),
+            x=float(payload.get("x", 0.0)),
+            y=float(payload.get("y", 0.0)),
+            timestamp_s=(None if payload.get("timestamp_s") is None else float(payload.get("timestamp_s"))),
+            latitude=(None if payload.get("latitude") is None else float(payload.get("latitude"))),
+            longitude=(None if payload.get("longitude") is None else float(payload.get("longitude"))),
+        )
+
+    def _deserialize_overview_state(self, payload: dict[str, object], project_root: Path) -> OverviewState:
+        if not isinstance(payload, dict):
+            return OverviewState()
+        return OverviewState(
+            depth_sample_index=int(payload.get("depth_sample_index", 0)),
+            map_image_path=self._resolve_project_path(payload.get("map_image_path", ""), project_root),
+            map_opacity=float(payload.get("map_opacity", 1.0) or 1.0),
         )
 
     @staticmethod

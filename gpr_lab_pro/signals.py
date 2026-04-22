@@ -5,6 +5,7 @@ from PySide6 import QtCore
 
 class AppSignals(QtCore.QObject):
     project_changed = QtCore.Signal(object)
+    overview_changed = QtCore.Signal(object)
     dataset_loaded = QtCore.Signal(object)
     display_ready = QtCore.Signal(object)
     display_cleared = QtCore.Signal()
