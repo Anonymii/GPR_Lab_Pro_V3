@@ -355,6 +355,33 @@ class GPRApplication(QtCore.QObject):
             sample_index=sample_index,
         )
 
+    def set_region_interface_line_samples(
+        self,
+        region_id: str,
+        interface_id: str,
+        *,
+        line_index: int,
+        samples: list[float | None],
+    ) -> None:
+        self.project_controller.set_interface_line_samples(
+            region_id,
+            interface_id,
+            line_index=line_index,
+            samples=samples,
+        )
+
+    def clear_region_interface_line(self, region_id: str, interface_id: str, *, line_index: int) -> None:
+        self.project_controller.clear_interface_line(region_id, interface_id, line_index=line_index)
+
+    def clear_region_interface(self, region_id: str, interface_id: str) -> None:
+        self.project_controller.clear_interface(region_id, interface_id)
+
+    def fill_region_interface_line(self, region_id: str, interface_id: str, *, line_index: int) -> None:
+        self.project_controller.fill_interface_line(region_id, interface_id, line_index=line_index)
+
+    def smooth_region_interface_line(self, region_id: str, interface_id: str, *, line_index: int) -> None:
+        self.project_controller.smooth_interface_line(region_id, interface_id, line_index=line_index)
+
     def select_project_region(self, region_id: str) -> None:
         self.project_controller.sync_active_region_runtime()
         self._cache_active_region_result_state()

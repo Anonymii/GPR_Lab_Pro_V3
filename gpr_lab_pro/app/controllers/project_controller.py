@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
@@ -337,6 +337,114 @@ class ProjectController:
         elif len(values) > region.trace_count():
             values = values[: region.trace_count()]
         values[trace_idx] = sample_value
+        interface.samples_by_line[line_key] = values
+        self.context.signals.project_changed.emit(self.state)
+        return interface
+
+    def set_interface_line_samples(
+        self,
+        region_id: str,
+        interface_id: str,
+        *,
+        line_index: int,
+        samples: list[float | None],
+    ) -> InterfaceTrace:
+        region = self.get_region(region_id)
+        interface = self.get_interface(region_id, interface_id)
+        if region is None or interface is None:
+            raise ValueError("未找到界面。")
+        line_idx = int(np.clip(line_index, 0, max(region.line_count() - 1, 0)))
+        line_key = str(line_idx)
+        values = list(samples[: region.trace_count()])
+        if len(values) < region.trace_count():
+            values.extend([None] * (region.trace_count() - len(values)))
+        normalized: list[float | None] = []
+        max_sample = max(region.sample_count() - 1, 0)
+        for value in values:
+            if value is None:
+                normalized.append(None)
+            else:
+                normalized.append(float(np.clip(float(value), 0.0, max_sample)))
+        interface.samples_by_line[line_key] = normalized
+        self.context.signals.project_changed.emit(self.state)
+        return interface
+
+    def clear_interface_line(self, region_id: str, interface_id: str, *, line_index: int) -> InterfaceTrace:
+        region = self.get_region(region_id)
+        interface = self.get_interface(region_id, interface_id)
+        if region is None or interface is None:
+            raise ValueError("未找到界面。")
+        line_idx = int(np.clip(line_index, 0, max(region.line_count() - 1, 0)))
+        interface.samples_by_line[str(line_idx)] = [None] * region.trace_count()
+        self.context.signals.project_changed.emit(self.state)
+        return interface
+
+    def clear_interface(self, region_id: str, interface_id: str) -> InterfaceTrace:
+        region = self.get_region(region_id)
+        interface = self.get_interface(region_id, interface_id)
+        if region is None or interface is None:
+            raise ValueError("未找到界面。")
+        interface.samples_by_line = {}
+        self.context.signals.project_changed.emit(self.state)
+        return interface
+
+    def fill_interface_line(self, region_id: str, interface_id: str, *, line_index: int) -> InterfaceTrace:
+        region = self.get_region(region_id)
+        interface = self.get_interface(region_id, interface_id)
+        if region is None or interface is None:
+            raise ValueError("未找到界面。")
+        line_idx = int(np.clip(line_index, 0, max(region.line_count() - 1, 0)))
+        line_key = str(line_idx)
+        values = list(interface.samples_by_line.get(line_key, []))
+        if len(values) < region.trace_count():
+            values.extend([None] * (region.trace_count() - len(values)))
+        known = [(idx, float(value)) for idx, value in enumerate(values) if value is not None]
+        if len(known) < 2:
+            raise ValueError("当前测线上至少需要两个界面点才能补线。")
+        for (idx0, val0), (idx1, val1) in zip(known, known[1:]):
+            if idx1 - idx0 <= 1:
+                continue
+            for fill_idx in range(idx0 + 1, idx1):
+                ratio = (fill_idx - idx0) / (idx1 - idx0)
+                values[fill_idx] = float(val0 + ratio * (val1 - val0))
+        interface.samples_by_line[line_key] = values
+        self.context.signals.project_changed.emit(self.state)
+        return interface
+
+    def smooth_interface_line(self, region_id: str, interface_id: str, *, line_index: int) -> InterfaceTrace:
+        region = self.get_region(region_id)
+        interface = self.get_interface(region_id, interface_id)
+        if region is None or interface is None:
+            raise ValueError("未找到界面。")
+        line_idx = int(np.clip(line_index, 0, max(region.line_count() - 1, 0)))
+        line_key = str(line_idx)
+        values = list(interface.samples_by_line.get(line_key, []))
+        if len(values) < region.trace_count():
+            values.extend([None] * (region.trace_count() - len(values)))
+        known = [idx for idx, value in enumerate(values) if value is not None]
+        if len(known) < 3:
+            raise ValueError("当前测线上至少需要三个界面点才能平滑。")
+        start = known[0]
+        stop = known[-1] + 1
+        segment = np.array([np.nan if values[idx] is None else float(values[idx]) for idx in range(start, stop)], dtype=float)
+        if np.all(np.isnan(segment)):
+            raise ValueError("当前测线上没有可平滑的数据。")
+        valid_idx = np.flatnonzero(~np.isnan(segment))
+        if valid_idx.size >= 2:
+            filled = np.interp(np.arange(segment.size, dtype=float), valid_idx.astype(float), segment[valid_idx])
+        else:
+            filled = np.nan_to_num(segment, nan=0.0)
+        kernel = np.array([1.0, 3.0, 5.0, 6.0, 5.0, 3.0, 1.0], dtype=float)
+        kernel /= kernel.sum()
+        pad = kernel.size // 2
+        smoothed = filled.copy()
+        for _ in range(5):
+            padded = np.pad(smoothed, (pad, pad), mode="edge")
+            smoothed = np.convolve(padded, kernel, mode="valid")
+        smoothed[0] = filled[0]
+        smoothed[-1] = filled[-1]
+        for offset, sample_value in enumerate(smoothed):
+            values[start + offset] = float(np.clip(sample_value, 0.0, max(region.sample_count() - 1, 0)))
         interface.samples_by_line[line_key] = values
         self.context.signals.project_changed.emit(self.state)
         return interface

@@ -14,6 +14,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from gpr_lab_pro.application import GPRApplication
 from gpr_lab_pro.domain.enums import StepKind
 from gpr_lab_pro.domain.models.display import DisplayData
+from gpr_lab_pro.render.adapters.cscan_adapter import build_cscan
 from gpr_lab_pro.processing.catalog_v11 import OperationSpec, SPEC_BY_TYPE
 from gpr_lab_pro.processing.module_registry_v11 import MODULE_SPECS
 
@@ -341,6 +342,8 @@ class OverviewMapWidget(QtWidgets.QWidget):
         self._active_file_id = ""
         self._active_trace = 0
         self._active_image: QtGui.QImage | None = None
+        self._active_region_name = ""
+        self._active_interface_name = ""
         self._layout_rects: list[tuple[str, QtCore.QRectF, dict[str, object]]] = []
         self._hover_region_id = ""
         self.setMinimumHeight(240)
@@ -352,6 +355,8 @@ class OverviewMapWidget(QtWidgets.QWidget):
         self._active_file_id = ""
         self._active_trace = 0
         self._active_image = None
+        self._active_region_name = ""
+        self._active_interface_name = ""
         self._layout_rects = []
         self.update()
 
@@ -363,12 +368,16 @@ class OverviewMapWidget(QtWidgets.QWidget):
         active_file_id: str,
         active_trace: int = 0,
         active_image: QtGui.QImage | None = None,
+        active_region_name: str = "",
+        active_interface_name: str = "",
     ) -> None:
         self._files = list(files)
         self._active_region_id = active_region_id
         self._active_file_id = active_file_id
         self._active_trace = int(active_trace)
         self._active_image = active_image
+        self._active_region_name = active_region_name
+        self._active_interface_name = active_interface_name
         self._layout_rects = []
         self._hover_region_id = ""
         self.update()
@@ -411,9 +420,10 @@ class OverviewMapWidget(QtWidgets.QWidget):
                 QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
                 f"{int(file_item.get('processed_count', 0))}/{int(file_item.get('region_count', 0))}",
             )
-            painter.setPen(QtGui.QPen(QtGui.QColor("#c7d0da"), 1.0))
-            painter.setBrush(QtGui.QColor("#edf2f7") if active_file else QtGui.QColor("#f5f7fa"))
-            painter.drawRoundedRect(lane_rect, 9, 9)
+            painter.setPen(QtGui.QPen(QtGui.QColor("#d7dce3"), 1.0))
+            painter.setBrush(QtCore.Qt.NoBrush)
+            mid_y = lane_rect.center().y()
+            painter.drawLine(QtCore.QPointF(lane_rect.left(), mid_y), QtCore.QPointF(lane_rect.right(), mid_y))
             if active_file:
                 total_trace_count = max(int(file_item.get("trace_count", 1)), 1)
                 cx = lane_rect.left() + np.clip(self._active_trace / max(total_trace_count - 1, 1), 0.0, 1.0) * lane_rect.width()
@@ -424,24 +434,28 @@ class OverviewMapWidget(QtWidgets.QWidget):
         for region_id, rect, item in rects:
             active = region_id == self._active_region_id
             painter.save()
-            if active and self._active_image is not None and not self._active_image.isNull():
-                painter.setClipRect(rect.adjusted(1, 1, -1, -1))
-                painter.drawImage(rect, self._active_image)
+            preview_image = item.get("preview_image")
+            region_fill_path = QtGui.QPainterPath()
+            region_fill_path.addRoundedRect(rect.adjusted(1, 1, -1, -1), 9, 9)
+            if isinstance(preview_image, QtGui.QImage) and not preview_image.isNull():
+                painter.setClipPath(region_fill_path)
+                painter.drawImage(rect, preview_image)
                 painter.setClipping(False)
             elif bool(item.get("has_result", False)):
-                painter.setBrush(QtGui.QColor(170, 208, 180, 120))
+                painter.fillPath(region_fill_path, QtGui.QColor(160, 160, 160, 78))
             else:
-                painter.setBrush(QtGui.QColor(198, 206, 214, 90))
-            border = QtGui.QColor("#1d8f63") if active else QtGui.QColor("#6d7782")
+                painter.fillPath(region_fill_path, QtGui.QColor("#ffffff"))
+            if active:
+                border = QtGui.QColor("#ff9f1a")
+            elif bool(item.get("has_result", False)):
+                border = QtGui.QColor("#2b8b57")
+            else:
+                border = QtGui.QColor("#0d63ff")
             if region_id == self._hover_region_id and not active:
                 border = QtGui.QColor("#40586e")
             painter.setPen(QtGui.QPen(border, 2.0 if active else 1.0))
             painter.setBrush(QtCore.Qt.NoBrush)
             painter.drawRoundedRect(rect, 10, 10)
-            if bool(item.get("has_result", False)) and not active:
-                painter.fillRect(rect.adjusted(1, 1, -1, -1), QtGui.QColor(170, 208, 180, 105))
-            elif not bool(item.get("has_result", False)):
-                painter.fillRect(rect.adjusted(1, 1, -1, -1), QtGui.QColor(210, 216, 224, 75))
             interface_count = int(item.get("interface_count", 0))
             if interface_count > 0:
                 badge_rect = QtCore.QRectF(rect.right() - 30.0, rect.top() + 4.0, 24.0, 14.0)
@@ -453,9 +467,6 @@ class OverviewMapWidget(QtWidgets.QWidget):
                 badge_font.setBold(True)
                 painter.setFont(badge_font)
                 painter.drawText(badge_rect, QtCore.Qt.AlignCenter, f"I{interface_count}")
-            if active:
-                painter.setPen(QtGui.QPen(QtGui.QColor("#0d63ff"), 1.2))
-                painter.drawRect(rect.adjusted(0.5, 0.5, -0.5, -0.5))
             if rect.width() >= 72:
                 text_rect = rect.adjusted(6, 2, -6, -2)
                 painter.setPen(QtGui.QColor("#24313f"))
@@ -560,6 +571,7 @@ class OverviewMapWidget(QtWidgets.QWidget):
                     "interface_count": int(region.get("interface_count", 0)),
                     "trace_start": int(region.get("trace_start", 0)),
                     "trace_stop": int(region.get("trace_stop", 0)),
+                    "preview_image": region.get("preview_image"),
                     "file_trace_count": int(trace_count),
                     "lane_left": lane_left,
                     "lane_top": lane_top,
@@ -589,10 +601,17 @@ class OverviewMapWidget(QtWidgets.QWidget):
         summary_font = QtGui.QFont("Microsoft YaHei UI", 8)
         summary_font.setBold(True)
         painter.setFont(summary_font)
+        suffix_parts: list[str] = []
+        if self._active_region_name:
+            suffix_parts.append(f"当前区域 {self._active_region_name}")
+        if self._active_interface_name:
+            suffix_parts.append(f"当前界面 {self._active_interface_name}")
+        suffix = "  |  ".join(suffix_parts)
         painter.drawText(
             rect,
             QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter,
-            f"文件 {file_count}  区域 {region_count}  已处理 {processed_count}  界面 {interface_count}",
+            f"文件 {file_count}  区域 {region_count}  已处理 {processed_count}  界面 {interface_count}"
+            + (f"  |  {suffix}" if suffix else ""),
         )
         painter.restore()
 
@@ -601,6 +620,11 @@ class RasterViewportWidget(QtWidgets.QWidget):
     view_changed = QtCore.Signal(object, object, object)
     point_selected = QtCore.Signal(object, float, float)
     guide_moved = QtCore.Signal(object, float, float)
+    erase_requested = QtCore.Signal(object, float, float)
+    overlay_drag_started = QtCore.Signal(object)
+    overlay_dragged = QtCore.Signal(object, float, float)
+    overlay_drag_finished = QtCore.Signal(object)
+    overlay_point_dragged = QtCore.Signal(object, float, float)
 
     def __init__(
         self,
@@ -635,9 +659,11 @@ class RasterViewportWidget(QtWidgets.QWidget):
         self._vline: tuple[float, QtGui.QColor] | None = None
         self._hline: tuple[float, QtGui.QColor] | None = None
         self._overlays: list[dict[str, object]] = []
+        self._active_drag_path: list[tuple[float, float]] = []
         self._show_axes = True
         self._drag_state: dict[str, object] | None = None
         self._guide_grab_mode: str | None = None
+        self._interaction_mode = "default"
         self.setMouseTracking(True)
         self.setMinimumSize(120, 120)
 
@@ -681,6 +707,13 @@ class RasterViewportWidget(QtWidgets.QWidget):
         self._overlays = list(overlays or [])
         self.update()
 
+    def set_active_drag_path(self, points: list[tuple[float, float]] | None) -> None:
+        self._active_drag_path = list(points or [])
+
+    def set_interaction_mode(self, mode: str) -> None:
+        self._interaction_mode = mode
+        self.unsetCursor()
+
     def set_overlay_lines(
         self,
         *,
@@ -716,12 +749,44 @@ class RasterViewportWidget(QtWidgets.QWidget):
         self._draw_border(painter, plot_rect)
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.RightButton and self._image is not None:
+            plot_rect = self._plot_rect()
+            if self._interaction_mode == "paint" and plot_rect.contains(event.position()):
+                data_x, data_y = self._data_from_point(event.position(), plot_rect)
+                self._drag_state = {"mode": "erase"}
+                self.erase_requested.emit(self.view_key, data_x, data_y)
+                event.accept()
+                return
+            if plot_rect.contains(event.position()):
+                overlay_point = self._hit_test_overlay_point(event.position(), plot_rect)
+                if overlay_point is not None:
+                    self.erase_requested.emit(self.view_key, float(overlay_point[0]), float(overlay_point[1]))
+                    event.accept()
+                    return
         if event.button() != QtCore.Qt.LeftButton or self._image is None:
             super().mousePressEvent(event)
             return
         plot_rect = self._plot_rect()
         if not plot_rect.contains(event.position()):
             super().mousePressEvent(event)
+            return
+        if self._interaction_mode == "paint":
+            data_x, data_y = self._data_from_point(event.position(), plot_rect)
+            self._drag_state = {"mode": "paint"}
+            self.point_selected.emit(self.view_key, data_x, data_y)
+            event.accept()
+            return
+        overlay_point = self._hit_test_overlay_point(event.position(), plot_rect)
+        if overlay_point is not None:
+            self._drag_state = {"mode": "overlay_point_drag", "anchor_x": float(overlay_point[0])}
+            self.setCursor(QtCore.Qt.ClosedHandCursor)
+            event.accept()
+            return
+        if self._hit_test_overlay_path(event.position(), plot_rect):
+            data_x, data_y = self._data_from_point(event.position(), plot_rect)
+            self._drag_state = {"mode": "overlay_drag", "anchor_y": data_y}
+            self.overlay_drag_started.emit(self.view_key)
+            event.accept()
             return
         guide_mode = self._hit_test_guides(event.position(), plot_rect)
         if guide_mode is not None:
@@ -746,6 +811,26 @@ class RasterViewportWidget(QtWidgets.QWidget):
         if plot_rect.width() <= 1 or plot_rect.height() <= 1:
             return
         mode = str(self._drag_state.get("mode", "pan"))
+        if mode == "paint":
+            data_x, data_y = self._data_from_point(event.position(), plot_rect)
+            self.point_selected.emit(self.view_key, data_x, data_y)
+            event.accept()
+            return
+        if mode == "erase":
+            data_x, data_y = self._data_from_point(event.position(), plot_rect)
+            self.erase_requested.emit(self.view_key, data_x, data_y)
+            event.accept()
+            return
+        if mode == "overlay_drag":
+            data_x, data_y = self._data_from_point(event.position(), plot_rect)
+            self.overlay_dragged.emit(self.view_key, float(self._drag_state.get("anchor_y", data_y)), float(data_y))
+            event.accept()
+            return
+        if mode == "overlay_point_drag":
+            _data_x, data_y = self._data_from_point(event.position(), plot_rect)
+            self.overlay_point_dragged.emit(self.view_key, float(self._drag_state.get("anchor_x", 0.0)), float(data_y))
+            event.accept()
+            return
         if mode != "pan":
             data_x, data_y = self._data_from_point(event.position(), plot_rect)
             current_x = self._vline[0] if self._vline is not None else data_x
@@ -780,6 +865,8 @@ class RasterViewportWidget(QtWidgets.QWidget):
         event.accept()
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
+        if self._drag_state is not None and str(self._drag_state.get("mode", "")) == "overlay_drag":
+            self.overlay_drag_finished.emit(self.view_key)
         self._drag_state = None
         self._guide_grab_mode = None
         self._update_hover_cursor(event.position(), self._plot_rect())
@@ -946,6 +1033,7 @@ class RasterViewportWidget(QtWidgets.QWidget):
             if isinstance(point_markers, list):
                 painter.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 0.8))
                 painter.setBrush(color)
+                point_radius = float(overlay.get("point_radius", 2.4))
                 for point in point_markers:
                     if not isinstance(point, (tuple, list)) or len(point) < 2:
                         continue
@@ -955,7 +1043,7 @@ class RasterViewportWidget(QtWidgets.QWidget):
                         continue
                     px = plot_rect.left() + (data_x - self._viewport_x[0]) / max(self._viewport_x[1] - self._viewport_x[0], 1e-9) * plot_rect.width()
                     py = plot_rect.top() + (data_y - self._viewport_y[0]) / max(self._viewport_y[1] - self._viewport_y[0], 1e-9) * plot_rect.height()
-                    painter.drawEllipse(QtCore.QPointF(px, py), 2.4, 2.4)
+                    painter.drawEllipse(QtCore.QPointF(px, py), point_radius, point_radius)
             marker = overlay.get("marker")
             if isinstance(marker, (tuple, list)) and len(marker) >= 2:
                 mx = float(marker[0])
@@ -1042,6 +1130,15 @@ class RasterViewportWidget(QtWidgets.QWidget):
         if not plot_rect.contains(point):
             self.unsetCursor()
             return
+        if self._interaction_mode == "paint":
+            self.setCursor(QtCore.Qt.CrossCursor)
+            return
+        if self._hit_test_overlay_point(point, plot_rect) is not None:
+            self.setCursor(QtCore.Qt.OpenHandCursor)
+            return
+        if self._hit_test_overlay_path(point, plot_rect):
+            self.setCursor(QtCore.Qt.SizeVerCursor)
+            return
         mode = self._hit_test_guides(point, plot_rect)
         if mode == "guide_v":
             self.setCursor(QtCore.Qt.SizeHorCursor)
@@ -1094,6 +1191,63 @@ class RasterViewportWidget(QtWidgets.QWidget):
     def _format_tick(value: float) -> str:
         return f"{int(round(value))}"
 
+    def _hit_test_overlay_path(self, point: QtCore.QPointF, plot_rect: QtCore.QRectF) -> bool:
+        if len(self._active_drag_path) < 2:
+            return False
+        tolerance = 7.0
+        span_x = max(self._viewport_x[1] - self._viewport_x[0], 1e-9)
+        span_y = max(self._viewport_y[1] - self._viewport_y[0], 1e-9)
+        screen_points: list[QtCore.QPointF] = []
+        for data_x, data_y in self._active_drag_path:
+            if not (np.isfinite(data_x) and np.isfinite(data_y)):
+                continue
+            px = plot_rect.left() + (data_x - self._viewport_x[0]) / span_x * plot_rect.width()
+            py = plot_rect.top() + (data_y - self._viewport_y[0]) / span_y * plot_rect.height()
+            screen_points.append(QtCore.QPointF(px, py))
+        if len(screen_points) < 2:
+            return False
+        for p0, p1 in zip(screen_points, screen_points[1:]):
+            if self._point_segment_distance(point, p0, p1) <= tolerance:
+                return True
+        return False
+
+    def _hit_test_overlay_point(self, point: QtCore.QPointF, plot_rect: QtCore.QRectF) -> tuple[float, float] | None:
+        if not self._active_drag_path:
+            return None
+        tolerance = 7.0
+        span_x = max(self._viewport_x[1] - self._viewport_x[0], 1e-9)
+        span_y = max(self._viewport_y[1] - self._viewport_y[0], 1e-9)
+        best: tuple[float, tuple[float, float]] | None = None
+        for data_x, data_y in self._active_drag_path:
+            if not (np.isfinite(data_x) and np.isfinite(data_y)):
+                continue
+            px = plot_rect.left() + (data_x - self._viewport_x[0]) / span_x * plot_rect.width()
+            py = plot_rect.top() + (data_y - self._viewport_y[0]) / span_y * plot_rect.height()
+            distance = float(np.hypot(point.x() - px, point.y() - py))
+            if distance > tolerance:
+                continue
+            if best is None or distance < best[0]:
+                best = (distance, (float(data_x), float(data_y)))
+        return best[1] if best is not None else None
+
+    @staticmethod
+    def _point_segment_distance(point: QtCore.QPointF, a: QtCore.QPointF, b: QtCore.QPointF) -> float:
+        ax = float(a.x())
+        ay = float(a.y())
+        bx = float(b.x())
+        by = float(b.y())
+        px = float(point.x())
+        py = float(point.y())
+        dx = bx - ax
+        dy = by - ay
+        denom = dx * dx + dy * dy
+        if denom <= 1e-9:
+            return float(np.hypot(px - ax, py - ay))
+        t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / denom))
+        proj_x = ax + t * dx
+        proj_y = ay + t * dy
+        return float(np.hypot(px - proj_x, py - proj_y))
+
 
 class TraceViewportWidget(QtWidgets.QWidget):
     view_changed = QtCore.Signal(object, object, object)
@@ -1131,6 +1285,7 @@ class TraceViewportWidget(QtWidgets.QWidget):
         self._viewport_limit_y = (0.0, 1.0)
         self._marker: tuple[float, float] | None = None
         self._hline: tuple[float, QtGui.QColor] | None = None
+        self._overlay_markers: list[tuple[float, float, QtGui.QColor]] = []
         self._show_axes = True
         self._drag_state: dict[str, object] | None = None
         self._guide_grab_mode: str | None = None
@@ -1142,6 +1297,7 @@ class TraceViewportWidget(QtWidgets.QWidget):
         self._y_data = np.empty((0,), dtype=float)
         self._marker = None
         self._hline = None
+        self._overlay_markers = []
         self.update()
 
     def set_content(
@@ -1190,6 +1346,14 @@ class TraceViewportWidget(QtWidgets.QWidget):
             self._viewport_y = self._clamp_y_range(self._viewport_y, self._viewport_limit_y)
         self._marker = (float(marker[0]), float(marker[1])) if marker is not None else None
         self._hline = None if horizontal_line is None else (float(horizontal_line[0]), QtGui.QColor(horizontal_line[1]))
+        self.update()
+
+    def set_overlay_markers(self, markers: list[tuple[float, float, str]] | None) -> None:
+        self._overlay_markers = [
+            (float(item[0]), float(item[1]), QtGui.QColor(item[2]))
+            for item in (markers or [])
+            if isinstance(item, (tuple, list)) and len(item) >= 3
+        ]
         self.update()
 
     def set_viewport(self, *, xlim: tuple[float, float] | None = None, ylim: tuple[float, float] | None = None) -> None:
@@ -1382,6 +1546,13 @@ class TraceViewportWidget(QtWidgets.QWidget):
                 painter.setBrush(QtGui.QColor("#d1495b"))
                 painter.setPen(QtCore.Qt.NoPen)
                 painter.drawEllipse(QtCore.QPointF(px, py), 4.0, 4.0)
+        for x_val, y_val, color in self._overlay_markers:
+            if self._viewport_x[0] <= x_val <= self._viewport_x[1] and self._viewport_y[0] <= y_val <= self._viewport_y[1]:
+                px = plot_rect.left() + (x_val - self._viewport_x[0]) / max(self._viewport_x[1] - self._viewport_x[0], 1e-9) * plot_rect.width()
+                py = plot_rect.top() + (y_val - self._viewport_y[0]) / max(self._viewport_y[1] - self._viewport_y[0], 1e-9) * plot_rect.height()
+                painter.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 0.8))
+                painter.setBrush(color)
+                painter.drawEllipse(QtCore.QPointF(px, py), 3.0, 3.0)
         painter.restore()
 
     def _draw_border(self, painter: QtGui.QPainter, plot_rect: QtCore.QRectF) -> None:
@@ -1471,6 +1642,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._settings_html_cache: str | None = None
         self._active_interface_by_region: dict[str, str] = {}
         self._interface_pick_mode = False
+        self._last_interface_pick: tuple[str, str, int, int, int] | None = None
+        self._interface_drag_state: dict[str, object] | None = None
+        self._overview_region_preview_cache: dict[tuple[object, ...], QtGui.QImage] = {}
+        self._overview_region_preview_by_region: dict[str, QtGui.QImage] = {}
 
         self.action_new_project: QtGui.QAction | None = None
         self.action_open_project: QtGui.QAction | None = None
@@ -1831,6 +2006,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_interface_clear_point.setObjectName("interfaceActionButton")
         self.btn_interface_clear_point.clicked.connect(self._clear_interface_point)
         interface_row.addWidget(self.btn_interface_clear_point)
+        self.btn_interface_clear_line = QtWidgets.QToolButton()
+        self.btn_interface_clear_line.setText("清线")
+        self.btn_interface_clear_line.setObjectName("interfaceActionButton")
+        self.btn_interface_clear_line.clicked.connect(self._clear_interface_line)
+        interface_row.addWidget(self.btn_interface_clear_line)
+        self.btn_interface_clear_all = QtWidgets.QToolButton()
+        self.btn_interface_clear_all.setText("清空")
+        self.btn_interface_clear_all.setObjectName("interfaceActionButton")
+        self.btn_interface_clear_all.clicked.connect(self._clear_interface_all)
+        interface_row.addWidget(self.btn_interface_clear_all)
+        self.btn_interface_fill = QtWidgets.QToolButton()
+        self.btn_interface_fill.setText("补线")
+        self.btn_interface_fill.setObjectName("interfaceActionButton")
+        self.btn_interface_fill.clicked.connect(self._fill_interface_line)
+        interface_row.addWidget(self.btn_interface_fill)
+        self.btn_interface_smooth = QtWidgets.QToolButton()
+        self.btn_interface_smooth.setText("平滑")
+        self.btn_interface_smooth.setObjectName("interfaceActionButton")
+        self.btn_interface_smooth.clicked.connect(self._smooth_interface_line)
+        interface_row.addWidget(self.btn_interface_smooth)
         for button in (
             self.btn_interface_add,
             self.btn_interface_rename,
@@ -1838,6 +2033,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_interface_visible,
             self.btn_interface_pick,
             self.btn_interface_clear_point,
+            self.btn_interface_clear_line,
+            self.btn_interface_clear_all,
+            self.btn_interface_fill,
+            self.btn_interface_smooth,
         ):
             button.setFixedHeight(26)
         interface_row.addStretch(1)
@@ -1985,6 +2184,11 @@ class MainWindow(QtWidgets.QMainWindow):
             widget.view_changed.connect(self._on_view_changed)
             widget.point_selected.connect(self._on_view_selected)
             widget.guide_moved.connect(self._on_view_selected)
+        self.bscan_view.erase_requested.connect(self._on_view_erase_requested)
+        self.bscan_view.overlay_drag_started.connect(self._on_overlay_drag_started)
+        self.bscan_view.overlay_dragged.connect(self._on_overlay_dragged)
+        self.bscan_view.overlay_drag_finished.connect(self._on_overlay_drag_finished)
+        self.bscan_view.overlay_point_dragged.connect(self._on_overlay_point_dragged)
         self.pipeline_dialog = self._build_pipeline_dialog()
         self._refresh_file_menu()
 
@@ -2608,6 +2812,8 @@ class MainWindow(QtWidgets.QMainWindow):
             item.setText(str(param_spec.default))
 
     def _on_project_changed(self, _project) -> None:
+        self._last_interface_pick = None
+        self._interface_drag_state = None
         self._update_project_title()
         self._refresh_file_menu()
         self._refresh_project_tree()
@@ -2633,12 +2839,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _refresh_project_tree(self) -> None:
         current_region_id = self.app_controller.project_state.active_region_id
+        active_interface = self._active_interface()
+        active_interface_id = active_interface.interface_id if active_interface is not None else ""
         self.project_tree.blockSignals(True)
         self.project_tree.clear()
         project_state = self.app_controller.project_state
         if not project_state.files:
             self.project_tree.blockSignals(False)
             return
+        target_item: QtWidgets.QTreeWidgetItem | None = None
         for file_item in project_state.files:
             file_node = QtWidgets.QTreeWidgetItem([file_item.name or "未命名文件"])
             file_node.setData(0, QtCore.Qt.UserRole, ("file", file_item.file_id))
@@ -2652,8 +2861,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 region_node.setData(0, QtCore.Qt.UserRole, ("region", region.region_id))
                 file_node.addChild(region_node)
                 if region.region_id == current_region_id:
-                    self.project_tree.setCurrentItem(region_node)
+                    target_item = region_node
+                for interface in region.interfaces:
+                    interface_node = QtWidgets.QTreeWidgetItem([interface.name])
+                    interface_node.setData(0, QtCore.Qt.UserRole, ("interface", region.region_id, interface.interface_id))
+                    if not interface.visible:
+                        interface_node.setForeground(0, QtGui.QBrush(QtGui.QColor("#8a8f99")))
+                    region_node.addChild(interface_node)
+                    if region.region_id == current_region_id and interface.interface_id == active_interface_id:
+                        target_item = interface_node
         self.project_tree.expandAll()
+        if target_item is not None:
+            self.project_tree.setCurrentItem(target_item)
         if self.project_tree.currentItem() is None and self.project_tree.topLevelItemCount() > 0:
             first_file = self.project_tree.topLevelItem(0)
             if first_file is not None and first_file.childCount() > 0:
@@ -2667,26 +2886,26 @@ class MainWindow(QtWidgets.QMainWindow):
         if not project_state.files:
             self.overview_map.clear_scene()
             return
+        self.app_controller.project_controller.sync_active_region_runtime()
         files: list[dict[str, object]] = []
         active_region_id = project_state.active_region_id
         active_file_id = project_state.active_file_id
         active_trace = int(self.app_controller.selection_state.trace_index)
         active_region = self.app_controller.project_controller.get_active_region()
+        active_interface = self._active_interface()
         if active_region is not None:
             active_trace += int(active_region.trace_start)
-        active_image: QtGui.QImage | None = None
-        if self.display_data is not None and self.display_data.cscan.size:
-            cmap = self.app_controller.display_state.colormap + (
-                "_r" if self.app_controller.display_state.invert and not self.app_controller.display_state.colormap.endswith("_r") else ""
-            )
-            active_image = self._array_to_qimage(self.display_data.cscan, cmap, self.display_data.cscan_limits)
         for file_item in project_state.files:
             dataset = self.app_controller.project_controller.get_dataset_for_file(file_item.file_id)
             trace_count = dataset.trace_count if dataset is not None else max((region.trace_stop for region in file_item.regions), default=1)
             region_items: list[dict[str, object]] = []
             for region in file_item.regions:
-                has_result = region.region_id in self.app_controller.context.region_runtime_results and bool(
-                    self.app_controller.context.region_runtime_results[region.region_id]
+                preview_image = self._build_region_overview_preview(region)
+                has_result = (
+                    (region.region_id in self.app_controller.context.region_runtime_results and bool(
+                        self.app_controller.context.region_runtime_results[region.region_id]
+                    ))
+                    or (preview_image is not None and not preview_image.isNull())
                 )
                 region_items.append(
                     {
@@ -2696,6 +2915,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         "trace_stop": region.trace_stop,
                         "has_result": has_result,
                         "interface_count": len(region.interfaces),
+                        "preview_image": preview_image,
                     }
                 )
             processed_count = sum(1 for item in region_items if bool(item["has_result"]))
@@ -2714,8 +2934,62 @@ class MainWindow(QtWidgets.QMainWindow):
             active_region_id=active_region_id,
             active_file_id=active_file_id,
             active_trace=active_trace,
-            active_image=active_image,
+            active_image=None,
+            active_region_name=active_region.name if active_region is not None else "",
+            active_interface_name=active_interface.name if active_interface is not None else "",
         )
+
+    def _build_region_overview_preview(self, region) -> QtGui.QImage | None:
+        cached_region = self._overview_region_preview_by_region.get(region.region_id)
+        if cached_region is not None and not cached_region.isNull():
+            return cached_region
+        snapshots = self.app_controller.context.region_runtime_results.get(region.region_id) or []
+        if not snapshots:
+            return None
+        snapshot = snapshots[-1]
+        dataset = self.app_controller.project_controller.build_region_dataset(region)
+        if dataset is None:
+            return None
+        selection = region.selection_state
+        display_state = region.display_state
+        cache_key = (
+            region.region_id,
+            snapshot.snapshot_id,
+            int(selection.sample_index),
+            int(display_state.slice_thickness),
+            str(display_state.cscan_attr),
+        )
+        cached = self._overview_region_preview_cache.get(cache_key)
+        if cached is not None and not cached.isNull():
+            return cached
+        cscan, _ = build_cscan(snapshot.data, display_state, selection)
+        if cscan.size == 0:
+            return None
+        image = self._array_to_qimage(cscan, "gray", self._preview_image_limits(cscan))
+        self._overview_region_preview_cache[cache_key] = image
+        self._overview_region_preview_by_region[region.region_id] = image
+        return image
+
+    def _cache_active_region_overview_preview(self, display: DisplayData) -> None:
+        region = self.app_controller.project_controller.get_active_region()
+        snapshot = self.app_controller.result_state.active_snapshot
+        if region is None or snapshot is None or display.cscan.size == 0:
+            return
+        state = self.app_controller.display_state
+        selection = self.app_controller.selection_state
+        cache_key = (
+            region.region_id,
+            snapshot.snapshot_id,
+            int(selection.sample_index),
+            int(state.slice_thickness),
+            str(state.cscan_attr),
+        )
+        self._overview_region_preview_cache[cache_key] = self._array_to_qimage(
+            display.cscan,
+            "gray",
+            self._preview_image_limits(display.cscan),
+        )
+        self._overview_region_preview_by_region[region.region_id] = self._overview_region_preview_cache[cache_key]
 
     def _refresh_interface_controls(self) -> None:
         region = self.app_controller.project_controller.get_active_region()
@@ -2744,6 +3018,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_interface_rename.setEnabled(has_interface and not self._is_busy)
         self.btn_interface_delete.setEnabled(has_interface and not self._is_busy)
         self.btn_interface_clear_point.setEnabled(has_interface and self._has_processed_result() and not self._is_busy)
+        self.btn_interface_clear_line.setEnabled(has_interface and self._has_processed_result() and not self._is_busy)
+        self.btn_interface_clear_all.setEnabled(has_interface and not self._is_busy)
+        self.btn_interface_fill.setEnabled(has_interface and self._has_processed_result() and not self._is_busy)
+        self.btn_interface_smooth.setEnabled(has_interface and self._has_processed_result() and not self._is_busy)
         self.btn_interface_visible.blockSignals(True)
         self.btn_interface_visible.setEnabled(has_interface and not self._is_busy)
         self.btn_interface_visible.setChecked(bool(active_interface.visible) if active_interface is not None else False)
@@ -2753,9 +3031,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_interface_pick.setEnabled(has_interface and self._has_processed_result() and not self._is_busy)
         if not has_interface or not self._has_processed_result():
             self._interface_pick_mode = False
+            self._last_interface_pick = None
         self.btn_interface_pick.setChecked(self._interface_pick_mode)
         self.btn_interface_pick.setText("拾取中" if self._interface_pick_mode else "拾取")
         self.btn_interface_pick.blockSignals(False)
+        self.bscan_view.set_interaction_mode("paint" if self._interface_pick_mode else "default")
 
     def _active_interface(self):
         region = self.app_controller.project_controller.get_active_region()
@@ -2770,13 +3050,29 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_interface_combo_changed(self, index: int) -> None:
         region = self.app_controller.project_controller.get_active_region()
         if region is None or index < 0:
+            self._last_interface_pick = None
             self._refresh_interface_controls()
+            self._refresh_project_tree()
+            self._refresh_overview_scene()
             self._refresh_interface_overlays()
             return
         interface_id = str(self.interface_combo.itemData(index) or "")
         if interface_id:
             self._active_interface_by_region[region.region_id] = interface_id
+        self._last_interface_pick = None
         self._refresh_interface_controls()
+        self._refresh_project_tree()
+        self._refresh_overview_scene()
+        self._refresh_interface_overlays()
+
+    def _select_interface(self, region_id: str, interface_id: str) -> None:
+        if self.app_controller.project_state.active_region_id != region_id:
+            self.app_controller.select_project_region(region_id)
+        self._active_interface_by_region[region_id] = interface_id
+        self._last_interface_pick = None
+        self._refresh_project_tree()
+        self._refresh_interface_controls()
+        self._refresh_overview_scene()
         self._refresh_interface_overlays()
 
     def _create_interface(self) -> None:
@@ -2792,7 +3088,9 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "界面", str(exc))
             return
         self._active_interface_by_region[region.region_id] = interface_id
+        self._refresh_project_tree()
         self._refresh_interface_controls()
+        self._refresh_overview_scene()
         self._refresh_interface_overlays()
 
     def _rename_interface(self) -> None:
@@ -2808,7 +3106,9 @@ class MainWindow(QtWidgets.QMainWindow):
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, "界面", str(exc))
             return
+        self._refresh_project_tree()
         self._refresh_interface_controls()
+        self._refresh_overview_scene()
         self._refresh_interface_overlays()
 
     def _delete_interface(self) -> None:
@@ -2831,7 +3131,9 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "界面", str(exc))
             return
         self._active_interface_by_region.pop(region.region_id, None)
+        self._refresh_project_tree()
         self._refresh_interface_controls()
+        self._refresh_overview_scene()
         self._refresh_interface_overlays()
 
     def _toggle_interface_visible(self, visible: bool) -> None:
@@ -2845,11 +3147,16 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "界面", str(exc))
             return
         self.btn_interface_visible.setText("显示中" if visible else "已隐藏")
+        self._refresh_project_tree()
+        self._refresh_overview_scene()
         self._refresh_interface_overlays()
 
     def _toggle_interface_pick_mode(self, checked: bool) -> None:
         self._interface_pick_mode = bool(checked)
+        if not self._interface_pick_mode:
+            self._last_interface_pick = None
         self.btn_interface_pick.setText("拾取中" if self._interface_pick_mode else "拾取")
+        self.bscan_view.set_interaction_mode("paint" if self._interface_pick_mode else "default")
 
     def _clear_interface_point(self) -> None:
         region = self.app_controller.project_controller.get_active_region()
@@ -2863,6 +3170,78 @@ class MainWindow(QtWidgets.QMainWindow):
                 line_index=int(self.app_controller.selection_state.line_index),
                 trace_index=int(self.app_controller.selection_state.trace_index),
                 sample_index=None,
+            )
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "界面", str(exc))
+            return
+        self._refresh_interface_overlays()
+
+    def _clear_interface_line(self) -> None:
+        region = self.app_controller.project_controller.get_active_region()
+        interface = self._active_interface()
+        if region is None or interface is None:
+            return
+        try:
+            self.app_controller.clear_region_interface_line(
+                region.region_id,
+                interface.interface_id,
+                line_index=int(self.app_controller.selection_state.line_index),
+            )
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "界面", str(exc))
+            return
+        self._last_interface_pick = None
+        self._refresh_interface_overlays()
+
+    def _clear_interface_all(self) -> None:
+        region = self.app_controller.project_controller.get_active_region()
+        interface = self._active_interface()
+        if region is None or interface is None:
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "清空界面",
+            f"清空界面“{interface.name}”的全部点？",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+        try:
+            self.app_controller.clear_region_interface(region.region_id, interface.interface_id)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "界面", str(exc))
+            return
+        self._last_interface_pick = None
+        self._refresh_project_tree()
+        self._refresh_interface_overlays()
+
+    def _fill_interface_line(self) -> None:
+        region = self.app_controller.project_controller.get_active_region()
+        interface = self._active_interface()
+        if region is None or interface is None:
+            return
+        try:
+            self.app_controller.fill_region_interface_line(
+                region.region_id,
+                interface.interface_id,
+                line_index=int(self.app_controller.selection_state.line_index),
+            )
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "界面", str(exc))
+            return
+        self._refresh_interface_overlays()
+
+    def _smooth_interface_line(self) -> None:
+        region = self.app_controller.project_controller.get_active_region()
+        interface = self._active_interface()
+        if region is None or interface is None:
+            return
+        try:
+            self.app_controller.smooth_region_interface_line(
+                region.region_id,
+                interface.interface_id,
+                line_index=int(self.app_controller.selection_state.line_index),
             )
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, "界面", str(exc))
@@ -2908,30 +3287,126 @@ class MainWindow(QtWidgets.QMainWindow):
                     "points": point_markers,
                     "color": interface.color,
                     "width": 2.4 if active_interface is not None and interface.interface_id == active_interface.interface_id else 1.8,
+                    "point_radius": 3.1 if active_interface is not None and interface.interface_id == active_interface.interface_id else 2.2,
                     "marker": marker,
                 }
             )
         return overlays
 
+    def _build_width_interface_overlays(self, display: DisplayData | None) -> list[dict[str, object]]:
+        region = self.app_controller.project_controller.get_active_region()
+        if region is None or display is None or display.ascan_time_ns.size == 0:
+            return []
+        trace_index = int(self.app_controller.selection_state.trace_index)
+        current_line = int(self.app_controller.selection_state.line_index)
+        half_width = max((region.line_count() - 1) / 2.0, 0.5)
+        overlays: list[dict[str, object]] = []
+        active_interface = self._active_interface()
+        for interface in region.interfaces:
+            if not interface.visible:
+                continue
+            segments: list[list[tuple[float, float]]] = []
+            current_segment: list[tuple[float, float]] = []
+            point_markers: list[tuple[float, float]] = []
+            for line_idx in range(region.line_count()):
+                values = list(interface.samples_by_line.get(str(line_idx), []))
+                if trace_index >= len(values) or values[trace_index] is None:
+                    if len(current_segment) >= 2:
+                        segments.append(current_segment)
+                    current_segment = []
+                    continue
+                sample_idx = int(np.clip(round(float(values[trace_index])), 0, display.ascan_time_ns.size - 1))
+                point = (float(line_idx) - half_width, float(display.ascan_time_ns[sample_idx]))
+                current_segment.append(point)
+                point_markers.append(point)
+            if len(current_segment) >= 2:
+                segments.append(current_segment)
+            marker = None
+            active_values = list(interface.samples_by_line.get(str(current_line), []))
+            if trace_index < len(active_values) and active_values[trace_index] is not None:
+                sample_idx = int(np.clip(round(float(active_values[trace_index])), 0, display.ascan_time_ns.size - 1))
+                marker = (float(current_line) - half_width, float(display.ascan_time_ns[sample_idx]))
+            overlays.append(
+                {
+                    "segments": segments,
+                    "points": point_markers,
+                    "color": interface.color,
+                    "width": 2.4 if active_interface is not None and interface.interface_id == active_interface.interface_id else 1.8,
+                    "point_radius": 3.1 if active_interface is not None and interface.interface_id == active_interface.interface_id else 2.2,
+                    "marker": marker,
+                }
+            )
+        return overlays
+
+    def _build_trace_interface_markers(self, display: DisplayData | None) -> list[tuple[float, float, str]]:
+        region = self.app_controller.project_controller.get_active_region()
+        if region is None or display is None or display.ascan_time_ns.size == 0 or display.ascan_values.size == 0:
+            return []
+        line_index = int(self.app_controller.selection_state.line_index)
+        trace_index = int(self.app_controller.selection_state.trace_index)
+        line_key = str(line_index)
+        markers: list[tuple[float, float, str]] = []
+        for interface in region.interfaces:
+            if not interface.visible:
+                continue
+            values = list(interface.samples_by_line.get(line_key, []))
+            if trace_index >= len(values) or values[trace_index] is None:
+                continue
+            sample_idx = int(np.clip(round(float(values[trace_index])), 0, min(display.ascan_time_ns.size, display.ascan_values.size) - 1))
+            markers.append(
+                (
+                    float(display.ascan_values[sample_idx]),
+                    float(display.ascan_time_ns[sample_idx]),
+                    interface.color,
+                )
+            )
+        return markers
+
+    def _current_bscan_active_drag_path(self, display: DisplayData | None) -> list[tuple[float, float]]:
+        region = self.app_controller.project_controller.get_active_region()
+        interface = self._active_interface()
+        if region is None or interface is None or display is None or display.ascan_time_ns.size == 0:
+            return []
+        values = list(interface.samples_by_line.get(str(int(self.app_controller.selection_state.line_index)), []))
+        points: list[tuple[float, float]] = []
+        for trace_idx, sample_value in enumerate(values):
+            if sample_value is None:
+                continue
+            sample_idx = int(np.clip(round(float(sample_value)), 0, display.ascan_time_ns.size - 1))
+            points.append((float(trace_idx), float(display.ascan_time_ns[sample_idx])))
+        return points
+
     def _refresh_interface_overlays(self) -> None:
-        overlays = self._build_bscan_interface_overlays(self.display_data)
-        self.bscan_view.set_overlays(overlays)
+        bscan_overlays = self._build_bscan_interface_overlays(self.display_data)
+        width_overlays = self._build_width_interface_overlays(self.display_data)
+        trace_markers = self._build_trace_interface_markers(self.display_data)
+        self.bscan_view.set_overlays(bscan_overlays)
+        self.bscan_view.set_active_drag_path(self._current_bscan_active_drag_path(self.display_data))
+        self.width_view.set_overlays(width_overlays)
+        self.trace_view.set_overlay_markers(trace_markers)
 
     def _activate_tree_item(self, item: QtWidgets.QTreeWidgetItem | None) -> None:
         if item is None:
             return
         payload = item.data(0, QtCore.Qt.UserRole)
-        if not isinstance(payload, tuple) or len(payload) != 2:
+        if not isinstance(payload, tuple) or len(payload) < 2:
             return
-        kind, object_id = payload
+        kind = payload[0]
         if kind == "region":
+            object_id = payload[1]
             self.app_controller.select_project_region(str(object_id))
             return
         if kind == "file":
+            object_id = payload[1]
             file_id = str(object_id)
             file_item = next((entry for entry in self.app_controller.project_state.files if entry.file_id == file_id), None)
             if file_item is not None and file_item.regions:
                 self.app_controller.select_project_region(file_item.regions[0].region_id)
+            return
+        if kind == "interface" and len(payload) >= 3:
+            region_id = str(payload[1])
+            interface_id = str(payload[2])
+            self._select_interface(region_id, interface_id)
 
     def _on_project_tree_item_clicked(self, item: QtWidgets.QTreeWidgetItem, _column: int) -> None:
         self._activate_tree_item(item)
@@ -2947,11 +3422,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.project_tree.setCurrentItem(item)
         payload = item.data(0, QtCore.Qt.UserRole)
-        if not isinstance(payload, tuple) or len(payload) != 2:
+        if not isinstance(payload, tuple) or len(payload) < 2:
             return
-        kind, object_id = payload
+        kind = payload[0]
         menu = QtWidgets.QMenu(self)
         if kind == "file":
+            object_id = payload[1]
             create_action = menu.addAction("新建区域")
             chosen = menu.exec(self.project_tree.viewport().mapToGlobal(pos))
             if chosen is create_action:
@@ -2963,7 +3439,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._create_region(str(object_id), base_region_id=base_region_id)
             return
         if kind == "region":
+            object_id = payload[1]
             create_action = menu.addAction("新建区域")
+            create_interface_action = menu.addAction("新建界面")
             rename_action = menu.addAction("重命名")
             bounds_action = menu.addAction("编辑范围")
             delete_action = menu.addAction("删除区域")
@@ -2973,12 +3451,38 @@ class MainWindow(QtWidgets.QMainWindow):
                 file_item = self.app_controller.project_controller.find_file_by_region_id(region_id)
                 if file_item is not None:
                     self._create_region(file_item.file_id, base_region_id=region_id)
+            elif chosen is create_interface_action:
+                self.app_controller.select_project_region(region_id)
+                self._create_interface()
             elif chosen is rename_action:
                 self._rename_region(region_id)
             elif chosen is bounds_action:
                 self._edit_region_bounds(region_id)
             elif chosen is delete_action:
                 self._delete_region(region_id)
+            return
+        if kind == "interface" and len(payload) >= 3:
+            region_id = str(payload[1])
+            interface_id = str(payload[2])
+            self._select_interface(region_id, interface_id)
+            interface = self._active_interface()
+            toggle_text = "隐藏界面" if interface is not None and interface.visible else "显示界面"
+            rename_action = menu.addAction("重命名")
+            toggle_action = menu.addAction(toggle_text)
+            clear_line_action = menu.addAction("清空当前测线")
+            clear_all_action = menu.addAction("清空界面")
+            delete_action = menu.addAction("删除界面")
+            chosen = menu.exec(self.project_tree.viewport().mapToGlobal(pos))
+            if chosen is rename_action:
+                self._rename_interface()
+            elif chosen is toggle_action and interface is not None:
+                self._toggle_interface_visible(not interface.visible)
+            elif chosen is clear_line_action:
+                self._clear_interface_line()
+            elif chosen is clear_all_action:
+                self._clear_interface_all()
+            elif chosen is delete_action:
+                self._delete_interface()
 
     def _create_region(self, file_id: str, *, base_region_id: str | None = None) -> None:
         default_name = ""
@@ -3138,6 +3642,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _refresh_display(self, display: DisplayData) -> None:
         self.display_data = display
         self._refresh_interface_controls()
+        self._cache_active_region_overview_preview(display)
         state = self.app_controller.display_state
         cmap = state.colormap + ("_r" if state.invert and not state.colormap.endswith("_r") else "")
         trace_count = int(display.meta.get("trace_count", display.bscan.shape[1] if display.bscan.ndim == 2 else 0))
@@ -3364,6 +3869,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return transform
 
     def _show_waiting_plots(self) -> None:
+        self._last_interface_pick = None
+        self._interface_drag_state = None
         self.bscan_view.clear_content()
         self.width_view.clear_content()
         self.cscan_view.clear_content()
@@ -3414,6 +3921,23 @@ class MainWindow(QtWidgets.QMainWindow):
             QtGui.QImage.Format_RGBA8888,
         )
         return image.copy()
+
+    @staticmethod
+    def _preview_image_limits(data: np.ndarray) -> tuple[float, float]:
+        array = np.asarray(data, dtype=float)
+        finite = array[np.isfinite(array)]
+        if finite.size == 0:
+            return (0.0, 1.0)
+        vmin = float(np.percentile(finite, 2.0))
+        vmax = float(np.percentile(finite, 98.0))
+        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
+            vmin = float(np.min(finite))
+            vmax = float(np.max(finite))
+        if not np.isfinite(vmin):
+            vmin = 0.0
+        if not np.isfinite(vmax) or vmax <= vmin:
+            vmax = vmin + 1.0
+        return (vmin, vmax)
 
     @staticmethod
     def _visible_ascan_segment(display: DisplayData) -> tuple[np.ndarray, np.ndarray]:
@@ -3647,12 +4171,86 @@ class MainWindow(QtWidgets.QMainWindow):
             sample_index = int(np.argmin(np.abs(self.display_data.ascan_time_ns - float(data_y))))
             self.app_controller.select_sample(sample_index)
 
-    def _capture_interface_point(self, trace_value: float, time_ns: float) -> None:
+    def _on_view_erase_requested(self, view_key: object, data_x: float, _data_y: float) -> None:
+        if str(view_key) != "bscan":
+            return
         region = self.app_controller.project_controller.get_active_region()
         interface = self._active_interface()
-        if region is None or interface is None or self.display_data is None or self.display_data.ascan_time_ns.size == 0:
+        if region is None or interface is None:
             return
-        trace_index = int(np.clip(round(trace_value), 0, max(region.trace_count() - 1, 0)))
+        trace_index = int(np.clip(round(float(data_x)), 0, max(region.trace_count() - 1, 0)))
+        try:
+            self.app_controller.set_region_interface_point(
+                region.region_id,
+                interface.interface_id,
+                line_index=int(self.app_controller.selection_state.line_index),
+                trace_index=trace_index,
+                sample_index=None,
+            )
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "界面", str(exc))
+            return
+        self._last_interface_pick = None
+        self._refresh_interface_overlays()
+
+    def _on_overlay_drag_started(self, view_key: object) -> None:
+        if str(view_key) != "bscan":
+            return
+        region = self.app_controller.project_controller.get_active_region()
+        interface = self._active_interface()
+        if region is None or interface is None:
+            self._interface_drag_state = None
+            return
+        line_key = str(int(self.app_controller.selection_state.line_index))
+        values = list(interface.samples_by_line.get(line_key, []))
+        if len(values) < region.trace_count():
+            values.extend([None] * (region.trace_count() - len(values)))
+        self._interface_drag_state = {
+            "region_id": region.region_id,
+            "interface_id": interface.interface_id,
+            "line_index": int(self.app_controller.selection_state.line_index),
+            "base_values": list(values),
+        }
+
+    def _on_overlay_dragged(self, view_key: object, anchor_y: float, current_y: float) -> None:
+        if str(view_key) != "bscan" or self.display_data is None or self.display_data.ascan_time_ns.size == 0:
+            return
+        drag_state = self._interface_drag_state
+        if drag_state is None:
+            return
+        time_axis = self.display_data.ascan_time_ns
+        anchor_idx = int(np.argmin(np.abs(time_axis - float(anchor_y))))
+        current_idx = int(np.argmin(np.abs(time_axis - float(current_y))))
+        delta = current_idx - anchor_idx
+        base_values = list(drag_state.get("base_values", []))
+        shifted: list[float | None] = []
+        max_sample = max(time_axis.size - 1, 0)
+        for value in base_values:
+            if value is None:
+                shifted.append(None)
+            else:
+                shifted.append(float(np.clip(round(float(value)) + delta, 0, max_sample)))
+        self.app_controller.set_region_interface_line_samples(
+            str(drag_state["region_id"]),
+            str(drag_state["interface_id"]),
+            line_index=int(drag_state["line_index"]),
+            samples=shifted,
+        )
+        self._refresh_interface_overlays()
+
+    def _on_overlay_drag_finished(self, view_key: object) -> None:
+        if str(view_key) != "bscan":
+            return
+        self._interface_drag_state = None
+
+    def _on_overlay_point_dragged(self, view_key: object, trace_value: float, time_ns: float) -> None:
+        if str(view_key) != "bscan" or self.display_data is None or self.display_data.ascan_time_ns.size == 0:
+            return
+        region = self.app_controller.project_controller.get_active_region()
+        interface = self._active_interface()
+        if region is None or interface is None:
+            return
+        trace_index = int(np.clip(round(float(trace_value)), 0, max(region.trace_count() - 1, 0)))
         sample_index = int(np.argmin(np.abs(self.display_data.ascan_time_ns - float(time_ns))))
         try:
             self.app_controller.set_region_interface_point(
@@ -3667,6 +4265,53 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.app_controller.select_from_bscan(trace_index, float(self.display_data.ascan_time_ns[sample_index]))
         self._refresh_interface_overlays()
+
+    def _capture_interface_point(self, trace_value: float, time_ns: float) -> None:
+        region = self.app_controller.project_controller.get_active_region()
+        interface = self._active_interface()
+        if region is None or interface is None or self.display_data is None or self.display_data.ascan_time_ns.size == 0:
+            return
+        trace_index = int(np.clip(round(trace_value), 0, max(region.trace_count() - 1, 0)))
+        sample_index = int(np.argmin(np.abs(self.display_data.ascan_time_ns - float(time_ns))))
+        line_index = int(self.app_controller.selection_state.line_index)
+        current_pick = (region.region_id, interface.interface_id, line_index, trace_index, sample_index)
+        if self._last_interface_pick == current_pick:
+            return
+        try:
+            self._write_interface_pick(region.region_id, interface.interface_id, line_index, trace_index, sample_index)
+            previous = self._last_interface_pick
+            if previous is not None and previous[0] == region.region_id and previous[1] == interface.interface_id and previous[2] == line_index:
+                prev_trace = int(previous[3])
+                prev_sample = int(previous[4])
+                trace_delta = trace_index - prev_trace
+                if abs(trace_delta) > 1:
+                    step = 1 if trace_delta > 0 else -1
+                    for fill_trace in range(prev_trace + step, trace_index, step):
+                        ratio = (fill_trace - prev_trace) / trace_delta
+                        fill_sample = int(round(prev_sample + ratio * (sample_index - prev_sample)))
+                        self._write_interface_pick(region.region_id, interface.interface_id, line_index, fill_trace, fill_sample)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "界面", str(exc))
+            return
+        self._last_interface_pick = current_pick
+        self.app_controller.select_from_bscan(trace_index, float(self.display_data.ascan_time_ns[sample_index]))
+        self._refresh_interface_overlays()
+
+    def _write_interface_pick(
+        self,
+        region_id: str,
+        interface_id: str,
+        line_index: int,
+        trace_index: int,
+        sample_index: int,
+    ) -> None:
+        self.app_controller.set_region_interface_point(
+            region_id,
+            interface_id,
+            line_index=int(line_index),
+            trace_index=int(trace_index),
+            sample_index=int(sample_index),
+        )
 
     def _open_help_dir(self) -> None:
         target = self.app_controller.project_state.root_path or str(Path.cwd())
@@ -3757,6 +4402,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_processing_finished(self) -> None:
         self._set_stage_status("处理完成")
         self._refresh_settings_info()
+        self._refresh_overview_scene()
         self.statusBar().showMessage("处理完成，结果已刷新到 A/B/C-scan。", 4000)
         self._update_top_actions()
 
