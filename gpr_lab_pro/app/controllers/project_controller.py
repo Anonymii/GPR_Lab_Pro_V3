@@ -630,7 +630,12 @@ class ProjectController:
         if trace_count <= 0:
             return file_item.navigation
         if file_item.navigation.samples and len(file_item.navigation.samples) == trace_count:
-            return file_item.navigation
+            has_geo = any(
+                sample.latitude is not None and sample.longitude is not None
+                for sample in file_item.navigation.samples
+            )
+            if has_geo:
+                return file_item.navigation
         file_index = next((idx for idx, item in enumerate(self.state.files) if item.file_id == file_item.file_id), 0)
         file_item.navigation = self._create_simulated_navigation(dataset, file_index=file_index)
         return file_item.navigation
@@ -642,6 +647,10 @@ class ProjectController:
         angle = np.deg2rad(12.0 + (file_index % 5) * 7.5)
         base_x = 12.0 + file_index * 16.0
         base_y = 12.0 + file_index * 10.0
+        base_lat = 36.0671 + file_index * 0.0018
+        base_lon = 120.3826 + file_index * 0.0024
+        meters_per_deg_lat = 111320.0
+        meters_per_deg_lon = max(111320.0 * float(np.cos(np.deg2rad(base_lat))), 1.0)
         direction = np.array([np.cos(angle), np.sin(angle)], dtype=float)
         normal = np.array([-direction[1], direction[0]], dtype=float)
         samples: list[NavigationSample] = []
@@ -650,12 +659,16 @@ class ProjectController:
             along = total_length * t
             lateral = 1.2 * np.sin(t * np.pi * 1.35 + file_index * 0.35)
             point = np.array([base_x, base_y], dtype=float) + direction * along + normal * lateral
+            latitude = base_lat + float(point[1]) / meters_per_deg_lat
+            longitude = base_lon + float(point[0]) / meters_per_deg_lon
             samples.append(
                 NavigationSample(
                     trace_index=trace_idx,
                     x=float(point[0]),
                     y=float(point[1]),
                     timestamp_s=float(trace_idx * 0.05),
+                    latitude=latitude,
+                    longitude=longitude,
                 )
             )
         return NavigationTrack(mode="simulated", samples=samples)

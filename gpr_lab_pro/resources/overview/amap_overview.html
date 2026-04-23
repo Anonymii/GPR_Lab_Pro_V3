@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    html, body, #root, #map {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #f6f8fb;
+      font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+    }
+    #root {
+      position: relative;
+    }
+    #overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+    #message {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      padding: 10px 14px;
+      border-radius: 10px;
+      background: rgba(255,255,255,0.92);
+      color: #415164;
+      border: 1px solid rgba(173,185,197,0.75);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.08);
+      font-size: 13px;
+      z-index: 10;
+      display: none;
+      pointer-events: none;
+      white-space: pre-wrap;
+    }
+  </style>
+  <script>
+    window._AMapSecurityConfig = { securityJsCode: "__AMAP_SECURITY__" };
+  </script>
+  <script src="https://webapi.amap.com/maps?v=2.0&key=__AMAP_KEY__"></script>
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+</head>
+<body>
+  <div id="root">
+    <div id="map"></div>
+    <canvas id="overlay"></canvas>
+    <div id="message"></div>
+  </div>
+  <script>
+    let bridge = null;
+    let map = null;
+    let scene = null;
+    let fitDone = false;
+    const canvas = document.getElementById("overlay");
+    const ctx = canvas.getContext("2d");
+    const imageCache = new Map();
+    const message = document.getElementById("message");
+
+    function showMessage(text) {
+      message.style.display = text ? "block" : "none";
+      message.textContent = text || "";
+    }
+
+    function setupBridge() {
+      new QWebChannel(qt.webChannelTransport, function(channel) {
+        bridge = channel.objects.overviewBridge;
+        if (bridge && bridge.notifyPageReady) {
+          bridge.notifyPageReady();
+        }
+      });
+    }
+
+    function ensureCanvasSize() {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const width = Math.max(1, Math.round(rect.width * dpr));
+      const height = Math.max(1, Math.round(rect.height * dpr));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, rect.width, rect.height);
+      return rect;
+    }
+
+    function loadPreview(src) {
+      if (!src) return null;
+      if (imageCache.has(src)) {
+        return imageCache.get(src);
+      }
+      const img = new Image();
+      img.src = src;
+      img.onload = () => renderScene();
+      imageCache.set(src, img);
+      return img;
+    }
+
+    function mapPoint(lat, lon) {
+      const p = map.lngLatToContainer([lon, lat]);
+      return { x: p.getX(), y: p.getY() };
+    }
+
+    function computeRegionGeometry(region) {
+      if (!region || !region.navigationSamples || region.navigationSamples.length < 2 || !region.polygon || region.polygon.length < 4) {
+        return null;
+      }
+      const startSample = region.navigationSamples[0];
+      const endSample = region.navigationSamples[region.navigationSamples.length - 1];
+      const start = mapPoint(startSample.latitude, startSample.longitude);
+      const end = mapPoint(endSample.latitude, endSample.longitude);
+      const dx = end.x - start.x;
+      const dy = end.y - start.y;
+      const length = Math.hypot(dx, dy);
+      if (length < 1e-6) return null;
+      let dirX = dx / length;
+      let dirY = dy / length;
+      let normalX = -dirY;
+      let normalY = dirX;
+      const center = { x: (start.x + end.x) * 0.5, y: (start.y + end.y) * 0.5 };
+      const polygon = region.polygon.map(pt => mapPoint(pt.latitude, pt.longitude));
+      const half = Math.floor(polygon.length / 2);
+      const upperStart = polygon[0];
+      const upperEnd = polygon[Math.max(half - 1, 0)];
+      const lowerStart = polygon[polygon.length - 1];
+      const lowerEnd = polygon[half];
+      let outwardX = ((upperStart.x + upperEnd.x) * 0.5) - ((lowerStart.x + lowerEnd.x) * 0.5);
+      let outwardY = ((upperStart.y + upperEnd.y) * 0.5) - ((lowerStart.y + lowerEnd.y) * 0.5);
+      const outwardNorm = Math.hypot(outwardX, outwardY) || 1.0;
+      outwardX /= outwardNorm;
+      outwardY /= outwardNorm;
+      if (normalX * outwardX + normalY * outwardY < 0) {
+        dirX *= -1;
+        dirY *= -1;
+        normalX *= -1;
+        normalY *= -1;
+      }
+      const angle = Math.atan2(dirY, dirX);
+      const locals = polygon.map((pt) => {
+        const vx = pt.x - center.x;
+        const vy = pt.y - center.y;
+        return {
+          u: vx * dirX + vy * dirY,
+          v: vx * normalX + vy * normalY
+        };
+      });
+      const minU = Math.min(...locals.map(p => p.u));
+      const maxU = Math.max(...locals.map(p => p.u));
+      const minV = Math.min(...locals.map(p => p.v));
+      const maxV = Math.max(...locals.map(p => p.v));
+      const labelBase = (upperStart.x <= upperEnd.x) ? upperStart : upperEnd;
+      let labelVecX = upperEnd.x - upperStart.x;
+      let labelVecY = upperEnd.y - upperStart.y;
+      const labelNorm = Math.hypot(labelVecX, labelVecY) || 1.0;
+      labelVecX /= labelNorm;
+      labelVecY /= labelNorm;
+      let labelNormalX = outwardX;
+      let labelNormalY = outwardY;
+      if (labelNormalY > 0) {
+        labelNormalX *= -1;
+        labelNormalY *= -1;
+      }
+      const labelAngle = Math.atan2(labelVecY, labelVecX);
+      const labelAnchor = {
+        x: labelBase.x + labelNormalX * 10.0 - labelVecX * 2.0,
+        y: labelBase.y + labelNormalY * 10.0 - labelVecY * 2.0
+      };
+      return {
+        polygon,
+        center,
+        angle,
+        rect: { x: minU, y: minV, w: Math.max(maxU - minU, 1), h: Math.max(maxV - minV, 1) },
+        labelAnchor,
+        labelAngle
+      };
+    }
+
+    function drawRegion(region, active) {
+      const geometry = computeRegionGeometry(region);
+      if (!geometry) return;
+      const path = new Path2D();
+      geometry.polygon.forEach((pt, idx) => {
+        if (idx === 0) path.moveTo(pt.x, pt.y);
+        else path.lineTo(pt.x, pt.y);
+      });
+      path.closePath();
+
+      if (region.previewDataUrl) {
+        const image = loadPreview(region.previewDataUrl);
+        if (image && image.complete) {
+          ctx.save();
+          ctx.clip(path);
+          ctx.translate(geometry.center.x, geometry.center.y);
+          ctx.rotate(geometry.angle);
+          ctx.drawImage(image, geometry.rect.x, geometry.rect.y, geometry.rect.w, geometry.rect.h);
+          ctx.restore();
+        } else {
+          ctx.fillStyle = "rgba(160,160,160,0.22)";
+          ctx.fill(path);
+        }
+      } else if (region.hasResult) {
+        ctx.fillStyle = "rgba(160,160,160,0.22)";
+        ctx.fill(path);
+      } else {
+        ctx.fillStyle = "#ffffff";
+        ctx.fill(path);
+      }
+
+      if (active) {
+        ctx.save();
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = "rgba(255,159,26,0.12)";
+        ctx.stroke(path);
+        ctx.restore();
+      }
+
+      ctx.save();
+      if (active) {
+        ctx.strokeStyle = "#ff9f1a";
+        ctx.lineWidth = 2;
+      } else if (region.hasResult) {
+        ctx.strokeStyle = "#2b8b57";
+        ctx.lineWidth = 1.25;
+      } else {
+        ctx.strokeStyle = "#0d63ff";
+        ctx.lineWidth = 1.0;
+        ctx.setLineDash([8, 5]);
+      }
+      ctx.stroke(path);
+      ctx.restore();
+
+      if (region.labelText) {
+        ctx.save();
+        ctx.translate(geometry.labelAnchor.x, geometry.labelAnchor.y);
+        ctx.rotate(geometry.labelAngle);
+        ctx.font = (active ? "700 " : "") + "12px Microsoft YaHei UI, Microsoft YaHei, sans-serif";
+        ctx.fillStyle = active ? "#7a4700" : "#24313f";
+        ctx.textBaseline = "middle";
+        ctx.fillText(region.labelText, 0, 0);
+        ctx.restore();
+      }
+    }
+
+    function renderScene() {
+      const rect = ensureCanvasSize();
+      if (!map || !scene) return;
+      if (!scene.files) return;
+      for (const file of scene.files) {
+        if (!file.regions) continue;
+        const inactive = [];
+        let active = null;
+        for (const region of file.regions) {
+          if (region.regionId === scene.activeRegionId) active = region;
+          else inactive.push(region);
+        }
+        for (const region of inactive) drawRegion(region, false);
+        if (active) drawRegion(active, true);
+      }
+    }
+
+    function fitSceneBounds() {
+      if (!map || !scene || fitDone) return;
+      const bounds = [];
+      for (const file of (scene.files || [])) {
+        for (const sample of (file.navigationSamples || [])) {
+          if (sample.longitude != null && sample.latitude != null) {
+            bounds.push([sample.longitude, sample.latitude]);
+          }
+        }
+      }
+      if (bounds.length >= 2) {
+        map.setFitView(bounds, false, [50, 50, 50, 50], 16);
+        fitDone = true;
+      }
+    }
+
+    function updateScene(sceneJson) {
+      scene = sceneJson;
+      fitSceneBounds();
+      renderScene();
+    }
+    window.updateOverviewScene = updateScene;
+
+    function detectRegionFromEvent(lnglat) {
+      if (!scene || !scene.files || !lnglat) return null;
+      const point = map.lngLatToContainer(lnglat);
+      const px = point.getX();
+      const py = point.getY();
+      const candidates = [];
+      for (const file of scene.files) {
+        for (const region of (file.regions || [])) {
+          const geometry = computeRegionGeometry(region);
+          if (!geometry) continue;
+          if (pointInPolygon(px, py, geometry.polygon)) {
+            candidates.push(region);
+          }
+        }
+      }
+      if (!candidates.length) return null;
+      return candidates.find(r => r.regionId === scene.activeRegionId) || candidates[candidates.length - 1];
+    }
+
+    function pointInPolygon(x, y, points) {
+      let inside = false;
+      for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+        const xi = points[i].x, yi = points[i].y;
+        const xj = points[j].x, yj = points[j].y;
+        const intersect = ((yi > y) !== (yj > y)) &&
+          (x < (xj - xi) * (y - yi) / ((yj - yi) || 1e-9) + xi);
+        if (intersect) inside = !inside;
+      }
+      return inside;
+    }
+
+    function nearestTrace(region, lnglat) {
+      if (!region || !region.navigationSamples || !region.navigationSamples.length) return { traceIndex: 0, lineIndex: 0 };
+      const pt = map.lngLatToContainer(lnglat);
+      let best = region.navigationSamples[0];
+      let bestDist = Infinity;
+      for (const sample of region.navigationSamples) {
+        const sp = map.lngLatToContainer([sample.longitude, sample.latitude]);
+        const dx = sp.getX() - pt.getX();
+        const dy = sp.getY() - pt.getY();
+        const dist = dx * dx + dy * dy;
+        if (dist < bestDist) {
+          best = sample;
+          bestDist = dist;
+        }
+      }
+      return { traceIndex: best.traceIndex || 0, lineIndex: 0 };
+    }
+
+    function setupMapEvents() {
+      map.on("mapmove", renderScene);
+      map.on("zoomchange", renderScene);
+      map.on("resize", renderScene);
+      map.on("click", function(ev) {
+        if (!bridge) return;
+        const region = detectRegionFromEvent(ev.lnglat);
+        if (region) {
+          bridge.activateRegion(region.regionId);
+        }
+      });
+      map.on("dblclick", function(ev) {
+        if (!bridge) return;
+        const region = detectRegionFromEvent(ev.lnglat);
+        if (region) {
+          const nearest = nearestTrace(region, ev.lnglat);
+          bridge.selectPoint(region.regionId, nearest.traceIndex, nearest.lineIndex);
+        }
+      });
+    }
+
+    function initAmap() {
+      const key = "__AMAP_KEY__";
+      if (!key) {
+        showMessage("未配置高德地图 Key");
+        return;
+      }
+      showMessage("正在加载在线地图…");
+      if (typeof AMap === "undefined" || !AMap || !AMap.Map) {
+        const message = "高德地图脚本未成功加载";
+        showMessage(message);
+        if (bridge && bridge.reportMapError) {
+          bridge.reportMapError(message);
+        }
+        return;
+      }
+      try {
+        map = new AMap.Map("map", {
+          viewMode: "2D",
+          zoom: 14,
+          zooms: [3, 20],
+          mapStyle: "amap://styles/whitesmoke",
+          expandZoomRange: true,
+          resizeEnable: true,
+          doubleClickZoom: true,
+          scrollWheel: true,
+          dragEnable: true
+        });
+        setupMapEvents();
+        fitSceneBounds();
+        renderScene();
+        showMessage("");
+        if (bridge && bridge.notifyMapReady) {
+          bridge.notifyMapReady();
+        }
+      } catch (err) {
+        showMessage("在线地图加载失败\\n" + String(err));
+        if (bridge && bridge.reportMapError) {
+          bridge.reportMapError(String(err));
+        }
+      }
+    }
+
+    window.addEventListener("resize", renderScene);
+    setupBridge();
+    initAmap();
+  </script>
+</body>
+</html>

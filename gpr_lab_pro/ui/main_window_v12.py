@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import os
+import time
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,11 +11,12 @@ from matplotlib import cm
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib.font_manager import FontProperties
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtNetwork, QtWebChannel, QtWebEngineCore, QtWebEngineWidgets, QtWidgets
 
 from gpr_lab_pro.application import GPRApplication
 from gpr_lab_pro.domain.enums import StepKind
 from gpr_lab_pro.domain.models.display import DisplayData
+from gpr_lab_pro.infrastructure.online_map import OnlineMapConfig, OnlineMapConfigStore
 from gpr_lab_pro.render.adapters.cscan_adapter import build_cscan
 from gpr_lab_pro.processing.catalog_v11 import OperationSpec, SPEC_BY_TYPE
 from gpr_lab_pro.processing.module_registry_v11 import MODULE_SPECS
@@ -149,6 +151,48 @@ class RegionBoundsDialog(QtWidgets.QDialog):
             "sample_start": sample_start,
             "sample_stop": sample_stop,
         }
+
+
+class OnlineMapConfigDialog(QtWidgets.QDialog):
+    def __init__(
+        self,
+        config: OnlineMapConfig,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("在线地图配置")
+        self.resize(520, 220)
+        layout = QtWidgets.QFormLayout(self)
+        layout.setLabelAlignment(QtCore.Qt.AlignRight)
+        self.provider_combo = QtWidgets.QComboBox()
+        self.provider_combo.addItem("OpenStreetMap", "osm")
+        self.provider_combo.addItem("高德地图(预留切换)", "amap")
+        idx = max(0, self.provider_combo.findData(config.provider or "osm"))
+        self.provider_combo.setCurrentIndex(idx)
+        self.key_edit = QtWidgets.QLineEdit(config.amap_js_key)
+        self.security_edit = QtWidgets.QLineEdit(config.amap_security_js_code)
+        self.security_edit.setEchoMode(QtWidgets.QLineEdit.PasswordEchoOnEdit)
+        note = QtWidgets.QLabel(
+            "当前版本地图主链先走在线瓦片地图，已预留高德 Key/密钥配置。\n"
+            "后续切换高德时会直接复用这份本地配置文件。"
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#5a6b7e;")
+        layout.addRow("地图提供器", self.provider_combo)
+        layout.addRow("高德 JSAPI Key", self.key_edit)
+        layout.addRow("高德安全密钥", self.security_edit)
+        layout.addRow("", note)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    def values(self) -> OnlineMapConfig:
+        return OnlineMapConfig(
+            provider=str(self.provider_combo.currentData() or "osm"),
+            amap_js_key=self.key_edit.text().strip(),
+            amap_security_js_code=self.security_edit.text().strip(),
+        )
 
 
 class OperationDialog(QtWidgets.QDialog):
@@ -332,12 +376,312 @@ class MplCanvas(FigureCanvas):
         super().__init__(self.figure)
 
 
-class OverviewMapWidget(QtWidgets.QWidget):
+class OverviewMapBridge(QtCore.QObject):
+    pageReady = QtCore.Signal()
+    mapReady = QtCore.Signal()
+    regionActivated = QtCore.Signal(str)
+    pointSelected = QtCore.Signal(str, int, int)
+    mapError = QtCore.Signal(str)
+
+    @QtCore.Slot()
+    def notifyPageReady(self) -> None:
+        self.pageReady.emit()
+
+    @QtCore.Slot()
+    def notifyMapReady(self) -> None:
+        self.mapReady.emit()
+
+    @QtCore.Slot(str)
+    def activateRegion(self, region_id: str) -> None:
+        self.regionActivated.emit(region_id)
+
+    @QtCore.Slot(str, int, int)
+    def selectPoint(self, region_id: str, trace_index: int, line_index: int) -> None:
+        self.pointSelected.emit(region_id, trace_index, line_index)
+
+    @QtCore.Slot(str)
+    def reportMapError(self, message: str) -> None:
+        self.mapError.emit(message)
+
+
+class OverviewWebPage(QtWebEngineCore.QWebEnginePage):
+    console_message = QtCore.Signal(str)
+    load_state_changed = QtCore.Signal(bool)
+    render_process_failed = QtCore.Signal(str)
+
+    def javaScriptConsoleMessage(self, level, message, line_number, source_id):  # type: ignore[override]
+        self.console_message.emit(f"[JS:{line_number}] {message} ({source_id})")
+        super().javaScriptConsoleMessage(level, message, line_number, source_id)
+
+    def acceptNavigationRequest(self, url, nav_type, is_main_frame):  # type: ignore[override]
+        return super().acceptNavigationRequest(url, nav_type, is_main_frame)
+
+
+class OverviewWebMapWidget(QtWidgets.QWidget):
     point_selected = QtCore.Signal(str, int, int)
     region_activated = QtCore.Signal(str)
 
+    def __init__(self, map_config: OnlineMapConfig, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._map_config = map_config
+        self._files: list[dict[str, object]] = []
+        self._active_region_id = ""
+        self._active_file_id = ""
+        self._active_trace = 0
+        self._active_region_name = ""
+        self._active_interface_name = ""
+        self._pending_scene_payload: dict[str, object] | None = None
+        self._page_ready = False
+        self._map_ready = False
+        self._last_error_message = ""
+        self._web_mode_enabled = True
+        self._load_watchdog = QtCore.QTimer(self)
+        self._load_watchdog.setSingleShot(True)
+        self._load_watchdog.setInterval(3500)
+        self._load_watchdog.timeout.connect(self._on_load_timeout)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._stack = QtWidgets.QStackedLayout()
+        self._stack.setContentsMargins(0, 0, 0, 0)
+        layout.addLayout(self._stack)
+        self._fallback = OverviewMapWidget(self)
+        self._fallback.region_activated.connect(self.region_activated)
+        self._fallback.point_selected.connect(self.point_selected)
+        self.view = QtWebEngineWidgets.QWebEngineView(self)
+        self._page = OverviewWebPage(self.view)
+        self.view.setPage(self._page)
+        self._page.settings().setAttribute(
+            QtWebEngineCore.QWebEngineSettings.LocalContentCanAccessRemoteUrls,
+            True,
+        )
+        self._page.console_message.connect(self._on_console_message)
+        self._page.loadFinished.connect(self._on_load_finished)
+        self._page.renderProcessTerminated.connect(self._on_render_process_terminated)
+        self._stack.addWidget(self.view)
+        self._stack.addWidget(self._fallback)
+        self._stack.setCurrentWidget(self._fallback)
+        self.bridge = OverviewMapBridge(self)
+        self.bridge.regionActivated.connect(self.region_activated)
+        self.bridge.pointSelected.connect(self.point_selected)
+        self.bridge.pageReady.connect(self._on_page_ready)
+        self.bridge.mapReady.connect(self._on_map_ready)
+        self.bridge.mapError.connect(self._on_map_error)
+        self.channel = QtWebChannel.QWebChannel(self._page)
+        self.channel.registerObject("overviewBridge", self.bridge)
+        self._page.setWebChannel(self.channel)
+        self._load_map_page()
+
+    def set_online_map_config(self, config: OnlineMapConfig) -> None:
+        self._map_config = config
+        self._load_map_page()
+
+    def clear_scene(self) -> None:
+        self._files = []
+        self._active_region_id = ""
+        self._active_file_id = ""
+        self._active_trace = 0
+        self._active_region_name = ""
+        self._active_interface_name = ""
+        self._fallback.clear_scene()
+        self._pending_scene_payload = {
+            "files": [],
+            "activeRegionId": "",
+            "activeFileId": "",
+            "activeTrace": 0,
+            "activeRegionName": "",
+            "activeInterfaceName": "",
+        }
+        self._push_scene_to_page()
+
+    def set_scene(
+        self,
+        files: list[dict[str, object]],
+        *,
+        active_region_id: str,
+        active_file_id: str,
+        active_trace: int = 0,
+        map_image: QtGui.QImage | None = None,
+        active_region_name: str = "",
+        active_interface_name: str = "",
+    ) -> None:
+        del map_image
+        self._files = list(files)
+        self._active_region_id = active_region_id
+        self._active_file_id = active_file_id
+        self._active_trace = int(active_trace)
+        self._active_region_name = active_region_name
+        self._active_interface_name = active_interface_name
+        self._fallback.set_scene(
+            self._files,
+            active_region_id=self._active_region_id,
+            active_file_id=self._active_file_id,
+            active_trace=self._active_trace,
+            map_image=map_image,
+            active_region_name=self._active_region_name,
+            active_interface_name=self._active_interface_name,
+        )
+        self._pending_scene_payload = self._build_scene_payload()
+        self._push_scene_to_page()
+
+    def _load_map_page(self) -> None:
+        template_path = Path(__file__).resolve().parents[1] / "resources" / "overview" / "amap_overview.html"
+        html = template_path.read_text(encoding="utf-8")
+        html = html.replace("__AMAP_KEY__", self._map_config.amap_js_key)
+        html = html.replace("__AMAP_SECURITY__", self._map_config.amap_security_js_code)
+        self._page_ready = False
+        self._map_ready = False
+        self._last_error_message = ""
+        self._web_mode_enabled = True
+        self._stack.setCurrentWidget(self._fallback)
+        self._load_watchdog.start()
+        self.view.setHtml(html, QtCore.QUrl.fromLocalFile(str(template_path.parent) + os.sep))
+
+    def _on_page_ready(self) -> None:
+        self._page_ready = True
+        self._push_scene_to_page()
+
+    def _on_map_ready(self) -> None:
+        self._map_ready = True
+        self._web_mode_enabled = True
+        self._load_watchdog.stop()
+        self._stack.setCurrentWidget(self.view)
+        self._push_scene_to_page()
+
+    def _on_map_error(self, message: str) -> None:
+        self._last_error_message = str(message)
+        self._web_mode_enabled = False
+        self._load_watchdog.stop()
+        self._stack.setCurrentWidget(self._fallback)
+        print(f"Overview map error: {message}")
+
+    def _on_console_message(self, message: str) -> None:
+        print(f"Overview map console: {message}")
+
+    def _on_load_finished(self, ok: bool) -> None:
+        if not ok:
+            self._last_error_message = "地图页面加载失败"
+            self._web_mode_enabled = False
+            self._load_watchdog.stop()
+            self._stack.setCurrentWidget(self._fallback)
+        print(f"Overview map loadFinished: {ok}")
+
+    def _on_render_process_terminated(self, termination_status, status_code: int) -> None:
+        self._last_error_message = f"地图渲染进程终止: {termination_status} ({status_code})"
+        self._web_mode_enabled = False
+        self._load_watchdog.stop()
+        self._stack.setCurrentWidget(self._fallback)
+        print(self._last_error_message)
+
+    def _on_load_timeout(self) -> None:
+        if self._map_ready:
+            return
+        self._last_error_message = "地图加载超时，已切换为本地总览视图"
+        self._web_mode_enabled = False
+        self._stack.setCurrentWidget(self._fallback)
+        print(self._last_error_message)
+
+    def _push_scene_to_page(self) -> None:
+        if not self._page_ready or not self._pending_scene_payload or not self._web_mode_enabled:
+            return
+        import json
+
+        payload = json.dumps(self._pending_scene_payload, ensure_ascii=False)
+        script = f"window.updateOverviewScene({payload});"
+        self.view.page().runJavaScript(script)
+
+    def _build_scene_payload(self) -> dict[str, object]:
+        payload_files: list[dict[str, object]] = []
+        for file_item in self._files:
+            payload_regions: list[dict[str, object]] = []
+            for region in file_item.get("regions", []):
+                payload_regions.append(
+                    {
+                        "regionId": str(region.get("region_id", "")),
+                        "regionName": str(region.get("region_name", "")),
+                        "labelText": self._region_label_text(file_item, region),
+                        "hasResult": bool(region.get("has_result", False)),
+                        "interfaceCount": int(region.get("interface_count", 0)),
+                        "traceStart": int(region.get("trace_start", 0)),
+                        "traceStop": int(region.get("trace_stop", 0)),
+                        "navigationSamples": self._payload_samples(region.get("navigation_samples", [])),
+                        "polygon": self._payload_polygon(region.get("polygon", [])),
+                        "previewDataUrl": self._image_to_data_url(region.get("preview_image")),
+                    }
+                )
+            payload_files.append(
+                {
+                    "fileId": str(file_item.get("file_id", "")),
+                    "fileName": str(file_item.get("file_name", "")),
+                    "navigationSamples": self._payload_samples(file_item.get("navigation_samples", [])),
+                    "regions": payload_regions,
+                }
+            )
+        return {
+            "files": payload_files,
+            "activeRegionId": self._active_region_id,
+            "activeFileId": self._active_file_id,
+            "activeTrace": self._active_trace,
+            "activeRegionName": self._active_region_name,
+            "activeInterfaceName": self._active_interface_name,
+        }
+
+    @staticmethod
+    def _region_label_text(file_item: dict[str, object], region: dict[str, object]) -> str:
+        file_name = str(file_item.get("file_name", "") or "")
+        file_label = Path(file_name).stem if file_name else ""
+        region_label = str(region.get("region_name", "") or "")
+        return f"{file_label}  {region_label}".strip()
+
+    @staticmethod
+    def _payload_samples(samples: list[dict[str, object]]) -> list[dict[str, object]]:
+        output = []
+        for sample in samples or []:
+            lat = sample.get("latitude")
+            lon = sample.get("longitude")
+            if lat is None or lon is None:
+                continue
+            output.append(
+                {
+                    "traceIndex": int(sample.get("trace_index", 0)),
+                    "latitude": float(lat),
+                    "longitude": float(lon),
+                }
+            )
+        return output
+
+    @staticmethod
+    def _payload_polygon(points: list[dict[str, object]]) -> list[dict[str, float]]:
+        output = []
+        for point in points or []:
+            lat = point.get("latitude")
+            lon = point.get("longitude")
+            if lat is None or lon is None:
+                continue
+            output.append({"latitude": float(lat), "longitude": float(lon)})
+        return output
+
+    @staticmethod
+    def _image_to_data_url(image: object) -> str:
+        if not isinstance(image, QtGui.QImage) or image.isNull():
+            return ""
+        array = QtCore.QByteArray()
+        buffer = QtCore.QBuffer(array)
+        buffer.open(QtCore.QIODevice.WriteOnly)
+        image.save(buffer, "PNG")
+        payload = bytes(array.toBase64()).decode("ascii")
+        return f"data:image/png;base64,{payload}"
+
+
+class OverviewMapWidget(QtWidgets.QWidget):
+    point_selected = QtCore.Signal(str, int, int)
+    region_activated = QtCore.Signal(str)
+    _TILE_SIZE = 256
+    _MAP_TILE_TEMPLATE_OSM = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+    _MAP_TILE_TEMPLATE_AMAP = "http://wprd03.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scl=1&style=7&x={x}&y={y}&z={z}"
+
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
+        self._map_config = OnlineMapConfig()
         self._files: list[dict[str, object]] = []
         self._active_region_id = ""
         self._active_file_id = ""
@@ -350,7 +694,30 @@ class OverviewMapWidget(QtWidgets.QWidget):
         self._scene_cache: QtGui.QImage | None = None
         self._scene_cache_size = QtCore.QSize()
         self._scene_dirty = True
+        self._last_map_context: dict[str, object] | None = None
+        self._last_canvas_rect = QtCore.QRectF()
+        self._map_zoom_override: int | None = None
+        self._map_center_geo_override: tuple[float, float] | None = None
+        self._map_drag_state: dict[str, object] | None = None
+        self._tile_manager = QtNetwork.QNetworkAccessManager(self)
+        self._tile_manager.finished.connect(self._on_tile_reply)
+        self._tile_cache: dict[tuple[int, int, int], QtGui.QImage] = {}
+        self._tile_pending: set[tuple[int, int, int]] = set()
+        self._tile_failed: dict[tuple[int, int, int], float] = {}
+        self._tile_last_error = ""
+        self._scene_refresh_timer = QtCore.QTimer(self)
+        self._scene_refresh_timer.setSingleShot(True)
+        self._scene_refresh_timer.setInterval(16)
+        self._scene_refresh_timer.timeout.connect(self._flush_scene_refresh)
         self.setMinimumHeight(240)
+
+    def set_online_map_config(self, config: OnlineMapConfig) -> None:
+        self._map_config = config
+        self._tile_cache.clear()
+        self._tile_pending.clear()
+        self._tile_failed.clear()
+        self._tile_last_error = ""
+        self._invalidate_scene_cache(immediate=True)
 
     def clear_scene(self) -> None:
         self._files = []
@@ -362,7 +729,13 @@ class OverviewMapWidget(QtWidgets.QWidget):
         self._map_image = None
         self._layout_rects = []
         self._hover_region_id = ""
-        self._invalidate_scene_cache()
+        self._last_map_context = None
+        self._last_canvas_rect = QtCore.QRectF()
+        self._map_zoom_override = None
+        self._map_center_geo_override = None
+        self._map_drag_state = None
+        self._tile_last_error = ""
+        self._invalidate_scene_cache(immediate=True)
 
     def set_scene(
         self,
@@ -384,37 +757,46 @@ class OverviewMapWidget(QtWidgets.QWidget):
         self._active_interface_name = active_interface_name
         self._layout_rects = []
         self._hover_region_id = ""
-        self._invalidate_scene_cache()
+        self._last_map_context = None
+        self._last_canvas_rect = QtCore.QRectF()
+        self._invalidate_scene_cache(immediate=True)
 
     def paintEvent(self, _event: QtGui.QPaintEvent) -> None:
         if not self._files:
             painter = QtGui.QPainter(self)
             painter.fillRect(self.rect(), QtGui.QColor("#ffffff"))
             return
-        self._ensure_scene_cache()
+        if (
+            self._scene_cache is None
+            or self._scene_cache.isNull()
+            or self._scene_cache_size != self.size()
+        ):
+            self._rebuild_scene_cache()
         painter = QtGui.QPainter(self)
         painter.fillRect(self.rect(), QtGui.QColor("#ffffff"))
         if self._scene_cache is not None and not self._scene_cache.isNull():
             painter.drawImage(QtCore.QPoint(0, 0), self._scene_cache)
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
-        self._invalidate_scene_cache()
+        self._invalidate_scene_cache(immediate=True)
         super().resizeEvent(event)
 
-    def _invalidate_scene_cache(self) -> None:
+    def _invalidate_scene_cache(self, *, immediate: bool = False) -> None:
         self._scene_dirty = True
-        self._scene_cache = None
-        self._scene_cache_size = QtCore.QSize()
-        self.update()
-
-    def _ensure_scene_cache(self) -> None:
-        if (
-            not self._scene_dirty
-            and self._scene_cache is not None
-            and not self._scene_cache.isNull()
-            and self._scene_cache_size == self.size()
-        ):
+        if immediate:
+            self._scene_refresh_timer.stop()
+            self._rebuild_scene_cache()
+            self.update()
             return
+        if not self._scene_refresh_timer.isActive():
+            self._scene_refresh_timer.start()
+
+    def _flush_scene_refresh(self) -> None:
+        if self._scene_dirty:
+            self._rebuild_scene_cache()
+            self.update()
+
+    def _rebuild_scene_cache(self) -> None:
         if self.width() <= 0 or self.height() <= 0:
             return
         image = QtGui.QImage(self.size(), QtGui.QImage.Format_ARGB32_Premultiplied)
@@ -437,7 +819,12 @@ class OverviewMapWidget(QtWidgets.QWidget):
         summary_rect = QtCore.QRectF(canvas.left(), canvas.top(), canvas.width(), 20.0)
         self._draw_summary(painter, summary_rect)
         canvas = canvas.adjusted(0, 24, 0, 0)
-        if isinstance(self._map_image, QtGui.QImage) and not self._map_image.isNull():
+        map_context = self._compute_map_context(QtCore.QRectF(canvas))
+        self._last_map_context = map_context
+        self._last_canvas_rect = QtCore.QRectF(canvas)
+        if map_context is not None:
+            self._draw_live_map_tiles(painter, QtCore.QRectF(canvas), map_context)
+        elif isinstance(self._map_image, QtGui.QImage) and not self._map_image.isNull():
             painter.save()
             painter.setOpacity(0.92)
             painter.drawImage(QtCore.QRectF(canvas), self._map_image)
@@ -453,7 +840,7 @@ class OverviewMapWidget(QtWidgets.QWidget):
                 painter.drawLine(QtCore.QPointF(canvas.left(), y), QtCore.QPointF(canvas.right(), y))
             painter.restore()
 
-        rects, file_paths = self._compute_layout(canvas)
+        rects, file_paths = self._compute_layout(canvas, map_context)
         self._layout_rects = rects
 
         for file_item in self._files:
@@ -533,16 +920,27 @@ class OverviewMapWidget(QtWidgets.QWidget):
                 )
                 painter.restore()
             painter.restore()
+        if map_context is not None:
+            self._draw_map_diagnostics(painter, QtCore.QRectF(canvas), map_context)
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
         if event.button() != QtCore.Qt.LeftButton:
             super().mousePressEvent(event)
             return
-        region = self._region_at(event.position())
-        if region is None:
+        canvas_rect = self._last_canvas_rect
+        if self._last_map_context is None or canvas_rect.isNull() or not canvas_rect.contains(event.position()):
             super().mousePressEvent(event)
             return
-        self.region_activated.emit(region[0])
+        region = self._region_at(event.position())
+        center_lat = float(self._last_map_context["center_lat"])
+        center_lon = float(self._last_map_context["center_lon"])
+        center_px_x, center_px_y = self._geo_to_global_pixel(center_lat, center_lon, int(self._last_map_context["zoom"]))
+        self._map_drag_state = {
+            "start_pos": QtCore.QPointF(event.position()),
+            "start_center_px": (center_px_x, center_px_y),
+            "pressed_region": region,
+            "moved": False,
+        }
         event.accept()
 
     def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:
@@ -565,12 +963,81 @@ class OverviewMapWidget(QtWidgets.QWidget):
         event.accept()
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
+        if self._map_drag_state is not None and self._last_map_context is not None and not self._last_canvas_rect.isNull():
+            start_pos = self._map_drag_state["start_pos"]
+            delta = event.position() - start_pos
+            if not self._map_drag_state["moved"]:
+                if abs(delta.x()) >= 3.0 or abs(delta.y()) >= 3.0:
+                    self._map_drag_state["moved"] = True
+            if self._map_drag_state["moved"]:
+                center_px_x, center_px_y = self._map_drag_state["start_center_px"]
+                new_center_px_x = float(center_px_x) - float(delta.x())
+                new_center_px_y = float(center_px_y) - float(delta.y())
+                center_lat, center_lon = self._global_pixel_to_geo(
+                    new_center_px_x,
+                    new_center_px_y,
+                    int(self._last_map_context["zoom"]),
+                )
+                self._map_center_geo_override = (center_lat, center_lon)
+                self._invalidate_scene_cache()
+                self.setCursor(QtCore.Qt.ClosedHandCursor)
+                event.accept()
+                return
         region = self._region_at(event.position())
-        self.setCursor(QtCore.Qt.PointingHandCursor if region is not None else QtCore.Qt.ArrowCursor)
+        if self._last_map_context is not None and self._last_canvas_rect.contains(event.position()):
+            self.setCursor(QtCore.Qt.OpenHandCursor if region is None else QtCore.Qt.PointingHandCursor)
+        else:
+            self.setCursor(QtCore.Qt.PointingHandCursor if region is not None else QtCore.Qt.ArrowCursor)
         super().mouseMoveEvent(event)
 
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.LeftButton and self._map_drag_state is not None:
+            drag_state = self._map_drag_state
+            self._map_drag_state = None
+            self.setCursor(QtCore.Qt.OpenHandCursor if self._last_map_context is not None else QtCore.Qt.ArrowCursor)
+            if not drag_state.get("moved", False):
+                region = drag_state.get("pressed_region")
+                if region is not None:
+                    self.region_activated.emit(region[0])
+                    event.accept()
+                    return
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def wheelEvent(self, event: QtGui.QWheelEvent) -> None:
+        if self._last_map_context is None or self._last_canvas_rect.isNull() or not self._last_canvas_rect.contains(event.position()):
+            super().wheelEvent(event)
+            return
+        delta_y = int(event.angleDelta().y())
+        if delta_y == 0:
+            super().wheelEvent(event)
+            return
+        current_zoom = int(self._last_map_context["zoom"])
+        new_zoom = int(np.clip(current_zoom + (1 if delta_y > 0 else -1), 3, 19))
+        if new_zoom == current_zoom:
+            event.accept()
+            return
+        center_lat = float(self._last_map_context["center_lat"])
+        center_lon = float(self._last_map_context["center_lon"])
+        center_px_x, center_px_y = self._geo_to_global_pixel(center_lat, center_lon, current_zoom)
+        canvas_center = self._last_canvas_rect.center()
+        anchor_pos = event.position()
+        anchor_global_x = center_px_x + (anchor_pos.x() - canvas_center.x())
+        anchor_global_y = center_px_y + (anchor_pos.y() - canvas_center.y())
+        anchor_lat, anchor_lon = self._global_pixel_to_geo(anchor_global_x, anchor_global_y, current_zoom)
+        anchor_new_px_x, anchor_new_px_y = self._geo_to_global_pixel(anchor_lat, anchor_lon, new_zoom)
+        new_center_px_x = anchor_new_px_x - (anchor_pos.x() - canvas_center.x())
+        new_center_px_y = anchor_new_px_y - (anchor_pos.y() - canvas_center.y())
+        new_center_lat, new_center_lon = self._global_pixel_to_geo(new_center_px_x, new_center_px_y, new_zoom)
+        self._map_zoom_override = new_zoom
+        self._map_center_geo_override = (new_center_lat, new_center_lon)
+        self._invalidate_scene_cache()
+        event.accept()
+
     def leaveEvent(self, event: QtCore.QEvent) -> None:
-        self.unsetCursor()
+        if self._map_drag_state is None:
+            self.unsetCursor()
         super().leaveEvent(event)
 
     def _region_at(self, point: QtCore.QPointF) -> tuple[str, QtGui.QPainterPath, dict[str, object]] | None:
@@ -582,6 +1049,7 @@ class OverviewMapWidget(QtWidgets.QWidget):
     def _compute_layout(
         self,
         canvas: QtCore.QRect,
+        map_context: dict[str, object] | None = None,
     ) -> tuple[list[tuple[str, QtGui.QPainterPath, dict[str, object]]], dict[str, QtGui.QPainterPath]]:
         world_bounds = self._world_bounds()
         rects: list[tuple[str, QtGui.QPainterPath, dict[str, object]]] = []
@@ -595,15 +1063,27 @@ class OverviewMapWidget(QtWidgets.QWidget):
                 2.8,
                 max((float(region.get("render_width", 0.0)) for region in file_item.get("regions", [])), default=0.0),
             )
-            file_polygon_points = self._region_polygon_points(navigation_samples, file_width)
+            if map_context is not None:
+                file_polygon_points = self._region_polygon_geo_points(navigation_samples, file_width)
+            else:
+                file_polygon_points = self._region_polygon_points(navigation_samples, file_width)
             if file_polygon_points:
                 file_polygon = QtGui.QPolygonF(
                     [
-                        self._world_to_canvas(
-                            float(point["x"]),
-                            float(point["y"]),
-                            world_bounds,
-                            QtCore.QRectF(canvas),
+                        (
+                            self._geo_to_canvas(
+                                float(point["latitude"]),
+                                float(point["longitude"]),
+                                map_context,
+                                QtCore.QRectF(canvas),
+                            )
+                            if map_context is not None
+                            else self._world_to_canvas(
+                                float(point["x"]),
+                                float(point["y"]),
+                                world_bounds,
+                                QtCore.QRectF(canvas),
+                            )
                         )
                         for point in file_polygon_points
                     ]
@@ -616,16 +1096,28 @@ class OverviewMapWidget(QtWidgets.QWidget):
                     file_path.closeSubpath()
                 file_paths[file_id] = file_path
             for region in file_item.get("regions", []):
-                polygon_points = region.get("polygon", [])
+                if map_context is not None:
+                    polygon_points = self._region_polygon_geo_points(region.get("navigation_samples", []), float(region.get("render_width", 0.0)))
+                else:
+                    polygon_points = region.get("polygon", [])
                 if not isinstance(polygon_points, list) or len(polygon_points) < 3:
                     continue
                 polygon = QtGui.QPolygonF(
                     [
-                        self._world_to_canvas(
-                            float(point["x"]),
-                            float(point["y"]),
-                            world_bounds,
-                            QtCore.QRectF(canvas),
+                        (
+                            self._geo_to_canvas(
+                                float(point["latitude"]),
+                                float(point["longitude"]),
+                                map_context,
+                                QtCore.QRectF(canvas),
+                            )
+                            if map_context is not None
+                            else self._world_to_canvas(
+                                float(point["x"]),
+                                float(point["y"]),
+                                world_bounds,
+                                QtCore.QRectF(canvas),
+                            )
                         )
                         for point in polygon_points
                     ]
@@ -642,18 +1134,36 @@ class OverviewMapWidget(QtWidgets.QWidget):
                 item["navigation_samples"] = [
                     {
                         **sample,
-                        "screen_x": self._world_to_canvas(
-                            float(sample.get("x", 0.0)),
-                            float(sample.get("y", 0.0)),
-                            world_bounds,
-                            QtCore.QRectF(canvas),
-                        ).x(),
-                        "screen_y": self._world_to_canvas(
-                            float(sample.get("x", 0.0)),
-                            float(sample.get("y", 0.0)),
-                            world_bounds,
-                            QtCore.QRectF(canvas),
-                        ).y(),
+                        "screen_x": (
+                            self._geo_to_canvas(
+                                float(sample.get("latitude", 0.0)),
+                                float(sample.get("longitude", 0.0)),
+                                map_context,
+                                QtCore.QRectF(canvas),
+                            ).x()
+                            if map_context is not None and sample.get("latitude") is not None and sample.get("longitude") is not None
+                            else self._world_to_canvas(
+                                float(sample.get("x", 0.0)),
+                                float(sample.get("y", 0.0)),
+                                world_bounds,
+                                QtCore.QRectF(canvas),
+                            ).x()
+                        ),
+                        "screen_y": (
+                            self._geo_to_canvas(
+                                float(sample.get("latitude", 0.0)),
+                                float(sample.get("longitude", 0.0)),
+                                map_context,
+                                QtCore.QRectF(canvas),
+                            ).y()
+                            if map_context is not None and sample.get("latitude") is not None and sample.get("longitude") is not None
+                            else self._world_to_canvas(
+                                float(sample.get("x", 0.0)),
+                                float(sample.get("y", 0.0)),
+                                world_bounds,
+                                QtCore.QRectF(canvas),
+                            ).y()
+                        ),
                     }
                     for sample in region.get("navigation_samples", [])
                 ]
@@ -680,6 +1190,264 @@ class OverviewMapWidget(QtWidgets.QWidget):
         pad_x = max((max_x - min_x) * 0.08, 4.0)
         pad_y = max((max_y - min_y) * 0.08, 4.0)
         return (min_x - pad_x, min_y - pad_y, max_x + pad_x, max_y + pad_y)
+
+    def _compute_map_context(self, canvas_rect: QtCore.QRectF) -> dict[str, object] | None:
+        geo_points: list[tuple[float, float]] = []
+        max_width_m = 2.0
+        for file_item in self._files:
+            for sample in file_item.get("navigation_samples", []):
+                lat = sample.get("latitude")
+                lon = sample.get("longitude")
+                if lat is None or lon is None:
+                    continue
+                geo_points.append((float(lat), float(lon)))
+            for region in file_item.get("regions", []):
+                max_width_m = max(max_width_m, float(region.get("render_width", 0.0) or 0.0))
+        if len(geo_points) < 2:
+            return None
+        latitudes = np.array([item[0] for item in geo_points], dtype=float)
+        longitudes = np.array([item[1] for item in geo_points], dtype=float)
+        center_lat = float(latitudes.mean())
+        meters_per_deg_lat = 111320.0
+        meters_per_deg_lon = max(111320.0 * float(np.cos(np.deg2rad(center_lat))), 1.0)
+        pad_lat = max_width_m * 1.6 / meters_per_deg_lat
+        pad_lon = max_width_m * 1.6 / meters_per_deg_lon
+        min_lat = float(latitudes.min()) - pad_lat
+        max_lat = float(latitudes.max()) + pad_lat
+        min_lon = float(longitudes.min()) - pad_lon
+        max_lon = float(longitudes.max()) + pad_lon
+        zoom = int(np.clip(self._map_zoom_override if self._map_zoom_override is not None else self._choose_map_zoom(min_lat, min_lon, max_lat, max_lon, canvas_rect), 3, 19))
+        if self._map_center_geo_override is not None:
+            center_lat, center_lon = self._map_center_geo_override
+        else:
+            center_lat = float((min_lat + max_lat) * 0.5)
+            center_lon = float((min_lon + max_lon) * 0.5)
+        center_px_x, center_px_y = self._geo_to_global_pixel(center_lat, center_lon, zoom)
+        half_w = max(canvas_rect.width() * 0.5, 1.0)
+        half_h = max(canvas_rect.height() * 0.5, 1.0)
+        min_px_x = center_px_x - half_w
+        max_px_x = center_px_x + half_w
+        min_px_y = center_px_y - half_h
+        max_px_y = center_px_y + half_h
+        tile_x_min = int(np.floor(min_px_x / self._TILE_SIZE))
+        tile_x_max = int(np.floor(max_px_x / self._TILE_SIZE))
+        tile_y_min = int(np.floor(min_px_y / self._TILE_SIZE))
+        tile_y_max = int(np.floor(max_px_y / self._TILE_SIZE))
+        return {
+            "zoom": zoom,
+            "center_lat": float(center_lat),
+            "center_lon": float(center_lon),
+            "center_px_x": float(center_px_x),
+            "center_px_y": float(center_px_y),
+            "min_px_x": float(min_px_x),
+            "min_px_y": float(min_px_y),
+            "max_px_x": float(max_px_x),
+            "max_px_y": float(max_px_y),
+            "tile_x_min": tile_x_min,
+            "tile_x_max": tile_x_max,
+            "tile_y_min": tile_y_min,
+            "tile_y_max": tile_y_max,
+        }
+
+    def _choose_map_zoom(
+        self,
+        min_lat: float,
+        min_lon: float,
+        max_lat: float,
+        max_lon: float,
+        canvas_rect: QtCore.QRectF,
+    ) -> int:
+        chosen = 15
+        for zoom in range(19, 2, -1):
+            px_left_top_x, px_left_top_y = self._geo_to_global_pixel(max_lat, min_lon, zoom)
+            px_right_bottom_x, px_right_bottom_y = self._geo_to_global_pixel(min_lat, max_lon, zoom)
+            min_px_x = min(px_left_top_x, px_right_bottom_x)
+            max_px_x = max(px_left_top_x, px_right_bottom_x)
+            min_px_y = min(px_left_top_y, px_right_bottom_y)
+            max_px_y = max(px_left_top_y, px_right_bottom_y)
+            tile_x_min = int(np.floor(min_px_x / self._TILE_SIZE))
+            tile_x_max = int(np.floor(max_px_x / self._TILE_SIZE))
+            tile_y_min = int(np.floor(min_px_y / self._TILE_SIZE))
+            tile_y_max = int(np.floor(max_px_y / self._TILE_SIZE))
+            tile_count = max(tile_x_max - tile_x_min + 1, 1) * max(tile_y_max - tile_y_min + 1, 1)
+            if tile_count <= 36:
+                chosen = zoom
+                break
+        return chosen
+
+    def _draw_live_map_tiles(
+        self,
+        painter: QtGui.QPainter,
+        canvas_rect: QtCore.QRectF,
+        map_context: dict[str, object],
+    ) -> None:
+        painter.save()
+        painter.fillRect(canvas_rect, QtGui.QColor("#f3f6f9"))
+        tile_x_min = int(map_context["tile_x_min"])
+        tile_x_max = int(map_context["tile_x_max"])
+        tile_y_min = int(map_context["tile_y_min"])
+        tile_y_max = int(map_context["tile_y_max"])
+        zoom = int(map_context["zoom"])
+        center_px_x = float(map_context["center_px_x"])
+        center_px_y = float(map_context["center_px_y"])
+        canvas_center = canvas_rect.center()
+        max_tile = (1 << zoom) - 1
+        for tile_x in range(tile_x_min, tile_x_max + 1):
+            for tile_y in range(tile_y_min, tile_y_max + 1):
+                if tile_y < 0 or tile_y > max_tile:
+                    continue
+                wrapped_x = tile_x % (1 << zoom)
+                key = (zoom, wrapped_x, tile_y)
+                tile_rect = QtCore.QRectF(
+                    canvas_center.x() + ((tile_x * self._TILE_SIZE) - center_px_x),
+                    canvas_center.y() + ((tile_y * self._TILE_SIZE) - center_px_y),
+                    self._TILE_SIZE,
+                    self._TILE_SIZE,
+                )
+                tile_image = self._tile_cache.get(key)
+                if tile_image is None or tile_image.isNull():
+                    painter.fillRect(tile_rect, QtGui.QColor("#edf2f7"))
+                    painter.setPen(QtGui.QColor("#d5dee8"))
+                    painter.drawRect(tile_rect)
+                    self._request_tile(key)
+                    continue
+                painter.drawImage(tile_rect, tile_image)
+        painter.restore()
+
+    def _request_tile(self, key: tuple[int, int, int]) -> None:
+        failed_at = self._tile_failed.get(key)
+        if failed_at is not None and (time.monotonic() - failed_at) >= 3.0:
+            self._tile_failed.pop(key, None)
+        if key in self._tile_cache or key in self._tile_pending or key in self._tile_failed:
+            return
+        zoom, tile_x, tile_y = key
+        url = QtCore.QUrl(self._map_tile_url(zoom, tile_x, tile_y))
+        request = QtNetwork.QNetworkRequest(url)
+        request.setRawHeader(b"User-Agent", b"GPR_Lab_Pro_V3/1.0")
+        request.setRawHeader(b"Accept", b"image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+        request.setRawHeader(b"Referer", b"https://lbs.amap.com/")
+        reply = self._tile_manager.get(request)
+        reply.setProperty("tile_key", f"{zoom}:{tile_x}:{tile_y}")
+        reply.setProperty("tile_url", url.toString())
+        self._tile_pending.add(key)
+
+    def _on_tile_reply(self, reply: QtNetwork.QNetworkReply) -> None:
+        raw_key = str(reply.property("tile_key") or "")
+        tile_url = str(reply.property("tile_url") or reply.url().toString())
+        key = None
+        if raw_key:
+            parts = raw_key.split(":")
+            if len(parts) == 3:
+                key = (int(parts[0]), int(parts[1]), int(parts[2]))
+        if key is not None:
+            self._tile_pending.discard(key)
+            if reply.error() != QtNetwork.QNetworkReply.NoError:
+                self._tile_failed[key] = time.monotonic()
+                self._tile_last_error = f"{reply.errorString()} | {tile_url}"
+        if reply.error() == QtNetwork.QNetworkReply.NoError and key is not None:
+            payload = bytes(reply.readAll())
+            image = QtGui.QImage.fromData(payload)
+            if not image.isNull():
+                self._tile_cache[key] = image
+                self._tile_failed.pop(key, None)
+                self._tile_last_error = ""
+            else:
+                self._tile_failed[key] = time.monotonic()
+                self._tile_last_error = f"瓦片解码失败({len(payload)} bytes) | {tile_url}"
+        reply.deleteLater()
+        self._invalidate_scene_cache()
+
+    def _map_tile_url(self, zoom: int, tile_x: int, tile_y: int) -> str:
+        provider = (self._map_config.provider or "amap").strip().lower()
+        if provider == "amap":
+            return self._MAP_TILE_TEMPLATE_AMAP.format(z=zoom, x=tile_x, y=tile_y)
+        return self._MAP_TILE_TEMPLATE_OSM.format(z=zoom, x=tile_x, y=tile_y)
+
+    def _draw_map_diagnostics(
+        self,
+        painter: QtGui.QPainter,
+        canvas_rect: QtCore.QRectF,
+        map_context: dict[str, object],
+    ) -> None:
+        provider = (self._map_config.provider or "amap").strip().lower()
+        status = (
+            f"地图 {provider.upper()}  z{int(map_context['zoom'])}  "
+            f"缓存 {len(self._tile_cache)}  请求 {len(self._tile_pending)}  失败 {len(self._tile_failed)}"
+        )
+        if self._tile_last_error:
+            status += f"  |  最近错误: {self._tile_last_error}"
+        painter.save()
+        font = QtGui.QFont("Microsoft YaHei UI", 7)
+        painter.setFont(font)
+        text_rect = QtCore.QRectF(canvas_rect.left() + 8.0, canvas_rect.bottom() - 22.0, canvas_rect.width() - 16.0, 18.0)
+        painter.fillRect(text_rect.adjusted(-4.0, -2.0, 4.0, 2.0), QtGui.QColor(255, 255, 255, 180))
+        painter.setPen(QtGui.QColor("#536171"))
+        painter.drawText(text_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, status)
+        painter.restore()
+
+    @classmethod
+    def _geo_to_global_pixel(cls, latitude: float, longitude: float, zoom: int) -> tuple[float, float]:
+        lat = float(np.clip(latitude, -85.05112878, 85.05112878))
+        lon = ((float(longitude) + 180.0) % 360.0) - 180.0
+        scale = cls._TILE_SIZE * (2**zoom)
+        x = (lon + 180.0) / 360.0 * scale
+        lat_rad = np.deg2rad(lat)
+        y = (1.0 - np.log(np.tan(lat_rad) + 1.0 / np.cos(lat_rad)) / np.pi) * 0.5 * scale
+        return (float(x), float(y))
+
+    def _geo_to_canvas(
+        self,
+        latitude: float,
+        longitude: float,
+        map_context: dict[str, object],
+        _canvas_rect: QtCore.QRectF,
+    ) -> QtCore.QPointF:
+        pixel_x, pixel_y = self._geo_to_global_pixel(latitude, longitude, int(map_context["zoom"]))
+        canvas_center = self._last_canvas_rect.center() if not self._last_canvas_rect.isNull() else _canvas_rect.center()
+        x = canvas_center.x() + (pixel_x - float(map_context["center_px_x"]))
+        y = canvas_center.y() + (pixel_y - float(map_context["center_px_y"]))
+        return QtCore.QPointF(x, y)
+
+    @classmethod
+    def _global_pixel_to_geo(cls, x: float, y: float, zoom: int) -> tuple[float, float]:
+        scale = cls._TILE_SIZE * (2**zoom)
+        lon = (float(x) / scale) * 360.0 - 180.0
+        n = np.pi - 2.0 * np.pi * float(y) / scale
+        lat = np.degrees(np.arctan(np.sinh(n)))
+        return (float(lat), float(lon))
+
+    @classmethod
+    def _region_polygon_geo_points(
+        cls,
+        samples: list[dict[str, float | int]],
+        width_m: float,
+    ) -> list[dict[str, float]]:
+        valid = [
+            (float(sample["latitude"]), float(sample["longitude"]))
+            for sample in samples
+            if sample.get("latitude") is not None and sample.get("longitude") is not None
+        ]
+        if len(valid) < 2:
+            return []
+        lat0 = float(np.mean([item[0] for item in valid]))
+        meters_per_deg_lat = 111320.0
+        meters_per_deg_lon = max(111320.0 * float(np.cos(np.deg2rad(lat0))), 1.0)
+        projected = [
+            {
+                "x": (lon - np.mean([item[1] for item in valid])) * meters_per_deg_lon,
+                "y": (lat - lat0) * meters_per_deg_lat,
+            }
+            for lat, lon in valid
+        ]
+        polygon = cls._region_polygon_points(projected, width_m)
+        lon0 = float(np.mean([item[1] for item in valid]))
+        return [
+            {
+                "latitude": lat0 + float(point["y"]) / meters_per_deg_lat,
+                "longitude": lon0 + float(point["x"]) / meters_per_deg_lon,
+            }
+            for point in polygon
+        ]
 
     @staticmethod
     def _world_to_canvas(
@@ -1876,6 +2644,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._interface_pick_mode = False
         self._last_interface_pick: tuple[str, str, int, int, int] | None = None
         self._interface_drag_state: dict[str, object] | None = None
+        self._online_map_config = OnlineMapConfigStore.load()
         self._overview_region_preview_cache: dict[tuple[object, ...], QtGui.QImage] = {}
         self._overview_region_preview_by_region: dict[str, QtGui.QImage] = {}
         self._overview_map_image_cache: tuple[str, QtGui.QImage | None] = ("", None)
@@ -2196,14 +2965,14 @@ class MainWindow(QtWidgets.QMainWindow):
         overview_toolbar.setContentsMargins(0, 0, 0, 0)
         overview_toolbar.setSpacing(8)
         self.btn_overview_load_map = QtWidgets.QToolButton()
-        self.btn_overview_load_map.setText("加载底图")
+        self.btn_overview_load_map.setText("加载在线地图")
         self.btn_overview_load_map.setObjectName("interfaceActionButton")
-        self.btn_overview_load_map.clicked.connect(self._load_overview_map)
+        self.btn_overview_load_map.clicked.connect(self._configure_online_map)
         overview_toolbar.addWidget(self.btn_overview_load_map)
         self.btn_overview_clear_map = QtWidgets.QToolButton()
-        self.btn_overview_clear_map.setText("清除底图")
+        self.btn_overview_clear_map.setText("更改在线地图")
         self.btn_overview_clear_map.setObjectName("interfaceActionButton")
-        self.btn_overview_clear_map.clicked.connect(self._clear_overview_map)
+        self.btn_overview_clear_map.clicked.connect(self._change_online_map)
         overview_toolbar.addWidget(self.btn_overview_clear_map)
         overview_toolbar.addSpacing(10)
         overview_depth_label = QtWidgets.QLabel("Overview 深度")
@@ -2223,6 +2992,7 @@ class MainWindow(QtWidgets.QMainWindow):
         overview_toolbar.addWidget(self.overview_depth_value)
         overview_layout.addLayout(overview_toolbar)
         self.overview_map = OverviewMapWidget()
+        self.overview_map.set_online_map_config(self._online_map_config)
         self.overview_map.setStyleSheet("background: #fafbfc; border: 1px solid #d0d7df; border-radius: 14px;")
         self.overview_map.region_activated.connect(self._on_overview_region_activated)
         self.overview_map.point_selected.connect(self._on_overview_point_selected)
@@ -2737,23 +3507,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"工程已保存到 {project_file}", 4000)
         QtWidgets.QMessageBox.information(self, "保存工程", f"工程已保存。\n\n{project_file}")
 
-    def _load_overview_map(self) -> None:
-        project_root = self.app_controller.project_state.root_path or ""
-        start_dir = project_root or ""
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            "选择 Overview 底图",
-            start_dir,
-            "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)",
-        )
-        if not path:
+    def _configure_online_map(self) -> None:
+        dialog = OnlineMapConfigDialog(self._online_map_config, self)
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
             return
-        self.app_controller.set_overview_map_image_path(path)
+        self._online_map_config = dialog.values()
+        path = OnlineMapConfigStore.save(self._online_map_config)
+        self.overview_map.set_online_map_config(self._online_map_config)
+        self.statusBar().showMessage(f"在线地图配置已保存到 {path}", 4000)
+        self._refresh_overview_controls()
         self._refresh_overview_scene()
 
-    def _clear_overview_map(self) -> None:
-        self.app_controller.clear_overview_map_image_path()
-        self._refresh_overview_scene()
+    def _change_online_map(self) -> None:
+        self._configure_online_map()
 
     def _on_overview_depth_changed(self, value: int) -> None:
         applied = self.app_controller.set_overview_depth_sample_index(value)
@@ -2820,7 +3586,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.overview_depth_value.setText(f"{current * dt_ns:.3f}")
         has_project = self.app_controller.project_state.is_open
         self.btn_overview_load_map.setEnabled(has_project and not self._is_busy)
-        self.btn_overview_clear_map.setEnabled(bool(self.app_controller.project_state.overview_state.map_image_path) and not self._is_busy)
+        self.btn_overview_clear_map.setEnabled(has_project and not self._is_busy)
         self.overview_depth_slider.setEnabled(sample_count > 0 and not self._is_busy)
         self.overview_depth_value.setEnabled(sample_count > 0 and not self._is_busy)
 
@@ -3402,7 +4168,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if navigation is None:
             return []
         return [
-            {"trace_index": int(sample.trace_index), "x": float(sample.x), "y": float(sample.y)}
+            {
+                "trace_index": int(sample.trace_index),
+                "x": float(sample.x),
+                "y": float(sample.y),
+                "latitude": None if sample.latitude is None else float(sample.latitude),
+                "longitude": None if sample.longitude is None else float(sample.longitude),
+            }
             for sample in navigation.samples
         ]
 
@@ -3416,7 +4188,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if len(subset) == 1:
             subset = subset + subset
         return [
-            {"trace_index": int(sample.trace_index), "x": float(sample.x), "y": float(sample.y)}
+            {
+                "trace_index": int(sample.trace_index),
+                "x": float(sample.x),
+                "y": float(sample.y),
+                "latitude": None if sample.latitude is None else float(sample.latitude),
+                "longitude": None if sample.longitude is None else float(sample.longitude),
+            }
             for sample in subset
         ]
 

@@ -26,3 +26,4 @@ _tmp_pyc/
 *.mat
 *.dat
 *.log
+online_map.local.json
