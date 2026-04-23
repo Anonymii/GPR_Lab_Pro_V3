@@ -2,6 +2,7 @@
 
 import os
 import time
+from collections import OrderedDict
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -691,20 +692,29 @@ class OverviewMapWidget(QtWidgets.QWidget):
         self._map_image: QtGui.QImage | None = None
         self._layout_rects: list[tuple[str, QtGui.QPainterPath, dict[str, object]]] = []
         self._hover_region_id = ""
-        self._scene_cache: QtGui.QImage | None = None
-        self._scene_cache_size = QtCore.QSize()
-        self._scene_dirty = True
+        self._map_layer_cache: QtGui.QImage | None = None
+        self._map_layer_cache_size = QtCore.QSize()
+        self._map_layer_dirty = True
+        self._overlay_layer_cache: QtGui.QImage | None = None
+        self._overlay_layer_cache_size = QtCore.QSize()
+        self._overlay_layer_dirty = True
+        self._map_scene_signature: tuple[object, ...] | None = None
         self._last_map_context: dict[str, object] | None = None
         self._last_canvas_rect = QtCore.QRectF()
         self._map_zoom_override: int | None = None
         self._map_center_geo_override: tuple[float, float] | None = None
         self._map_drag_state: dict[str, object] | None = None
+        self._map_rebuild_hint: dict[str, object] | None = None
+        self._interaction_preview_offset = QtCore.QPointF()
+        self._interaction_preview_zoom: dict[str, object] | None = None
         self._tile_manager = QtNetwork.QNetworkAccessManager(self)
         self._tile_manager.finished.connect(self._on_tile_reply)
-        self._tile_cache: dict[tuple[int, int, int], QtGui.QImage] = {}
+        self._tile_cache: OrderedDict[tuple[int, int, int], QtGui.QImage] = OrderedDict()
         self._tile_pending: set[tuple[int, int, int]] = set()
         self._tile_failed: dict[tuple[int, int, int], float] = {}
         self._tile_last_error = ""
+        self._tile_cache_root: Path | None = None
+        self._tile_cache_limit = 2048
         self._scene_refresh_timer = QtCore.QTimer(self)
         self._scene_refresh_timer.setSingleShot(True)
         self._scene_refresh_timer.setInterval(16)
@@ -717,7 +727,7 @@ class OverviewMapWidget(QtWidgets.QWidget):
         self._tile_pending.clear()
         self._tile_failed.clear()
         self._tile_last_error = ""
-        self._invalidate_scene_cache(immediate=True)
+        self._invalidate_all_layers(immediate=True)
 
     def clear_scene(self) -> None:
         self._files = []
@@ -731,11 +741,15 @@ class OverviewMapWidget(QtWidgets.QWidget):
         self._hover_region_id = ""
         self._last_map_context = None
         self._last_canvas_rect = QtCore.QRectF()
+        self._map_scene_signature = None
         self._map_zoom_override = None
         self._map_center_geo_override = None
         self._map_drag_state = None
+        self._map_rebuild_hint = None
+        self._interaction_preview_offset = QtCore.QPointF()
+        self._interaction_preview_zoom = None
         self._tile_last_error = ""
-        self._invalidate_scene_cache(immediate=True)
+        self._invalidate_all_layers(immediate=True)
 
     def set_scene(
         self,
@@ -747,7 +761,10 @@ class OverviewMapWidget(QtWidgets.QWidget):
         map_image: QtGui.QImage | None = None,
         active_region_name: str = "",
         active_interface_name: str = "",
+        cache_root_path: str = "",
     ) -> None:
+        new_map_signature = self._build_map_scene_signature(files, map_image)
+        map_scene_changed = new_map_signature != self._map_scene_signature
         self._files = list(files)
         self._active_region_id = active_region_id
         self._active_file_id = active_file_id
@@ -757,9 +774,26 @@ class OverviewMapWidget(QtWidgets.QWidget):
         self._active_interface_name = active_interface_name
         self._layout_rects = []
         self._hover_region_id = ""
-        self._last_map_context = None
-        self._last_canvas_rect = QtCore.QRectF()
-        self._invalidate_scene_cache(immediate=True)
+        self._map_rebuild_hint = None
+        self._interaction_preview_offset = QtCore.QPointF()
+        self._interaction_preview_zoom = None
+        self._set_tile_cache_root(cache_root_path)
+        self._map_scene_signature = new_map_signature
+        if map_scene_changed:
+            self._last_map_context = None
+            self._last_canvas_rect = QtCore.QRectF()
+            self._invalidate_all_layers(immediate=True)
+        else:
+            self._invalidate_overlay_layer(immediate=True)
+
+    def _set_tile_cache_root(self, cache_root_path: str) -> None:
+        root = Path(cache_root_path).expanduser() if cache_root_path else None
+        if root is None:
+            self._tile_cache_root = None
+            return
+        tile_root = root / "cache" / "map_tiles"
+        tile_root.mkdir(parents=True, exist_ok=True)
+        self._tile_cache_root = tile_root
 
     def paintEvent(self, _event: QtGui.QPaintEvent) -> None:
         if not self._files:
@@ -767,67 +801,147 @@ class OverviewMapWidget(QtWidgets.QWidget):
             painter.fillRect(self.rect(), QtGui.QColor("#ffffff"))
             return
         if (
-            self._scene_cache is None
-            or self._scene_cache.isNull()
-            or self._scene_cache_size != self.size()
+            self._map_layer_cache is None
+            or self._map_layer_cache.isNull()
+            or self._map_layer_cache_size != self.size()
+            or self._overlay_layer_cache is None
+            or self._overlay_layer_cache.isNull()
+            or self._overlay_layer_cache_size != self.size()
         ):
-            self._rebuild_scene_cache()
+            self._rebuild_dirty_layers()
         painter = QtGui.QPainter(self)
         painter.fillRect(self.rect(), QtGui.QColor("#ffffff"))
-        if self._scene_cache is not None and not self._scene_cache.isNull():
-            painter.drawImage(QtCore.QPoint(0, 0), self._scene_cache)
+        self._draw_layer_cache_with_preview(painter, self._map_layer_cache)
+        self._draw_layer_cache_with_preview(painter, self._overlay_layer_cache)
+        self._draw_runtime_overlays(painter)
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
-        self._invalidate_scene_cache(immediate=True)
+        self._invalidate_all_layers(immediate=True)
         super().resizeEvent(event)
 
-    def _invalidate_scene_cache(self, *, immediate: bool = False) -> None:
-        self._scene_dirty = True
+    def _invalidate_all_layers(self, *, immediate: bool = False) -> None:
+        self._map_layer_dirty = True
+        self._overlay_layer_dirty = True
         if immediate:
             self._scene_refresh_timer.stop()
-            self._rebuild_scene_cache()
+            self._rebuild_dirty_layers()
             self.update()
             return
-        if not self._scene_refresh_timer.isActive():
-            self._scene_refresh_timer.start()
+        self._scene_refresh_timer.start()
+
+    def _invalidate_map_layer(self, *, immediate: bool = False) -> None:
+        self._map_layer_dirty = True
+        if immediate:
+            self._scene_refresh_timer.stop()
+            self._rebuild_dirty_layers()
+            self.update()
+            return
+        self._scene_refresh_timer.start()
+
+    def _invalidate_overlay_layer(self, *, immediate: bool = False) -> None:
+        self._overlay_layer_dirty = True
+        if immediate:
+            self._scene_refresh_timer.stop()
+            self._rebuild_dirty_layers()
+            self.update()
+            return
+        self._scene_refresh_timer.start()
 
     def _flush_scene_refresh(self) -> None:
-        if self._scene_dirty:
-            self._rebuild_scene_cache()
+        if self._map_layer_dirty or self._overlay_layer_dirty:
+            self._rebuild_dirty_layers()
             self.update()
 
-    def _rebuild_scene_cache(self) -> None:
+    def _rebuild_dirty_layers(self) -> None:
         if self.width() <= 0 or self.height() <= 0:
             return
-        image = QtGui.QImage(self.size(), QtGui.QImage.Format_ARGB32_Premultiplied)
-        image.fill(QtGui.QColor("#ffffff"))
-        painter = QtGui.QPainter(image)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-        self._render_scene(painter)
-        painter.end()
-        self._scene_cache = image
-        self._scene_cache_size = self.size()
-        self._scene_dirty = False
-
-    def _render_scene(self, painter: QtGui.QPainter) -> None:
-        painter.fillRect(self.rect(), QtGui.QColor("#ffffff"))
-        if not self._files:
-            self._layout_rects = []
-            return
-
         canvas = self.rect().adjusted(18, 18, -18, -18)
-        summary_rect = QtCore.QRectF(canvas.left(), canvas.top(), canvas.width(), 20.0)
-        self._draw_summary(painter, summary_rect)
         canvas = canvas.adjusted(0, 24, 0, 0)
         map_context = self._compute_map_context(QtCore.QRectF(canvas))
         self._last_map_context = map_context
         self._last_canvas_rect = QtCore.QRectF(canvas)
+        if self._map_layer_dirty or self._map_layer_cache is None or self._map_layer_cache_size != self.size():
+            map_image = QtGui.QImage(self.size(), QtGui.QImage.Format_ARGB32_Premultiplied)
+            map_image.fill(QtGui.QColor("#ffffff"))
+            painter = QtGui.QPainter(map_image)
+            painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
+            self._render_map_layer(
+                painter,
+                QtCore.QRectF(canvas),
+                map_context,
+                previous_image=self._map_layer_cache,
+                rebuild_hint=self._map_rebuild_hint,
+            )
+            painter.end()
+            self._map_layer_cache = map_image
+            self._map_layer_cache_size = self.size()
+            self._map_layer_dirty = False
+        if self._overlay_layer_dirty or self._overlay_layer_cache is None or self._overlay_layer_cache_size != self.size():
+            overlay_image = QtGui.QImage(self.size(), QtGui.QImage.Format_ARGB32_Premultiplied)
+            overlay_image.fill(QtCore.Qt.transparent)
+            painter = QtGui.QPainter(overlay_image)
+            painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
+            self._render_overlay_layer(painter, QtCore.QRectF(canvas), map_context)
+            painter.end()
+            self._overlay_layer_cache = overlay_image
+            self._overlay_layer_cache_size = self.size()
+            self._overlay_layer_dirty = False
+        self._map_rebuild_hint = None
+        self._interaction_preview_offset = QtCore.QPointF()
+        self._interaction_preview_zoom = None
+
+    def _draw_layer_cache_with_preview(self, painter: QtGui.QPainter, image: QtGui.QImage | None) -> None:
+        if image is None or image.isNull():
+            return
+        if (
+            self._interaction_preview_zoom is None
+            and self._interaction_preview_offset.isNull()
+        ):
+            painter.drawImage(QtCore.QPoint(0, 0), image)
+            return
+        painter.save()
+        if self._interaction_preview_zoom is not None:
+            anchor = self._interaction_preview_zoom["anchor"]
+            scale = float(self._interaction_preview_zoom["scale"])
+            painter.translate(anchor)
+            painter.scale(scale, scale)
+            painter.translate(-anchor)
+        if not self._interaction_preview_offset.isNull():
+            painter.translate(self._interaction_preview_offset)
+        painter.drawImage(QtCore.QPoint(0, 0), image)
+        painter.restore()
+
+    def _render_map_layer(
+        self,
+        painter: QtGui.QPainter,
+        canvas: QtCore.QRectF,
+        map_context: dict[str, object] | None,
+        *,
+        previous_image: QtGui.QImage | None = None,
+        rebuild_hint: dict[str, object] | None = None,
+    ) -> None:
+        painter.fillRect(self.rect(), QtGui.QColor("#ffffff"))
+        if not self._files:
+            self._layout_rects = []
+            return
         if map_context is not None:
-            self._draw_live_map_tiles(painter, QtCore.QRectF(canvas), map_context)
+            if (
+                rebuild_hint is not None
+                and rebuild_hint.get("type") == "pan"
+                and previous_image is not None
+                and not previous_image.isNull()
+            ):
+                delta = rebuild_hint.get("delta", QtCore.QPointF())
+                painter.save()
+                painter.drawImage(QtCore.QPointF(delta), previous_image)
+                painter.restore()
+                self._draw_live_map_tiles(painter, canvas, map_context, draw_placeholders=False)
+            else:
+                self._draw_live_map_tiles(painter, canvas, map_context)
         elif isinstance(self._map_image, QtGui.QImage) and not self._map_image.isNull():
             painter.save()
             painter.setOpacity(0.92)
-            painter.drawImage(QtCore.QRectF(canvas), self._map_image)
+            painter.drawImage(canvas, self._map_image)
             painter.restore()
         else:
             painter.save()
@@ -840,6 +954,12 @@ class OverviewMapWidget(QtWidgets.QWidget):
                 painter.drawLine(QtCore.QPointF(canvas.left(), y), QtCore.QPointF(canvas.right(), y))
             painter.restore()
 
+    def _render_overlay_layer(
+        self,
+        painter: QtGui.QPainter,
+        canvas: QtCore.QRectF,
+        map_context: dict[str, object] | None,
+    ) -> None:
         rects, file_paths = self._compute_layout(canvas, map_context)
         self._layout_rects = rects
 
@@ -920,8 +1040,54 @@ class OverviewMapWidget(QtWidgets.QWidget):
                 )
                 painter.restore()
             painter.restore()
-        if map_context is not None:
-            self._draw_map_diagnostics(painter, QtCore.QRectF(canvas), map_context)
+
+    def _draw_runtime_overlays(self, painter: QtGui.QPainter) -> None:
+        if not self._files:
+            return
+        summary_rect = QtCore.QRectF(18.0, 18.0, float(self.width() - 36), 20.0)
+        self._draw_summary(painter, summary_rect)
+        if self._last_map_context is not None and not self._last_canvas_rect.isNull():
+            self._draw_map_diagnostics(painter, QtCore.QRectF(self._last_canvas_rect), self._last_map_context)
+
+    def _build_map_scene_signature(
+        self,
+        files: list[dict[str, object]],
+        map_image: QtGui.QImage | None,
+    ) -> tuple[object, ...]:
+        file_parts: list[tuple[object, ...]] = []
+        for file_item in files:
+            navigation_samples = file_item.get("navigation_samples", [])
+            nav_samples = navigation_samples if isinstance(navigation_samples, list) else []
+            first_sample = nav_samples[0] if nav_samples else {}
+            mid_sample = nav_samples[len(nav_samples) // 2] if nav_samples else {}
+            last_sample = nav_samples[-1] if nav_samples else {}
+            region_parts: list[tuple[object, ...]] = []
+            for region in file_item.get("regions", []):
+                region_parts.append(
+                    (
+                        str(region.get("region_id", "")),
+                        int(region.get("trace_start", 0) or 0),
+                        int(region.get("trace_stop", 0) or 0),
+                        round(float(region.get("render_width", 0.0) or 0.0), 4),
+                    )
+                )
+            file_parts.append(
+                (
+                    str(file_item.get("file_id", "")),
+                    len(nav_samples),
+                    round(float(first_sample.get("latitude", 0.0) or 0.0), 7),
+                    round(float(first_sample.get("longitude", 0.0) or 0.0), 7),
+                    round(float(mid_sample.get("latitude", 0.0) or 0.0), 7),
+                    round(float(mid_sample.get("longitude", 0.0) or 0.0), 7),
+                    round(float(last_sample.get("latitude", 0.0) or 0.0), 7),
+                    round(float(last_sample.get("longitude", 0.0) or 0.0), 7),
+                    tuple(region_parts),
+                )
+            )
+        map_key = 0
+        if isinstance(map_image, QtGui.QImage) and not map_image.isNull():
+            map_key = int(map_image.cacheKey())
+        return (tuple(file_parts), map_key, (self._map_config.provider or "amap").strip().lower())
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
         if event.button() != QtCore.Qt.LeftButton:
@@ -941,6 +1107,8 @@ class OverviewMapWidget(QtWidgets.QWidget):
             "pressed_region": region,
             "moved": False,
         }
+        self._interaction_preview_offset = QtCore.QPointF()
+        self._interaction_preview_zoom = None
         event.accept()
 
     def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:
@@ -973,14 +1141,12 @@ class OverviewMapWidget(QtWidgets.QWidget):
                 center_px_x, center_px_y = self._map_drag_state["start_center_px"]
                 new_center_px_x = float(center_px_x) - float(delta.x())
                 new_center_px_y = float(center_px_y) - float(delta.y())
-                center_lat, center_lon = self._global_pixel_to_geo(
-                    new_center_px_x,
-                    new_center_px_y,
-                    int(self._last_map_context["zoom"]),
-                )
+                self._interaction_preview_offset = QtCore.QPointF(delta)
+                self._interaction_preview_zoom = None
+                center_lat, center_lon = self._global_pixel_to_geo(new_center_px_x, new_center_px_y, int(self._last_map_context["zoom"]))
                 self._map_center_geo_override = (center_lat, center_lon)
-                self._invalidate_scene_cache()
                 self.setCursor(QtCore.Qt.ClosedHandCursor)
+                self.update()
                 event.accept()
                 return
         region = self._region_at(event.position())
@@ -994,6 +1160,8 @@ class OverviewMapWidget(QtWidgets.QWidget):
         if event.button() == QtCore.Qt.LeftButton and self._map_drag_state is not None:
             drag_state = self._map_drag_state
             self._map_drag_state = None
+            preview_delta = QtCore.QPointF(self._interaction_preview_offset)
+            self._interaction_preview_offset = QtCore.QPointF()
             self.setCursor(QtCore.Qt.OpenHandCursor if self._last_map_context is not None else QtCore.Qt.ArrowCursor)
             if not drag_state.get("moved", False):
                 region = drag_state.get("pressed_region")
@@ -1001,6 +1169,9 @@ class OverviewMapWidget(QtWidgets.QWidget):
                     self.region_activated.emit(region[0])
                     event.accept()
                     return
+            if not preview_delta.isNull():
+                self._map_rebuild_hint = {"type": "pan", "delta": preview_delta}
+            self._invalidate_all_layers()
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -1032,7 +1203,19 @@ class OverviewMapWidget(QtWidgets.QWidget):
         new_center_lat, new_center_lon = self._global_pixel_to_geo(new_center_px_x, new_center_px_y, new_zoom)
         self._map_zoom_override = new_zoom
         self._map_center_geo_override = (new_center_lat, new_center_lon)
-        self._invalidate_scene_cache()
+        self._interaction_preview_offset = QtCore.QPointF()
+        self._interaction_preview_zoom = {
+            "anchor": QtCore.QPointF(anchor_pos),
+            "scale": float(2.0 ** (new_zoom - current_zoom)),
+        }
+        self._last_map_context = {
+            **self._last_map_context,
+            "zoom": new_zoom,
+            "center_lat": float(new_center_lat),
+            "center_lon": float(new_center_lon),
+        }
+        self._invalidate_all_layers()
+        self.update()
         event.accept()
 
     def leaveEvent(self, event: QtCore.QEvent) -> None:
@@ -1280,9 +1463,12 @@ class OverviewMapWidget(QtWidgets.QWidget):
         painter: QtGui.QPainter,
         canvas_rect: QtCore.QRectF,
         map_context: dict[str, object],
+        *,
+        draw_placeholders: bool = True,
     ) -> None:
         painter.save()
-        painter.fillRect(canvas_rect, QtGui.QColor("#f3f6f9"))
+        if draw_placeholders:
+            painter.fillRect(canvas_rect, QtGui.QColor("#f3f6f9"))
         tile_x_min = int(map_context["tile_x_min"])
         tile_x_max = int(map_context["tile_x_max"])
         tile_y_min = int(map_context["tile_y_min"])
@@ -1306,12 +1492,21 @@ class OverviewMapWidget(QtWidgets.QWidget):
                 )
                 tile_image = self._tile_cache.get(key)
                 if tile_image is None or tile_image.isNull():
-                    painter.fillRect(tile_rect, QtGui.QColor("#edf2f7"))
-                    painter.setPen(QtGui.QColor("#d5dee8"))
-                    painter.drawRect(tile_rect)
+                    if draw_placeholders:
+                        painter.fillRect(tile_rect, QtGui.QColor("#edf2f7"))
+                        painter.setPen(QtGui.QColor("#d5dee8"))
+                        painter.drawRect(tile_rect)
                     self._request_tile(key)
                     continue
                 painter.drawImage(tile_rect, tile_image)
+        for tile_x in range(tile_x_min - 1, tile_x_max + 2):
+            for tile_y in range(tile_y_min - 1, tile_y_max + 2):
+                if tile_y < 0 or tile_y > max_tile:
+                    continue
+                wrapped_x = tile_x % (1 << zoom)
+                key = (zoom, wrapped_x, tile_y)
+                if key not in self._tile_cache and key not in self._tile_pending:
+                    self._request_tile(key)
         painter.restore()
 
     def _request_tile(self, key: tuple[int, int, int]) -> None:
@@ -1319,6 +1514,11 @@ class OverviewMapWidget(QtWidgets.QWidget):
         if failed_at is not None and (time.monotonic() - failed_at) >= 3.0:
             self._tile_failed.pop(key, None)
         if key in self._tile_cache or key in self._tile_pending or key in self._tile_failed:
+            return
+        disk_image = self._load_tile_from_disk(key)
+        if disk_image is not None and not disk_image.isNull():
+            self._store_tile_in_memory(key, disk_image)
+            self._invalidate_map_layer()
             return
         zoom, tile_x, tile_y = key
         url = QtCore.QUrl(self._map_tile_url(zoom, tile_x, tile_y))
@@ -1348,14 +1548,45 @@ class OverviewMapWidget(QtWidgets.QWidget):
             payload = bytes(reply.readAll())
             image = QtGui.QImage.fromData(payload)
             if not image.isNull():
-                self._tile_cache[key] = image
+                self._store_tile_in_memory(key, image)
+                self._save_tile_to_disk(key, payload)
                 self._tile_failed.pop(key, None)
                 self._tile_last_error = ""
             else:
                 self._tile_failed[key] = time.monotonic()
                 self._tile_last_error = f"瓦片解码失败({len(payload)} bytes) | {tile_url}"
         reply.deleteLater()
-        self._invalidate_scene_cache()
+        self._invalidate_map_layer()
+
+    def _store_tile_in_memory(self, key: tuple[int, int, int], image: QtGui.QImage) -> None:
+        self._tile_cache[key] = image
+        self._tile_cache.move_to_end(key)
+        while len(self._tile_cache) > self._tile_cache_limit:
+            self._tile_cache.popitem(last=False)
+
+    def _tile_disk_path(self, key: tuple[int, int, int]) -> Path | None:
+        if self._tile_cache_root is None:
+            return None
+        zoom, tile_x, tile_y = key
+        provider = (self._map_config.provider or "amap").strip().lower()
+        return self._tile_cache_root / provider / str(zoom) / str(tile_x) / f"{tile_y}.png"
+
+    def _load_tile_from_disk(self, key: tuple[int, int, int]) -> QtGui.QImage | None:
+        tile_path = self._tile_disk_path(key)
+        if tile_path is None or not tile_path.exists():
+            return None
+        image = QtGui.QImage(str(tile_path))
+        if image.isNull():
+            return None
+        return image
+
+    def _save_tile_to_disk(self, key: tuple[int, int, int], payload: bytes) -> None:
+        tile_path = self._tile_disk_path(key)
+        if tile_path is None:
+            return
+        tile_path.parent.mkdir(parents=True, exist_ok=True)
+        if not tile_path.exists():
+            tile_path.write_bytes(payload)
 
     def _map_tile_url(self, zoom: int, tile_x: int, tile_y: int) -> str:
         provider = (self._map_config.provider or "amap").strip().lower()
@@ -4088,6 +4319,7 @@ class MainWindow(QtWidgets.QMainWindow):
             map_image=map_image,
             active_region_name=active_region.name if active_region is not None else "",
             active_interface_name=active_interface.name if active_interface is not None else "",
+            cache_root_path=str(self.app_controller.project_state.root_path or ""),
         )
 
     def _build_region_overview_preview(self, region) -> QtGui.QImage | None:
