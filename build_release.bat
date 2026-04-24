@@ -1,9 +1,9 @@
 @echo off
 setlocal
 cd /d %~dp0
-set RELEASE_NAME=GPR_Lab_Pro_V3
-set DIST_ROOT=%TEMP%\gpr_dist_v3
-set WORK_ROOT=%TEMP%\gpr_build_v3
+set RELEASE_NAME=GPR_Lab_Pro_V4
+set DIST_ROOT=%TEMP%\gpr_dist_v4
+set WORK_ROOT=%TEMP%\gpr_build_v4
 set RELEASE_ROOT=release
 
 if not exist .venv\Scripts\python.exe (

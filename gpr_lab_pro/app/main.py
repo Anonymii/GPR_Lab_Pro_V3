@@ -15,7 +15,7 @@ def _runtime_root() -> Path:
 def _write_startup_error(message: str) -> Path | None:
     candidates = [
         _runtime_root(),
-        Path(os.environ.get("TEMP", ".")) / "GPR_Lab_Pro_V3",
+        Path(os.environ.get("TEMP", ".")) / "GPR_Lab_Pro_V4",
     ]
     for base in candidates:
         try:
@@ -50,7 +50,7 @@ def _show_startup_error(message: str) -> None:
     try:
         import ctypes
 
-        ctypes.windll.user32.MessageBoxW(None, message, "GPR Lab Pro V3 启动失败", 0x10)
+        ctypes.windll.user32.MessageBoxW(None, message, "GPR Lab Pro V4 启动失败", 0x10)
     except Exception:
         pass
 
@@ -58,7 +58,7 @@ def _show_startup_error(message: str) -> None:
 def main() -> None:
     try:
         if "MPLCONFIGDIR" not in os.environ:
-            mpl_cache_dir = Path(os.environ.get("TEMP", ".")) / "GPR_Lab_Pro_V3" / "mplconfig"
+            mpl_cache_dir = Path(os.environ.get("TEMP", ".")) / "GPR_Lab_Pro_V4" / "mplconfig"
             mpl_cache_dir.mkdir(parents=True, exist_ok=True)
             os.environ["MPLCONFIGDIR"] = str(mpl_cache_dir)
         _configure_qt_runtime()

@@ -56,10 +56,10 @@ python -m gpr_lab_pro.app
 
 本工程已提供：
 
-- [build_release.bat](/E:/code_management/GPR_V11_Pyside/build_release.bat)
-- [build_release.ps1](/E:/code_management/GPR_V11_Pyside/build_release.ps1)
-- [GPR_V11_Pyside.spec](/E:/code_management/GPR_V11_Pyside/GPR_V11_Pyside.spec)
-- [PACKAGING.md](/E:/code_management/GPR_V11_Pyside/PACKAGING.md)
+- [build_release.bat](/E:/code_management/GPR_V12_Pyside/GPR_Lab_Pro_V3/build_release.bat)
+- [build_release.ps1](/E:/code_management/GPR_V12_Pyside/GPR_Lab_Pro_V3/build_release.ps1)
+- [GPR_V11_Pyside.spec](/E:/code_management/GPR_V12_Pyside/GPR_Lab_Pro_V3/GPR_V11_Pyside.spec)
+- [PACKAGING.md](/E:/code_management/GPR_V12_Pyside/GPR_Lab_Pro_V3/PACKAGING.md)
 
 执行：
 
@@ -69,12 +69,12 @@ python -m gpr_lab_pro.app
 
 打包完成后会生成：
 
-- `release\GPR_Lab_Pro_Pyside_V2`
-- `release\GPR_Lab_Pro_Pyside_V2.zip`
+- `release\GPR_Lab_Pro_V4`
+- `release\GPR_Lab_Pro_V4.zip`
 
-客户电脑无需安装 Python，但请务必先完整解压整个压缩包，再进入 `GPR_Lab_Pro_Pyside_V2` 文件夹运行：
+客户电脑无需安装 Python，但请务必先完整解压整个压缩包，再进入 `GPR_Lab_Pro_V4` 文件夹运行：
 
-- `GPR_Lab_Pro_Pyside_V2.exe`
+- `GPR_Lab_Pro_V4.exe`
 或
 - `release_launcher.bat`
 

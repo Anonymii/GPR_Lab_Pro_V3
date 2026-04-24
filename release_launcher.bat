@@ -2,7 +2,7 @@
 setlocal
 cd /d %~dp0
 
-set EXE_NAME=GPR_Lab_Pro_V3.exe
+set EXE_NAME=GPR_Lab_Pro_V4.exe
 
 if not exist "%EXE_NAME%" (
   echo [ERROR] Missing %EXE_NAME%

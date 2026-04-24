@@ -24,7 +24,7 @@ from gpr_lab_pro.processing.catalog_v11 import OperationSpec, SPEC_BY_TYPE
 from gpr_lab_pro.processing.module_registry_v11 import MODULE_SPECS
 
 if "MPLCONFIGDIR" not in os.environ:
-    mpl_cache_dir = Path(os.environ.get("TEMP", ".")) / "GPR_Lab_Pro_V3" / "mplconfig"
+    mpl_cache_dir = Path(os.environ.get("TEMP", ".")) / "GPR_Lab_Pro_V4" / "mplconfig"
     mpl_cache_dir.mkdir(parents=True, exist_ok=True)
     os.environ["MPLCONFIGDIR"] = str(mpl_cache_dir)
 
@@ -39,7 +39,7 @@ class NewProjectDialog(QtWidgets.QDialog):
         self.resize(520, 180)
         layout = QtWidgets.QFormLayout(self)
         layout.setLabelAlignment(QtCore.Qt.AlignRight)
-        self.name_edit = QtWidgets.QLineEdit("GPR_Lab_Pro_V3_Project")
+        self.name_edit = QtWidgets.QLineEdit("GPR_Lab_Pro_V4_Project")
         self.path_edit = QtWidgets.QLineEdit(r"E:\code_management\GPR_V12_Pyside\GPR_Lab_Pro_V3\projects")
         browse_button = QtWidgets.QPushButton("浏览...")
         browse_button.clicked.connect(self._browse_dir)
@@ -1604,7 +1604,7 @@ class OverviewMapWidget(QtWidgets.QWidget):
         zoom, tile_x, tile_y = key
         url = QtCore.QUrl(self._map_tile_url(zoom, tile_x, tile_y))
         request = QtNetwork.QNetworkRequest(url)
-        request.setRawHeader(b"User-Agent", b"GPR_Lab_Pro_V3/1.0")
+        request.setRawHeader(b"User-Agent", b"GPR_Lab_Pro_V4/1.0")
         request.setRawHeader(b"Accept", b"image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
         request.setRawHeader(b"Referer", b"https://lbs.amap.com/")
         reply = self._tile_manager.get(request)
@@ -4374,7 +4374,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_project_title(self) -> None:
         project_name = self.app_controller.project_state.name
-        self.setWindowTitle(f"{project_name} - GPR Lab Pro V3")
+        self.setWindowTitle(f"{project_name} - GPR Lab Pro V4")
         self.status_project.setText(f"工程: {project_name}")
 
     def _refresh_project_tree(self) -> None:

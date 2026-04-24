@@ -1,9 +1,9 @@
 $ErrorActionPreference = "Stop"
 Set-Location -LiteralPath $PSScriptRoot
 
-$releaseName = "GPR_Lab_Pro_V3"
-$distRoot = Join-Path $env:TEMP "gpr_dist_v3"
-$workRoot = Join-Path $env:TEMP "gpr_build_v3"
+$releaseName = "GPR_Lab_Pro_V4"
+$distRoot = Join-Path $env:TEMP "gpr_dist_v4"
+$workRoot = Join-Path $env:TEMP "gpr_build_v4"
 $releaseRoot = ".\release"
 
 if (-not (Test-Path ".\.venv\Scripts\python.exe")) {

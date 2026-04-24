@@ -2,7 +2,10 @@
 
 from pathlib import Path
 
+import PySide6
+
 project_root = Path.cwd()
+pyside_root = Path(PySide6.__file__).resolve().parent
 
 datas = [
     (str(project_root / "README.md"), "."),
@@ -20,6 +23,10 @@ if online_map_config.exists():
 offline_tiles_root = project_root.parent / "offline_tiles"
 if offline_tiles_root.exists():
     datas.append((str(offline_tiles_root), "offline_tiles"))
+
+geoservices_root = pyside_root / "plugins" / "geoservices"
+if geoservices_root.exists():
+    datas.append((str(geoservices_root), "PySide6/plugins/geoservices"))
 
 hiddenimports = [
     "PySide6.QtCore",
@@ -52,7 +59,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="GPR_Lab_Pro_V3",
+    name="GPR_Lab_Pro_V4",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -67,5 +74,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="GPR_Lab_Pro_V3",
+    name="GPR_Lab_Pro_V4",
 )

@@ -9,9 +9,11 @@ __pycache__/
 build/
 build_v1/
 build_v2/
+build_v4/
 dist/
 dist_v1/
 dist_v2/
+dist_v4/
 release/
 *.spec.bak
 

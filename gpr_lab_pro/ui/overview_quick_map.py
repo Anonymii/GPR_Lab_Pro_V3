@@ -824,7 +824,7 @@ class OverviewQuickMapWidget(QtWidgets.QWidget):
         offline_roots = OnlineMapConfigStore.offline_tiles_roots()
         self._offline_root = offline_roots[0] if offline_roots else None
         self._offline_tile_server = OfflineTileServer(self._offline_root, self) if self._offline_root is not None else None
-        offline_dir = QtCore.QUrl.fromLocalFile(str(self._offline_root)).toString() if self._offline_root is not None else ""
+        offline_dir = str(self._offline_root) if self._offline_root is not None else ""
         self._bridge.set_offline_directory(offline_dir)
         if self._offline_tile_server is not None:
             self._bridge.set_offline_tile_host(self._offline_tile_server.start())

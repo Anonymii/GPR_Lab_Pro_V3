@@ -220,7 +220,7 @@ class ProjectStore:
             dataset_id=str(payload.get("dataset_id", "")),
             name=str(payload.get("name", "")),
             source_path=self._resolve_project_path(payload.get("source_path", ""), project_root),
-            import_params=self._serialize_import_params(payload.get("import_params")),
+            import_params=self._deserialize_import_params(payload.get("import_params")),
             navigation=self._deserialize_navigation(payload.get("navigation", {}), project_root),
             regions=[self._deserialize_region(item) for item in payload.get("regions", [])],
         )
