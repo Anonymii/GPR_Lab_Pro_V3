@@ -18,6 +18,7 @@ from gpr_lab_pro.application import GPRApplication
 from gpr_lab_pro.domain.enums import StepKind
 from gpr_lab_pro.domain.models.display import DisplayData
 from gpr_lab_pro.infrastructure.online_map import OnlineMapConfig, OnlineMapConfigStore
+from gpr_lab_pro.ui.overview_quick_map import OverviewMapHostWidget, OverviewQuickMapWidget
 from gpr_lab_pro.render.adapters.cscan_adapter import build_cscan
 from gpr_lab_pro.processing.catalog_v11 import OperationSpec, SPEC_BY_TYPE
 from gpr_lab_pro.processing.module_registry_v11 import MODULE_SPECS
@@ -166,16 +167,16 @@ class OnlineMapConfigDialog(QtWidgets.QDialog):
         layout = QtWidgets.QFormLayout(self)
         layout.setLabelAlignment(QtCore.Qt.AlignRight)
         self.provider_combo = QtWidgets.QComboBox()
+        self.provider_combo.addItem("高德地图", "amap")
         self.provider_combo.addItem("OpenStreetMap", "osm")
-        self.provider_combo.addItem("高德地图(预留切换)", "amap")
-        idx = max(0, self.provider_combo.findData(config.provider or "osm"))
+        idx = max(0, self.provider_combo.findData(config.provider or "amap"))
         self.provider_combo.setCurrentIndex(idx)
         self.key_edit = QtWidgets.QLineEdit(config.amap_js_key)
         self.security_edit = QtWidgets.QLineEdit(config.amap_security_js_code)
         self.security_edit.setEchoMode(QtWidgets.QLineEdit.PasswordEchoOnEdit)
         note = QtWidgets.QLabel(
-            "当前版本地图主链先走在线瓦片地图，已预留高德 Key/密钥配置。\n"
-            "后续切换高德时会直接复用这份本地配置文件。"
+            "这里保存的是在线地图配置。\n"
+            "软件默认优先使用离线地图，只有手动确认后才会尝试在线地图。"
         )
         note.setWordWrap(True)
         note.setStyleSheet("color:#5a6b7e;")
@@ -190,7 +191,7 @@ class OnlineMapConfigDialog(QtWidgets.QDialog):
 
     def values(self) -> OnlineMapConfig:
         return OnlineMapConfig(
-            provider=str(self.provider_combo.currentData() or "osm"),
+            provider=str(self.provider_combo.currentData() or "amap"),
             amap_js_key=self.key_edit.text().strip(),
             amap_security_js_code=self.security_edit.text().strip(),
         )
@@ -673,6 +674,27 @@ class OverviewWebMapWidget(QtWidgets.QWidget):
         return f"data:image/png;base64,{payload}"
 
 
+class _OfflineTileLoadBridge(QtCore.QObject):
+    tile_loaded = QtCore.Signal(object, object)
+    tile_failed = QtCore.Signal(object, str)
+
+
+class _OfflineTileLoadTask(QtCore.QRunnable):
+    def __init__(self, key: tuple[int, int, int], tile_path: str, bridge: _OfflineTileLoadBridge) -> None:
+        super().__init__()
+        self.key = key
+        self.tile_path = tile_path
+        self.bridge = bridge
+        self.setAutoDelete(True)
+
+    def run(self) -> None:
+        image = QtGui.QImage(self.tile_path)
+        if image.isNull():
+            self.bridge.tile_failed.emit(self.key, f"离线瓦片解码失败: {self.tile_path}")
+            return
+        self.bridge.tile_loaded.emit(self.key, image)
+
+
 class OverviewMapWidget(QtWidgets.QWidget):
     point_selected = QtCore.Signal(str, int, int)
     region_activated = QtCore.Signal(str)
@@ -683,6 +705,7 @@ class OverviewMapWidget(QtWidgets.QWidget):
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._map_config = OnlineMapConfig()
+        self._map_mode = "offline"
         self._files: list[dict[str, object]] = []
         self._active_region_id = ""
         self._active_file_id = ""
@@ -715,6 +738,10 @@ class OverviewMapWidget(QtWidgets.QWidget):
         self._tile_last_error = ""
         self._tile_cache_root: Path | None = None
         self._tile_cache_limit = 2048
+        self._offline_tile_loader = _OfflineTileLoadBridge(self)
+        self._offline_tile_loader.tile_loaded.connect(self._on_offline_tile_loaded)
+        self._offline_tile_loader.tile_failed.connect(self._on_offline_tile_failed)
+        self._tile_loader_pool = QtCore.QThreadPool.globalInstance()
         self._scene_refresh_timer = QtCore.QTimer(self)
         self._scene_refresh_timer.setSingleShot(True)
         self._scene_refresh_timer.setInterval(16)
@@ -728,6 +755,17 @@ class OverviewMapWidget(QtWidgets.QWidget):
         self._tile_failed.clear()
         self._tile_last_error = ""
         self._invalidate_all_layers(immediate=True)
+
+    def set_map_mode(self, mode: str) -> None:
+        normalized = "online" if str(mode).strip().lower() == "online" else "offline"
+        if normalized == self._map_mode:
+            return
+        self._map_mode = normalized
+        self._tile_cache.clear()
+        self._tile_pending.clear()
+        self._tile_failed.clear()
+        self._tile_last_error = ""
+        self._invalidate_map_layer(immediate=True)
 
     def clear_scene(self) -> None:
         self._files = []
@@ -819,7 +857,11 @@ class OverviewMapWidget(QtWidgets.QWidget):
         self._invalidate_all_layers(immediate=True)
         super().resizeEvent(event)
 
-    def _invalidate_all_layers(self, *, immediate: bool = False) -> None:
+    def _schedule_scene_refresh(self, delay_ms: int = 16) -> None:
+        self._scene_refresh_timer.setInterval(max(1, int(delay_ms)))
+        self._scene_refresh_timer.start()
+
+    def _invalidate_all_layers(self, *, immediate: bool = False, delay_ms: int = 16) -> None:
         self._map_layer_dirty = True
         self._overlay_layer_dirty = True
         if immediate:
@@ -827,25 +869,25 @@ class OverviewMapWidget(QtWidgets.QWidget):
             self._rebuild_dirty_layers()
             self.update()
             return
-        self._scene_refresh_timer.start()
+        self._schedule_scene_refresh(delay_ms)
 
-    def _invalidate_map_layer(self, *, immediate: bool = False) -> None:
+    def _invalidate_map_layer(self, *, immediate: bool = False, delay_ms: int = 16) -> None:
         self._map_layer_dirty = True
         if immediate:
             self._scene_refresh_timer.stop()
             self._rebuild_dirty_layers()
             self.update()
             return
-        self._scene_refresh_timer.start()
+        self._schedule_scene_refresh(delay_ms)
 
-    def _invalidate_overlay_layer(self, *, immediate: bool = False) -> None:
+    def _invalidate_overlay_layer(self, *, immediate: bool = False, delay_ms: int = 16) -> None:
         self._overlay_layer_dirty = True
         if immediate:
             self._scene_refresh_timer.stop()
             self._rebuild_dirty_layers()
             self.update()
             return
-        self._scene_refresh_timer.start()
+        self._schedule_scene_refresh(delay_ms)
 
     def _flush_scene_refresh(self) -> None:
         if self._map_layer_dirty or self._overlay_layer_dirty:
@@ -1171,7 +1213,7 @@ class OverviewMapWidget(QtWidgets.QWidget):
                     return
             if not preview_delta.isNull():
                 self._map_rebuild_hint = {"type": "pan", "delta": preview_delta}
-            self._invalidate_all_layers()
+            self._invalidate_all_layers(delay_ms=90)
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -1185,7 +1227,8 @@ class OverviewMapWidget(QtWidgets.QWidget):
             super().wheelEvent(event)
             return
         current_zoom = int(self._last_map_context["zoom"])
-        new_zoom = int(np.clip(current_zoom + (1 if delta_y > 0 else -1), 3, 19))
+        min_zoom, max_zoom = self._map_zoom_limits()
+        new_zoom = int(np.clip(current_zoom + (1 if delta_y > 0 else -1), min_zoom, max_zoom))
         if new_zoom == current_zoom:
             event.accept()
             return
@@ -1214,7 +1257,7 @@ class OverviewMapWidget(QtWidgets.QWidget):
             "center_lat": float(new_center_lat),
             "center_lon": float(new_center_lon),
         }
-        self._invalidate_all_layers()
+        self._invalidate_all_layers(delay_ms=90)
         self.update()
         event.accept()
 
@@ -1399,7 +1442,14 @@ class OverviewMapWidget(QtWidgets.QWidget):
         max_lat = float(latitudes.max()) + pad_lat
         min_lon = float(longitudes.min()) - pad_lon
         max_lon = float(longitudes.max()) + pad_lon
-        zoom = int(np.clip(self._map_zoom_override if self._map_zoom_override is not None else self._choose_map_zoom(min_lat, min_lon, max_lat, max_lon, canvas_rect), 3, 19))
+        min_zoom_limit, max_zoom_limit = self._map_zoom_limits()
+        zoom = int(
+            np.clip(
+                self._map_zoom_override if self._map_zoom_override is not None else self._choose_map_zoom(min_lat, min_lon, max_lat, max_lon, canvas_rect),
+                min_zoom_limit,
+                max_zoom_limit,
+            )
+        )
         if self._map_center_geo_override is not None:
             center_lat, center_lon = self._map_center_geo_override
         else:
@@ -1440,8 +1490,9 @@ class OverviewMapWidget(QtWidgets.QWidget):
         max_lon: float,
         canvas_rect: QtCore.QRectF,
     ) -> int:
-        chosen = 15
-        for zoom in range(19, 2, -1):
+        min_zoom_limit, max_zoom_limit = self._map_zoom_limits()
+        chosen = max_zoom_limit
+        for zoom in range(max_zoom_limit, min_zoom_limit - 1, -1):
             px_left_top_x, px_left_top_y = self._geo_to_global_pixel(max_lat, min_lon, zoom)
             px_right_bottom_x, px_right_bottom_y = self._geo_to_global_pixel(min_lat, max_lon, zoom)
             min_px_x = min(px_left_top_x, px_right_bottom_x)
@@ -1457,6 +1508,13 @@ class OverviewMapWidget(QtWidgets.QWidget):
                 chosen = zoom
                 break
         return chosen
+
+    def _map_zoom_limits(self) -> tuple[int, int]:
+        if self._map_mode == "offline":
+            coverage = OnlineMapConfigStore.offline_tiles_coverage()
+            if coverage is not None:
+                return (int(coverage.min_zoom), int(coverage.max_zoom))
+        return (3, 19)
 
     def _draw_live_map_tiles(
         self,
@@ -1515,9 +1573,19 @@ class OverviewMapWidget(QtWidgets.QWidget):
             self._tile_failed.pop(key, None)
         if key in self._tile_cache or key in self._tile_pending or key in self._tile_failed:
             return
+        if self._map_mode == "offline":
+            tile_path = OnlineMapConfigStore.resolve_offline_tile_path(*key)
+            if tile_path is not None and tile_path.exists():
+                self._tile_pending.add(key)
+                self._tile_loader_pool.start(_OfflineTileLoadTask(key, str(tile_path), self._offline_tile_loader))
+                return
+            self._tile_failed[key] = time.monotonic()
+            self._tile_last_error = f"离线瓦片缺失: {key[0]}/{key[1]}/{key[2]}"
+            return
         disk_image = self._load_tile_from_disk(key)
         if disk_image is not None and not disk_image.isNull():
             self._store_tile_in_memory(key, disk_image)
+            self._tile_last_error = ""
             self._invalidate_map_layer()
             return
         zoom, tile_x, tile_y = key
@@ -1530,6 +1598,31 @@ class OverviewMapWidget(QtWidgets.QWidget):
         reply.setProperty("tile_key", f"{zoom}:{tile_x}:{tile_y}")
         reply.setProperty("tile_url", url.toString())
         self._tile_pending.add(key)
+
+    @QtCore.Slot(object, object)
+    def _on_offline_tile_loaded(self, key_obj: object, image_obj: object) -> None:
+        key = tuple(key_obj) if isinstance(key_obj, tuple) else None
+        image = image_obj if isinstance(image_obj, QtGui.QImage) else None
+        if key is None:
+            return
+        self._tile_pending.discard(key)
+        if image is None or image.isNull():
+            self._tile_failed[key] = time.monotonic()
+            self._tile_last_error = f"离线瓦片解码失败: {key[0]}/{key[1]}/{key[2]}"
+            return
+        self._store_tile_in_memory(key, image)
+        self._tile_failed.pop(key, None)
+        self._tile_last_error = ""
+        self._invalidate_map_layer(delay_ms=24)
+
+    @QtCore.Slot(object, str)
+    def _on_offline_tile_failed(self, key_obj: object, message: str) -> None:
+        key = tuple(key_obj) if isinstance(key_obj, tuple) else None
+        if key is None:
+            return
+        self._tile_pending.discard(key)
+        self._tile_failed[key] = time.monotonic()
+        self._tile_last_error = str(message)
 
     def _on_tile_reply(self, reply: QtNetwork.QNetworkReply) -> None:
         raw_key = str(reply.property("tile_key") or "")
@@ -1564,8 +1657,17 @@ class OverviewMapWidget(QtWidgets.QWidget):
         while len(self._tile_cache) > self._tile_cache_limit:
             self._tile_cache.popitem(last=False)
 
+    def _load_tile_from_offline_bundle(self, key: tuple[int, int, int]) -> QtGui.QImage | None:
+        tile_path = OnlineMapConfigStore.resolve_offline_tile_path(*key)
+        if tile_path is None or not tile_path.exists():
+            return None
+        image = QtGui.QImage(str(tile_path))
+        if image.isNull():
+            return None
+        return image
+
     def _tile_disk_path(self, key: tuple[int, int, int]) -> Path | None:
-        if self._tile_cache_root is None:
+        if self._tile_cache_root is None or self._map_mode != "online":
             return None
         zoom, tile_x, tile_y = key
         provider = (self._map_config.provider or "amap").strip().lower()
@@ -1600,9 +1702,9 @@ class OverviewMapWidget(QtWidgets.QWidget):
         canvas_rect: QtCore.QRectF,
         map_context: dict[str, object],
     ) -> None:
-        provider = (self._map_config.provider or "amap").strip().lower()
+        provider = "OFFLINE" if self._map_mode == "offline" else (self._map_config.provider or "amap").strip().upper()
         status = (
-            f"地图 {provider.upper()}  z{int(map_context['zoom'])}  "
+            f"地图 {provider}  z{int(map_context['zoom'])}  "
             f"缓存 {len(self._tile_cache)}  请求 {len(self._tile_pending)}  失败 {len(self._tile_failed)}"
         )
         if self._tile_last_error:
@@ -2876,6 +2978,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_interface_pick: tuple[str, str, int, int, int] | None = None
         self._interface_drag_state: dict[str, object] | None = None
         self._online_map_config = OnlineMapConfigStore.load()
+        self._overview_map_mode = "offline"
         self._overview_region_preview_cache: dict[tuple[object, ...], QtGui.QImage] = {}
         self._overview_region_preview_by_region: dict[str, QtGui.QImage] = {}
         self._overview_map_image_cache: tuple[str, QtGui.QImage | None] = ("", None)
@@ -3198,7 +3301,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_overview_load_map = QtWidgets.QToolButton()
         self.btn_overview_load_map.setText("加载在线地图")
         self.btn_overview_load_map.setObjectName("interfaceActionButton")
-        self.btn_overview_load_map.clicked.connect(self._configure_online_map)
+        self.btn_overview_load_map.clicked.connect(self._load_online_map)
         overview_toolbar.addWidget(self.btn_overview_load_map)
         self.btn_overview_clear_map = QtWidgets.QToolButton()
         self.btn_overview_clear_map.setText("更改在线地图")
@@ -3222,8 +3325,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.overview_depth_value.editingFinished.connect(self._apply_overview_depth_text)
         overview_toolbar.addWidget(self.overview_depth_value)
         overview_layout.addLayout(overview_toolbar)
-        self.overview_map = OverviewMapWidget()
+        self.overview_online_map = OverviewMapWidget()
+        self.overview_online_map.set_online_map_config(self._online_map_config)
+        self.overview_online_map.set_map_mode("online")
+        self.overview_offline_map = OverviewQuickMapWidget()
+        self.overview_map = OverviewMapHostWidget(
+            offline_widget=self.overview_offline_map,
+            online_widget=self.overview_online_map,
+        )
         self.overview_map.set_online_map_config(self._online_map_config)
+        self.overview_map.set_map_mode(self._overview_map_mode)
         self.overview_map.setStyleSheet("background: #fafbfc; border: 1px solid #d0d7df; border-radius: 14px;")
         self.overview_map.region_activated.connect(self._on_overview_region_activated)
         self.overview_map.point_selected.connect(self._on_overview_point_selected)
@@ -3738,16 +3849,57 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"工程已保存到 {project_file}", 4000)
         QtWidgets.QMessageBox.information(self, "保存工程", f"工程已保存。\n\n{project_file}")
 
+    def _load_online_map(self) -> None:
+        if self._overview_map_mode == "online":
+            choice = QtWidgets.QMessageBox.question(
+                self,
+                "在线地图",
+                "当前已经在使用在线地图。\n\n是否切回离线地图？",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+            if choice == QtWidgets.QMessageBox.Yes:
+                self._overview_map_mode = "offline"
+                self.overview_map.set_map_mode("offline")
+                self.statusBar().showMessage("已切回离线地图。", 4000)
+                self._refresh_overview_controls()
+                self._refresh_overview_scene()
+            return
+        if not self._online_map_config.amap_js_key and (self._online_map_config.provider or "amap") == "amap":
+            QtWidgets.QMessageBox.information(
+                self,
+                "在线地图",
+                "当前还没有配置在线地图 Key，将先打开在线地图配置窗口。",
+            )
+            self._change_online_map()
+            if not self._online_map_config.amap_js_key and (self._online_map_config.provider or "amap") == "amap":
+                return
+        choice = QtWidgets.QMessageBox.question(
+            self,
+            "加载在线地图",
+            "在线地图需要网络通信，网络不稳定时可能影响流畅性。\n\n是否继续加载在线地图？",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if choice != QtWidgets.QMessageBox.Yes:
+            return
+        self._overview_map_mode = "online"
+        self.overview_map.set_online_map_config(self._online_map_config)
+        self.overview_map.set_map_mode("online")
+        self.statusBar().showMessage("已切换为在线地图。", 4000)
+        self._refresh_overview_controls()
+        self._refresh_overview_scene()
+
     def _configure_online_map(self) -> None:
         dialog = OnlineMapConfigDialog(self._online_map_config, self)
         if dialog.exec() != QtWidgets.QDialog.Accepted:
             return
         self._online_map_config = dialog.values()
         path = OnlineMapConfigStore.save(self._online_map_config)
-        self.overview_map.set_online_map_config(self._online_map_config)
+        if self._overview_map_mode == "online":
+            self.overview_map.set_online_map_config(self._online_map_config)
         self.statusBar().showMessage(f"在线地图配置已保存到 {path}", 4000)
         self._refresh_overview_controls()
-        self._refresh_overview_scene()
 
     def _change_online_map(self) -> None:
         self._configure_online_map()
@@ -3816,6 +3968,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._overview_depth_text_editing and not self.overview_depth_value.hasFocus():
             self.overview_depth_value.setText(f"{current * dt_ns:.3f}")
         has_project = self.app_controller.project_state.is_open
+        self.btn_overview_load_map.setText("切回离线地图" if self._overview_map_mode == "online" else "加载在线地图")
         self.btn_overview_load_map.setEnabled(has_project and not self._is_busy)
         self.btn_overview_clear_map.setEnabled(has_project and not self._is_busy)
         self.overview_depth_slider.setEnabled(sample_count > 0 and not self._is_busy)

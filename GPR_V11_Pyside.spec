@@ -10,7 +10,16 @@ datas = [
     (str(project_root / "release_launcher.bat"), "."),
     (str(project_root / "RELEASE_INSTRUCTIONS.txt"), "."),
     (str(project_root / "gpr_lab_pro" / "processing" / "pipeline.py"), "gpr_lab_pro/processing"),
+    (str(project_root / "gpr_lab_pro" / "resources" / "overview"), "gpr_lab_pro/resources/overview"),
 ]
+
+online_map_config = project_root / "online_map.local.json"
+if online_map_config.exists():
+    datas.append((str(online_map_config), "."))
+
+offline_tiles_root = project_root.parent / "offline_tiles"
+if offline_tiles_root.exists():
+    datas.append((str(offline_tiles_root), "offline_tiles"))
 
 hiddenimports = [
     "PySide6.QtCore",

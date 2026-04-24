@@ -33,6 +33,13 @@ Copy-Item -Path (Join-Path $distRoot $releaseName) -Destination $releasePath -Re
 Copy-Item -Path ".\qt.conf" -Destination (Join-Path $releasePath "qt.conf") -Force
 Copy-Item -Path ".\release_launcher.bat" -Destination (Join-Path $releasePath "release_launcher.bat") -Force
 Copy-Item -Path ".\RELEASE_INSTRUCTIONS.txt" -Destination (Join-Path $releasePath "RELEASE_INSTRUCTIONS.txt") -Force
+if (Test-Path ".\online_map.local.json") {
+    Copy-Item -Path ".\online_map.local.json" -Destination (Join-Path $releasePath "online_map.local.json") -Force
+}
+$offlineTiles = Join-Path (Split-Path -Parent $PSScriptRoot) "offline_tiles"
+if (Test-Path $offlineTiles) {
+    Copy-Item -Path $offlineTiles -Destination (Join-Path $releasePath "offline_tiles") -Recurse -Force
+}
 
 $zipPath = Join-Path $releaseRoot "$releaseName.zip"
 if (Test-Path $zipPath) {

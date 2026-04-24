@@ -17,6 +17,7 @@ from gpr_lab_pro.domain.models.project import (
     ProjectFileState,
     ProjectRegionState,
 )
+from gpr_lab_pro.infrastructure.online_map import OnlineMapConfigStore
 
 
 class ProjectController:
@@ -630,15 +631,33 @@ class ProjectController:
         if trace_count <= 0:
             return file_item.navigation
         if file_item.navigation.samples and len(file_item.navigation.samples) == trace_count:
-            has_geo = any(
+            has_geo = all(
                 sample.latitude is not None and sample.longitude is not None
                 for sample in file_item.navigation.samples
             )
-            if has_geo:
+            if has_geo and self._navigation_within_offline_coverage(file_item.navigation):
                 return file_item.navigation
         file_index = next((idx for idx, item in enumerate(self.state.files) if item.file_id == file_item.file_id), 0)
         file_item.navigation = self._create_simulated_navigation(dataset, file_index=file_index)
         return file_item.navigation
+
+    @staticmethod
+    def _navigation_within_offline_coverage(navigation: NavigationTrack) -> bool:
+        coverage = OnlineMapConfigStore.offline_tiles_coverage()
+        if coverage is None or not navigation.samples:
+            return True
+        margin_lat = max((coverage.max_lat - coverage.min_lat) * 0.02, 0.0001)
+        margin_lon = max((coverage.max_lon - coverage.min_lon) * 0.02, 0.0001)
+        for sample in navigation.samples:
+            lat = sample.latitude
+            lon = sample.longitude
+            if lat is None or lon is None:
+                return False
+            if not (coverage.min_lat - margin_lat <= lat <= coverage.max_lat + margin_lat):
+                return False
+            if not (coverage.min_lon - margin_lon <= lon <= coverage.max_lon + margin_lon):
+                return False
+        return True
 
     def _create_simulated_navigation(self, dataset: DatasetRecord, *, file_index: int) -> NavigationTrack:
         trace_count = max(int(dataset.trace_count), 1)
@@ -647,8 +666,17 @@ class ProjectController:
         angle = np.deg2rad(12.0 + (file_index % 5) * 7.5)
         base_x = 12.0 + file_index * 16.0
         base_y = 12.0 + file_index * 10.0
-        base_lat = 36.0671 + file_index * 0.0018
-        base_lon = 120.3826 + file_index * 0.0024
+        coverage = OnlineMapConfigStore.offline_tiles_coverage()
+        if coverage is not None:
+            margin_lat = max((coverage.max_lat - coverage.min_lat) * 0.08, 0.002)
+            margin_lon = max((coverage.max_lon - coverage.min_lon) * 0.08, 0.002)
+            preferred_lat = 35.76985 + file_index * 0.00025
+            preferred_lon = 120.02731 + file_index * 0.00035
+            base_lat = min(max(preferred_lat, coverage.min_lat + margin_lat), coverage.max_lat - margin_lat)
+            base_lon = min(max(preferred_lon, coverage.min_lon + margin_lon), coverage.max_lon - margin_lon)
+        else:
+            base_lat = 36.0671 + file_index * 0.0018
+            base_lon = 120.3826 + file_index * 0.0024
         meters_per_deg_lat = 111320.0
         meters_per_deg_lon = max(111320.0 * float(np.cos(np.deg2rad(base_lat))), 1.0)
         direction = np.array([np.cos(angle), np.sin(angle)], dtype=float)

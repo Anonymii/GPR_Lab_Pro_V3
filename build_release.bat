@@ -28,6 +28,8 @@ xcopy /e /i /y %DIST_ROOT%\%RELEASE_NAME% %RELEASE_ROOT%\%RELEASE_NAME% >nul
 copy /y qt.conf %RELEASE_ROOT%\%RELEASE_NAME%\qt.conf >nul
 copy /y release_launcher.bat %RELEASE_ROOT%\%RELEASE_NAME%\release_launcher.bat >nul
 copy /y RELEASE_INSTRUCTIONS.txt %RELEASE_ROOT%\%RELEASE_NAME%\RELEASE_INSTRUCTIONS.txt >nul
+if exist online_map.local.json copy /y online_map.local.json %RELEASE_ROOT%\%RELEASE_NAME%\online_map.local.json >nul
+if exist ..\offline_tiles xcopy /e /i /y ..\offline_tiles %RELEASE_ROOT%\%RELEASE_NAME%\offline_tiles >nul
 powershell -NoProfile -Command "if (Test-Path '%RELEASE_ROOT%\\%RELEASE_NAME%.zip') { Remove-Item -LiteralPath '%RELEASE_ROOT%\\%RELEASE_NAME%.zip' -Force }; Compress-Archive -Path '%RELEASE_ROOT%\\%RELEASE_NAME%' -DestinationPath '%RELEASE_ROOT%\\%RELEASE_NAME%.zip'"
 
 echo Release package ready:
