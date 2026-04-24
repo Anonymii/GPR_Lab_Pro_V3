@@ -67,6 +67,9 @@
     }
 
     function setupBridge() {
+      if (typeof QWebChannel === "undefined" || !window.qt || !qt.webChannelTransport) {
+        return;
+      }
       new QWebChannel(qt.webChannelTransport, function(channel) {
         bridge = channel.objects.overviewBridge;
         if (bridge && bridge.notifyPageReady) {
@@ -91,9 +94,7 @@
 
     function loadPreview(src) {
       if (!src) return null;
-      if (imageCache.has(src)) {
-        return imageCache.get(src);
-      }
+      if (imageCache.has(src)) return imageCache.get(src);
       const img = new Image();
       img.src = src;
       img.onload = () => renderScene();
@@ -281,10 +282,23 @@
 
     function updateScene(sceneJson) {
       scene = sceneJson;
+      fitDone = false;
       fitSceneBounds();
       renderScene();
     }
     window.updateOverviewScene = updateScene;
+
+    function pointInPolygon(x, y, points) {
+      let inside = false;
+      for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+        const xi = points[i].x, yi = points[i].y;
+        const xj = points[j].x, yj = points[j].y;
+        const intersect = ((yi > y) !== (yj > y)) &&
+          (x < (xj - xi) * (y - yi) / ((yj - yi) || 1e-9) + xi);
+        if (intersect) inside = !inside;
+      }
+      return inside;
+    }
 
     function detectRegionFromEvent(lnglat) {
       if (!scene || !scene.files || !lnglat) return null;
@@ -303,18 +317,6 @@
       }
       if (!candidates.length) return null;
       return candidates.find(r => r.regionId === scene.activeRegionId) || candidates[candidates.length - 1];
-    }
-
-    function pointInPolygon(x, y, points) {
-      let inside = false;
-      for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
-        const xi = points[i].x, yi = points[i].y;
-        const xj = points[j].x, yj = points[j].y;
-        const intersect = ((yi > y) !== (yj > y)) &&
-          (x < (xj - xi) * (y - yi) / ((yj - yi) || 1e-9) + xi);
-        if (intersect) inside = !inside;
-      }
-      return inside;
     }
 
     function nearestTrace(region, lnglat) {
@@ -359,16 +361,16 @@
     function initAmap() {
       const key = "__AMAP_KEY__";
       if (!key) {
-        showMessage("未配置高德地图 Key");
+        const msg = "未配置高德地图 Key";
+        showMessage(msg);
+        if (bridge && bridge.reportMapError) bridge.reportMapError(msg);
         return;
       }
       showMessage("正在加载在线地图…");
       if (typeof AMap === "undefined" || !AMap || !AMap.Map) {
-        const message = "高德地图脚本未成功加载";
-        showMessage(message);
-        if (bridge && bridge.reportMapError) {
-          bridge.reportMapError(message);
-        }
+        const msg = "高德地图脚本未成功加载";
+        showMessage(msg);
+        if (bridge && bridge.reportMapError) bridge.reportMapError(msg);
         return;
       }
       try {
@@ -387,18 +389,20 @@
         fitSceneBounds();
         renderScene();
         showMessage("");
-        if (bridge && bridge.notifyMapReady) {
-          bridge.notifyMapReady();
-        }
+        if (bridge && bridge.notifyMapReady) bridge.notifyMapReady();
       } catch (err) {
-        showMessage("在线地图加载失败\\n" + String(err));
-        if (bridge && bridge.reportMapError) {
-          bridge.reportMapError(String(err));
-        }
+        const msg = "在线地图加载失败\n" + String(err);
+        showMessage(msg);
+        if (bridge && bridge.reportMapError) bridge.reportMapError(msg);
       }
     }
 
     window.addEventListener("resize", renderScene);
+    window.addEventListener("error", function(ev) {
+      const msg = String((ev && ev.message) || "在线地图脚本错误");
+      showMessage(msg);
+      if (bridge && bridge.reportMapError) bridge.reportMapError(msg);
+    });
     setupBridge();
     initAmap();
   </script>

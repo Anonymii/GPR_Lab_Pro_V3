@@ -18,7 +18,7 @@ from gpr_lab_pro.application import GPRApplication
 from gpr_lab_pro.domain.enums import StepKind
 from gpr_lab_pro.domain.models.display import DisplayData
 from gpr_lab_pro.infrastructure.online_map import OnlineMapConfig, OnlineMapConfigStore
-from gpr_lab_pro.ui.overview_quick_map import OverviewMapHostWidget, OverviewQuickMapWidget
+from gpr_lab_pro.ui.overview_quick_map import OverviewMapHostWidget, OverviewOnlineQuickMapWidget, OverviewQuickMapWidget
 from gpr_lab_pro.render.adapters.cscan_adapter import build_cscan
 from gpr_lab_pro.processing.catalog_v11 import OperationSpec, SPEC_BY_TYPE
 from gpr_lab_pro.processing.module_registry_v11 import MODULE_SPECS
@@ -435,6 +435,7 @@ class OverviewWebMapWidget(QtWidgets.QWidget):
         self._pending_scene_payload: dict[str, object] | None = None
         self._page_ready = False
         self._map_ready = False
+        self._map_loaded_once = False
         self._last_error_message = ""
         self._web_mode_enabled = True
         self._load_watchdog = QtCore.QTimer(self)
@@ -471,11 +472,16 @@ class OverviewWebMapWidget(QtWidgets.QWidget):
         self.channel = QtWebChannel.QWebChannel(self._page)
         self.channel.registerObject("overviewBridge", self.bridge)
         self._page.setWebChannel(self.channel)
-        self._load_map_page()
 
     def set_online_map_config(self, config: OnlineMapConfig) -> None:
         self._map_config = config
-        self._load_map_page()
+        if self._map_loaded_once:
+            self._load_map_page()
+
+    def set_map_mode(self, mode: str) -> None:
+        if str(mode).strip().lower() != "online":
+            return
+        self._ensure_map_loaded()
 
     def clear_scene(self) -> None:
         self._files = []
@@ -495,6 +501,12 @@ class OverviewWebMapWidget(QtWidgets.QWidget):
         }
         self._push_scene_to_page()
 
+    def _ensure_map_loaded(self) -> None:
+        if self._map_loaded_once and (self._page_ready or self._map_ready):
+            return
+        self._map_loaded_once = True
+        self._load_map_page()
+
     def set_scene(
         self,
         files: list[dict[str, object]],
@@ -505,8 +517,9 @@ class OverviewWebMapWidget(QtWidgets.QWidget):
         map_image: QtGui.QImage | None = None,
         active_region_name: str = "",
         active_interface_name: str = "",
+        cache_root_path: str = "",
     ) -> None:
-        del map_image
+        del map_image, cache_root_path
         self._files = list(files)
         self._active_region_id = active_region_id
         self._active_file_id = active_file_id
@@ -3325,9 +3338,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.overview_depth_value.editingFinished.connect(self._apply_overview_depth_text)
         overview_toolbar.addWidget(self.overview_depth_value)
         overview_layout.addLayout(overview_toolbar)
-        self.overview_online_map = OverviewMapWidget()
-        self.overview_online_map.set_online_map_config(self._online_map_config)
-        self.overview_online_map.set_map_mode("online")
+        self.overview_online_map = OverviewOnlineQuickMapWidget(self._online_map_config)
         self.overview_offline_map = OverviewQuickMapWidget()
         self.overview_map = OverviewMapHostWidget(
             offline_widget=self.overview_offline_map,
