@@ -6,6 +6,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -18,14 +19,9 @@ class _OfflineTileRequestHandler(http.server.BaseHTTPRequestHandler):
     server: "_OfflineTileHTTPServer"
 
     def do_GET(self) -> None:  # noqa: N802
-        tile_path = self.server.tile_server.resolve_request_path(self.path)
-        if tile_path is None or not tile_path.exists():
+        payload = self.server.tile_server.load_tile_payload(self.path)
+        if payload is None:
             self.send_error(404)
-            return
-        try:
-            payload = tile_path.read_bytes()
-        except OSError:
-            self.send_error(500)
             return
         self.send_response(200)
         self.send_header("Content-Type", "image/png")
@@ -48,6 +44,8 @@ class _OfflineTileHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer
 
 
 class OfflineTileServer(QtCore.QObject):
+    _MEMORY_CACHE_LIMIT = 384
+
     def __init__(self, root: Path, parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
         self._root = root
@@ -58,6 +56,7 @@ class OfflineTileServer(QtCore.QObject):
         self.hit_count = 0
         self.miss_count = 0
         self.last_request_path = ""
+        self._payload_cache: OrderedDict[str, bytes] = OrderedDict()
 
     @property
     def base_url(self) -> str:
@@ -83,6 +82,28 @@ class OfflineTileServer(QtCore.QObject):
         self._httpd = None
         self._thread = None
         self._base_url = ""
+        self._payload_cache.clear()
+
+    def load_tile_payload(self, request_path: str) -> bytes | None:
+        normalized = request_path.split("?", 1)[0].strip("/")
+        cached = self._payload_cache.get(normalized)
+        if cached is not None:
+            self._payload_cache.move_to_end(normalized)
+            self.request_count += 1
+            self.hit_count += 1
+            self.last_request_path = str(request_path)
+            return cached
+        tile_path = self.resolve_request_path(request_path)
+        if tile_path is None or not tile_path.exists():
+            return None
+        try:
+            payload = tile_path.read_bytes()
+        except OSError:
+            return None
+        if not payload:
+            return None
+        self._remember_payload(normalized, payload)
+        return payload
 
     def resolve_request_path(self, request_path: str) -> Path | None:
         self.request_count += 1
@@ -106,6 +127,12 @@ class OfflineTileServer(QtCore.QObject):
             return candidate
         self.miss_count += 1
         return None
+
+    def _remember_payload(self, key: str, payload: bytes) -> None:
+        self._payload_cache[key] = payload
+        self._payload_cache.move_to_end(key)
+        while len(self._payload_cache) > self._MEMORY_CACHE_LIMIT:
+            self._payload_cache.popitem(last=False)
 
 
 class _OnlineTileRequestHandler(http.server.BaseHTTPRequestHandler):
@@ -138,6 +165,7 @@ class _OnlineTileHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer)
 
 class OnlineTileServer(QtCore.QObject):
     _MAP_TILE_TEMPLATE_AMAP = "http://wprd03.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scl=1&style=7&x={x}&y={y}&z={z}"
+    _MEMORY_CACHE_LIMIT = 384
 
     def __init__(self, config, parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
@@ -153,6 +181,7 @@ class OnlineTileServer(QtCore.QObject):
         self.last_request_path = ""
         self.last_error = ""
         self._last_cleanup = 0.0
+        self._payload_cache: OrderedDict[tuple[int, int, int], bytes] = OrderedDict()
 
     @property
     def base_url(self) -> str:
@@ -185,6 +214,7 @@ class OnlineTileServer(QtCore.QObject):
         self._httpd = None
         self._thread = None
         self._base_url = ""
+        self._payload_cache.clear()
 
     def load_tile_payload(self, request_path: str) -> bytes | None:
         self.request_count += 1
@@ -193,6 +223,11 @@ class OnlineTileServer(QtCore.QObject):
         if key is None:
             self.miss_count += 1
             return None
+        cached = self._payload_cache.get(key)
+        if cached is not None:
+            self._payload_cache.move_to_end(key)
+            self.hit_count += 1
+            return cached
         cache_path = self._tile_cache_path(key)
         if cache_path.exists():
             try:
@@ -201,6 +236,7 @@ class OnlineTileServer(QtCore.QObject):
                 payload = b""
             if payload:
                 self.hit_count += 1
+                self._remember_payload(key, payload)
                 return payload
         payload = self._fetch_remote_tile(key)
         if not payload:
@@ -212,6 +248,7 @@ class OnlineTileServer(QtCore.QObject):
         except OSError:
             pass
         self.fetch_count += 1
+        self._remember_payload(key, payload)
         self._cleanup_cache_if_needed()
         return payload
 
@@ -278,6 +315,12 @@ class OnlineTileServer(QtCore.QObject):
                 stale.unlink()
             except OSError:
                 continue
+
+    def _remember_payload(self, key: tuple[int, int, int], payload: bytes) -> None:
+        self._payload_cache[key] = payload
+        self._payload_cache.move_to_end(key)
+        while len(self._payload_cache) > self._MEMORY_CACHE_LIMIT:
+            self._payload_cache.popitem(last=False)
 
 
 class OverviewOnlineBridge(QtCore.QObject):
@@ -433,11 +476,19 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         self._center_lat = 0.0
         self._center_lon = 0.0
         self._zoom = 15.0
+        self._center_world_x = 0.0
+        self._center_world_y = 0.0
         self._pending_map_state: tuple[float, float, float] | None = None
+        self._layout_cache_key: tuple[float, float, float, int, int, int] | None = None
+        self._layout_cache: list[tuple[str, QtGui.QPainterPath, dict[str, object]]] = []
         self._map_state_timer = QtCore.QTimer(self)
         self._map_state_timer.setSingleShot(True)
-        self._map_state_timer.setInterval(16)
+        self._map_state_timer.setInterval(10)
         self._map_state_timer.timeout.connect(self._apply_pending_map_state)
+        self._interaction_timer = QtCore.QTimer(self)
+        self._interaction_timer.setSingleShot(True)
+        self._interaction_timer.setInterval(90)
+        self._interaction_timer.timeout.connect(self.update)
 
     def clear_scene(self) -> None:
         self._files = []
@@ -446,6 +497,7 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         self._active_file_id = ""
         self._active_trace = 0
         self._layout_rects = []
+        self._clear_layout_cache()
         self.update()
 
     def set_scene(
@@ -464,6 +516,7 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         self._active_region_id = active_region_id
         self._active_file_id = active_file_id
         self._active_trace = int(active_trace)
+        self._clear_layout_cache()
         self.update()
 
     def set_map_state(self, latitude: float, longitude: float, zoom: float) -> None:
@@ -471,6 +524,7 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         if state == self._pending_map_state:
             return
         self._pending_map_state = state
+        self._interaction_timer.start()
         if not self._map_state_timer.isActive():
             self._map_state_timer.start()
 
@@ -492,16 +546,17 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
 
     def paintEvent(self, _event: QtGui.QPaintEvent) -> None:
         painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        fast_mode = self._interaction_timer.isActive()
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, not fast_mode)
         self._layout_rects = self._compute_layout(self.rect())
         for region_id, path, item in self._layout_rects:
             preview_image = item.get("preview_image")
             if isinstance(preview_image, QtGui.QImage) and not preview_image.isNull():
                 painter.save()
                 painter.setClipPath(path)
-                geometry = self._region_screen_geometry(item)
+                geometry = item.get("screen_geometry")
                 if geometry is not None:
-                    painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
+                    painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, not fast_mode)
                     painter.translate(geometry["center"])
                     painter.rotate(geometry["angle_deg"])
                     painter.drawImage(geometry["target_rect_local"], preview_image)
@@ -519,7 +574,7 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
             self._draw_region_label(painter, item)
 
     def _draw_region_label(self, painter: QtGui.QPainter, item: dict[str, object]) -> None:
-        geometry = self._region_screen_geometry(item)
+        geometry = item.get("screen_geometry")
         if geometry is None:
             return
         text = str(item.get("label_text", "") or item.get("region_name", ""))
@@ -534,13 +589,23 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         painter.restore()
 
     def _compute_layout(self, canvas: QtCore.QRect) -> list[tuple[str, QtGui.QPainterPath, dict[str, object]]]:
+        cache_key = (
+            round(self._center_lat, 7),
+            round(self._center_lon, 7),
+            round(self._zoom, 4),
+            int(canvas.width()),
+            int(canvas.height()),
+            len(self._prepared_regions),
+        )
+        if cache_key == self._layout_cache_key:
+            return self._layout_cache
         rects: list[tuple[str, QtGui.QPainterPath, dict[str, object]]] = []
         canvas_rect = QtCore.QRectF(canvas)
         for prepared in self._prepared_regions:
-            polygon_geo_array = prepared.get("geo_polygon_array")
-            if not isinstance(polygon_geo_array, np.ndarray) or polygon_geo_array.size == 0:
+            polygon_world_array = prepared.get("geo_polygon_world")
+            if not isinstance(polygon_world_array, np.ndarray) or polygon_world_array.size == 0:
                 continue
-            polygon_screen = self._geo_arrays_to_canvas(polygon_geo_array, canvas_rect)
+            polygon_screen = self._world_arrays_to_canvas(polygon_world_array, canvas_rect)
             polygon = QtGui.QPolygonF([QtCore.QPointF(float(x), float(y)) for x, y in polygon_screen])
             path = QtGui.QPainterPath()
             if not polygon.isEmpty():
@@ -550,10 +615,10 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
                 path.closeSubpath()
             item = dict(prepared)
             item["screen_polygon"] = [polygon.at(idx) for idx in range(polygon.size())]
-            navigation_array = prepared.get("navigation_array")
+            navigation_array = prepared.get("navigation_world")
             trace_indices = prepared.get("navigation_trace_indices", [])
             if isinstance(navigation_array, np.ndarray) and navigation_array.size > 0:
-                navigation_screen = self._geo_arrays_to_canvas(navigation_array, canvas_rect)
+                navigation_screen = self._world_arrays_to_canvas(navigation_array, canvas_rect)
                 item["navigation_samples"] = [
                     {
                         "trace_index": int(trace_indices[idx]),
@@ -564,7 +629,10 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
                 ]
             else:
                 item["navigation_samples"] = []
+            item["screen_geometry"] = self._region_screen_geometry(item)
             rects.append((str(prepared.get("region_id", "")), path, item))
+        self._layout_cache_key = cache_key
+        self._layout_cache = rects
         return rects
 
     @staticmethod
@@ -685,8 +753,12 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
                             [[point["latitude"], point["longitude"]] for point in polygon_geo],
                             dtype=float,
                         ),
+                        "geo_polygon_world": self._geo_arrays_to_world(
+                            np.array([[point["latitude"], point["longitude"]] for point in polygon_geo], dtype=float)
+                        ),
                         "navigation_samples": navigation_samples,
                         "navigation_array": navigation_array,
+                        "navigation_world": self._geo_arrays_to_world(navigation_array),
                         "navigation_trace_indices": [sample["trace_index"] for sample in navigation_samples],
                     }
                 )
@@ -696,7 +768,9 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         if self._pending_map_state is None:
             return
         self._center_lat, self._center_lon, self._zoom = self._pending_map_state
+        self._center_world_x, self._center_world_y = self._geo_to_world(self._center_lat, self._center_lon)
         self._pending_map_state = None
+        self._clear_layout_cache()
         self.update()
 
     @staticmethod
@@ -707,26 +781,29 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         return f"{file_label}  {region_label}".strip()
 
     def _geo_to_canvas(self, latitude: float, longitude: float, canvas_rect: QtCore.QRectF) -> QtCore.QPointF:
-        center_px_x, center_px_y = self._geo_to_global_pixel(self._center_lat, self._center_lon, float(self._zoom))
-        pixel_x, pixel_y = self._geo_to_global_pixel(latitude, longitude, float(self._zoom))
+        world_x, world_y = self._geo_to_world(latitude, longitude)
+        scale = self._world_scale()
         return QtCore.QPointF(
-            canvas_rect.center().x() + (pixel_x - center_px_x),
-            canvas_rect.center().y() + (pixel_y - center_px_y),
+            canvas_rect.center().x() + (world_x - self._center_world_x) * scale,
+            canvas_rect.center().y() + (world_y - self._center_world_y) * scale,
         )
 
-    def _geo_arrays_to_canvas(self, coordinates: np.ndarray, canvas_rect: QtCore.QRectF) -> np.ndarray:
+    def _geo_arrays_to_world(self, coordinates: np.ndarray) -> np.ndarray:
         if coordinates.size == 0:
             return np.empty((0, 2), dtype=float)
-        zoom = max(float(self._zoom), 0.0)
-        center_px_x, center_px_y = self._geo_to_global_pixel(self._center_lat, self._center_lon, zoom)
         lat = np.clip(coordinates[:, 0].astype(float), -85.05112878, 85.05112878)
         lon = ((coordinates[:, 1].astype(float) + 180.0) % 360.0) - 180.0
-        scale = self._TILE_SIZE * (2**zoom)
-        pixel_x = (lon + 180.0) / 360.0 * scale
+        world_x = (lon + 180.0) / 360.0
         sin_lat = np.sin(np.deg2rad(lat))
-        pixel_y = (0.5 - np.log((1 + sin_lat) / (1 - sin_lat)) / (4 * np.pi)) * scale
-        screen_x = canvas_rect.center().x() + (pixel_x - center_px_x)
-        screen_y = canvas_rect.center().y() + (pixel_y - center_px_y)
+        world_y = 0.5 - np.log((1 + sin_lat) / (1 - sin_lat)) / (4 * np.pi)
+        return np.column_stack((world_x, world_y))
+
+    def _world_arrays_to_canvas(self, coordinates: np.ndarray, canvas_rect: QtCore.QRectF) -> np.ndarray:
+        if coordinates.size == 0:
+            return np.empty((0, 2), dtype=float)
+        scale = self._world_scale()
+        screen_x = canvas_rect.center().x() + (coordinates[:, 0] - self._center_world_x) * scale
+        screen_y = canvas_rect.center().y() + (coordinates[:, 1] - self._center_world_y) * scale
         return np.column_stack((screen_x, screen_y))
 
     @classmethod
@@ -739,6 +816,22 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         sin_lat = np.sin(np.deg2rad(lat))
         pixel_y = (0.5 - np.log((1 + sin_lat) / (1 - sin_lat)) / (4 * np.pi)) * scale
         return float(pixel_x), float(pixel_y)
+
+    @staticmethod
+    def _geo_to_world(latitude: float, longitude: float) -> tuple[float, float]:
+        lat = float(np.clip(latitude, -85.05112878, 85.05112878))
+        lon = ((float(longitude) + 180.0) % 360.0) - 180.0
+        world_x = (lon + 180.0) / 360.0
+        sin_lat = np.sin(np.deg2rad(lat))
+        world_y = 0.5 - np.log((1 + sin_lat) / (1 - sin_lat)) / (4 * np.pi)
+        return float(world_x), float(world_y)
+
+    def _world_scale(self) -> float:
+        return float(self._TILE_SIZE * (2 ** max(float(self._zoom), 0.0)))
+
+    def _clear_layout_cache(self) -> None:
+        self._layout_cache_key = None
+        self._layout_cache = []
 
     @staticmethod
     def _region_polygon_geo_points(samples: list[dict[str, object]], width_m: float) -> list[dict[str, float]]:
@@ -930,7 +1023,6 @@ class OverviewQuickMapWidget(QtWidgets.QWidget):
     def _on_map_state_changed(self, latitude: float, longitude: float, zoom: float) -> None:
         if hasattr(self, "_overlay"):
             self._overlay.set_map_state(latitude, longitude, zoom)
-            self._overlay.raise_()
 
     def _on_map_tapped(self, x: float, y: float) -> None:
         if hasattr(self, "_overlay"):
@@ -1062,7 +1154,6 @@ class OverviewOnlineQuickMapWidget(QtWidgets.QWidget):
 
     def _on_map_state_changed(self, latitude: float, longitude: float, zoom: float) -> None:
         self._overlay.set_map_state(latitude, longitude, zoom)
-        self._overlay.raise_()
 
     def _on_map_tapped(self, x: float, y: float) -> None:
         self._overlay.handle_tap(QtCore.QPointF(float(x), float(y)))
