@@ -237,6 +237,7 @@ class PipelineController:
         return True, ""
 
     def ensure_transform_present(self, steps: list[PipelineStep]) -> None:
+        self._normalize_transform_step_params(steps)
         transform_steps = [step for step in steps if step.kind is StepKind.TRANSFORM]
         if not transform_steps:
             steps.insert(
@@ -249,6 +250,20 @@ class PipelineController:
             retained = [step for step in steps if step.kind is not StepKind.TRANSFORM]
             insert_at = sum(1 for step in retained if step.kind is StepKind.FREQUENCY)
             steps[:] = retained[:insert_at] + [first] + retained[insert_at:]
+
+    @staticmethod
+    def _normalize_transform_step_params(steps: list[PipelineStep]) -> None:
+        for step in steps:
+            if step.kind is not StepKind.TRANSFORM:
+                continue
+            params = tuple(step.params)
+            op_type = step.op_type.lower()
+            if op_type == "czt" and len(params) >= 4:
+                step.params = (params[0], params[3])
+            elif op_type == "isdft" and len(params) >= 7:
+                step.params = (params[0], params[3], params[4], params[5], params[6])
+            elif op_type == "ifft" and len(params) >= 4:
+                step.params = tuple(params[:4])
 
     def reset_for_current_dataset(self) -> None:
         dataset = self.context.dataset_state.current_dataset

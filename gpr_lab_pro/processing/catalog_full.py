@@ -32,6 +32,23 @@ def _int_cast(value: str) -> int:
 
 
 OPERATION_SPECS: tuple[OperationSpec, ...] = (
+    OperationSpec("czt", "时频域变换", StepKind.TRANSFORM, ("处理流程",), "CZT", (
+        ParameterSpec("beta", "Kaiser beta", "6"),
+        ParameterSpec("zero_correct", "零点校正(1/0)", "1", _int_cast),
+    )),
+    OperationSpec("ifft", "时频域变换", StepKind.TRANSFORM, ("处理流程",), "IFFT", (
+        ParameterSpec("beta", "Kaiser beta", "6"),
+        ParameterSpec("use_full_bw", "使用全带宽(1/0)", "1", _int_cast),
+        ParameterSpec("min_freq", "最小频率(MHz)", "30"),
+        ParameterSpec("max_freq", "最大频率(MHz)", "3000"),
+    )),
+    OperationSpec("isdft", "时频域变换", StepKind.TRANSFORM, ("处理流程",), "ISDFT", (
+        ParameterSpec("beta", "Kaiser beta", "6"),
+        ParameterSpec("zero_correct", "零点校正(1/0)", "1", _int_cast),
+        ParameterSpec("alpha", "Alpha", "0.02"),
+        ParameterSpec("th_db", "截止阈值(dB)", "-3"),
+        ParameterSpec("ramp_ns", "过渡宽度(ns)", "3"),
+    )),
     OperationSpec("dewow", "时域处理", StepKind.TIME, ("预处理",), "Dewow", (ParameterSpec("win", "窗口长度(采样点)", "20", _int_cast),)),
     OperationSpec("t0", "时域处理", StepKind.TIME, ("预处理", "零点校正"), "最大值对齐", (ParameterSpec("time", "目标时间(ns)", "1.0"),)),
     OperationSpec("t0_fb", "时域处理", StepKind.TIME, ("预处理", "零点校正"), "首波对齐", (

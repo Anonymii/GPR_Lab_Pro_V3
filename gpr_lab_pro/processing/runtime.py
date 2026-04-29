@@ -18,14 +18,12 @@ class PipelineRuntime:
         self.clip_sigma = clip_sigma
 
     def create_initial_snapshot(self, dataset: DatasetRecord) -> ResultSnapshot:
+        time_meta = self._dataset_time_meta(dataset)
         return ResultSnapshot(
             data=np.asarray(dataset.volume),
             domain=DataDomain.FREQUENCY,
             step_name="原始导入数据",
-            meta={
-                "tw_ns": float(dataset.tw_ns),
-                "dt_ns": float(dataset.dt_ns),
-            },
+            meta=time_meta,
             pipeline_index=0,
             render_ready=False,
         )
@@ -39,7 +37,12 @@ class PipelineRuntime:
         previous_steps: list[PipelineStep] | None = None,
         previous_snapshots: list[ResultSnapshot] | None = None,
     ) -> list[ResultSnapshot]:
-        context = GPRContext(dt=dataset.dt_ns, fs=dataset.fs_hz, clip_sigma=self.clip_sigma)
+        dataset_time_meta = self._dataset_time_meta(dataset)
+        context = GPRContext(
+            dt=float(dataset_time_meta["dt_ns"]),
+            fs=float(dataset_time_meta["fs_hz"]),
+            clip_sigma=self.clip_sigma,
+        )
         processor = PipelineProcessor(context)
         frequency_engine = FrequencyProcessingEngine().bind(processor)
         transform_bridge = TimeFrequencyTransformBridge().bind(processor).configure_dataset(dataset)
@@ -60,6 +63,7 @@ class PipelineRuntime:
             current = snapshots[-1].data
             current_domain = snapshots[-1].domain
             current_meta = dict(snapshots[-1].meta)
+            self._sync_context_sampling(context, current_domain, current_meta, dataset_time_meta)
             reused_percent = int(max_reusable / max(total_steps, 1) * 100)
             self._report_progress(progress_callback, reused_percent, f"复用前 {max_reusable} 步结果")
         else:
@@ -67,6 +71,7 @@ class PipelineRuntime:
             current = dataset.volume
             current_domain = DataDomain.FREQUENCY
             current_meta = dict(snapshots[-1].meta)
+            self._sync_context_sampling(context, current_domain, current_meta, dataset_time_meta)
             self._report_progress(progress_callback, 0, "开始执行处理流程")
 
         for idx, step in enumerate(enabled_steps[max_reusable:], start=max_reusable + 1):
@@ -92,10 +97,12 @@ class PipelineRuntime:
                 )
                 current_domain = DataDomain.TIME
                 current_meta = transform_bridge.current_time_meta()
+                self._sync_context_sampling(context, current_domain, current_meta, dataset_time_meta)
             else:
                 current = time_engine.execute(current, legacy_op)
                 current_domain = DataDomain.TIME
                 current_meta = dict(current_meta)
+                self._sync_context_sampling(context, current_domain, current_meta, dataset_time_meta)
 
             snapshots.append(
                 ResultSnapshot(
@@ -136,3 +143,30 @@ class PipelineRuntime:
     def _check_cancelled(cancel_callback) -> None:
         if cancel_callback is not None and cancel_callback():
             raise WorkerCancelled()
+
+    @staticmethod
+    def _dataset_time_meta(dataset: DatasetRecord) -> dict[str, float]:
+        dt_ns = float(dataset.transformed_dt_ns())
+        tw_ns = float(dataset.transformed_time_window_ns())
+        fs_hz = 0.0 if dt_ns <= 0 else 1.0 / (dt_ns * 1e-9)
+        return {
+            "t0_ns": 0.0,
+            "tw_ns": tw_ns,
+            "dt_ns": dt_ns,
+            "fs_hz": fs_hz,
+        }
+
+    @staticmethod
+    def _sync_context_sampling(
+        context: GPRContext,
+        domain: DataDomain,
+        meta: dict[str, object],
+        dataset_time_meta: dict[str, float],
+    ) -> None:
+        source_meta = meta if domain is DataDomain.TIME else dataset_time_meta
+        dt_ns = float(source_meta.get("dt_ns", 0.0) or 0.0)
+        fs_hz = float(source_meta.get("fs_hz", 0.0) or 0.0)
+        if fs_hz <= 0.0 and dt_ns > 0.0:
+            fs_hz = 1.0 / (dt_ns * 1e-9)
+        context.dt = dt_ns
+        context.fs = fs_hz

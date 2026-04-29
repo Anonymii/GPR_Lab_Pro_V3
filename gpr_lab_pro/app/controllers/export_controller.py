@@ -8,6 +8,7 @@ from scipy.io import loadmat, savemat
 
 from gpr_lab_pro.app.context import ApplicationContext
 from gpr_lab_pro.app.operation_text import get_operation_label
+from gpr_lab_pro.domain.enums import DataDomain
 from gpr_lab_pro.domain.enums import StepKind
 from gpr_lab_pro.domain.models.pipeline import PipelineStep
 from gpr_lab_pro.processing.catalog_v11 import SPEC_BY_TYPE
@@ -131,12 +132,17 @@ class ExportController:
         data = snapshot.data
         if path_obj.suffix.lower() == ".mat":
             channels = [data[:, :, idx] for idx in range(data.shape[2])]
+            tw_ns = (
+                float(snapshot.meta.get("tw_ns", 0.0) or 0.0)
+                if snapshot.domain is DataDomain.TIME
+                else 0.0
+            )
             savemat(
                 str(path_obj),
                 {
                     "V_proc": data,
                     "data_2_lte": np.array(channels, dtype=object),
-                    "tw": dataset.tw_ns,
+                    "tw": tw_ns if tw_ns > 0 else dataset.transformed_time_window_ns(),
                 },
             )
             return

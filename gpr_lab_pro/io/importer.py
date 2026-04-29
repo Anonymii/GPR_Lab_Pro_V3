@@ -7,9 +7,6 @@ import struct
 from typing import List, Sequence
 
 import numpy as np
-from scipy import interpolate, signal
-
-from gpr_lab_pro.algorithms import correct_direct_wave, isdft_soft_phys
 from gpr_lab_pro.infrastructure.workers import WorkerCancelled
 from gpr_lab_pro.io.dat_loader import DatFileHeader, read_dat_frame_header_from_handle, read_dat_header
 
@@ -37,6 +34,7 @@ class ISDFTParameters:
 @dataclass(frozen=True)
 class DataImportParameters:
     beta: float = 6.0
+    # Deprecated compatibility-only fields kept for old project payloads.
     tw_start_ns: float = 0.0
     tw_end_ns: float = 60.0
     selected_attr_idx: int = 1
@@ -110,9 +108,7 @@ class GPRDataImporter:
         if frequency_channels:
             min_nt = min(ch.shape[1] for ch in frequency_channels if ch.size)
             frequency_channels = [ch[:, :min_nt] if ch.size else ch for ch in frequency_channels]
-        tw_ns = params.tw_end_ns - params.tw_start_ns
-        dt_ns = tw_ns / max(1, (params.sample_count or header.sample_count) - 1)
-        fs_hz = 1.0 / (dt_ns * 1e-9)
+        tw_ns, dt_ns, fs_hz = self._build_frequency_time_meta(header, frequency_channels)
         self._report_progress(progress_callback, 100, "导入完成")
         return ImportedGPRData(
             channels=frequency_channels,
@@ -285,6 +281,23 @@ class GPRDataImporter:
         return channels
 
     @staticmethod
+    def _build_frequency_time_meta(
+        header: DatFileHeader,
+        frequency_channels: Sequence[np.ndarray],
+    ) -> tuple[float, float, float]:
+        sample_count = next(
+            (int(channel.shape[0]) for channel in frequency_channels if channel.ndim >= 1 and channel.shape[0] > 1),
+            int(header.sample_count),
+        )
+        bandwidth_hz = float(header.end_frequency_hz) - float(header.start_frequency_hz)
+        if sample_count > 1 and bandwidth_hz > 0:
+            dt_ns = 1e9 / bandwidth_hz
+            tw_ns = dt_ns * (sample_count - 1)
+            fs_hz = 1.0 / (dt_ns * 1e-9)
+            return tw_ns, dt_ns, fs_hz
+        return 0.0, 0.0, 0.0
+
+    @staticmethod
     def _sanitize_frequency_channel(channel: np.ndarray) -> np.ndarray:
         arr = np.asarray(channel, dtype=np.complex64).copy()
         invalid = ~np.isfinite(arr)
@@ -307,126 +320,6 @@ class GPRDataImporter:
             arr[:, trace_idx] = real + 1j * imag
         arr[~np.isfinite(arr)] = 0.0
         return arr
-
-    def _transform_channels(
-        self,
-        data_array: Sequence[np.ndarray],
-        header: DatFileHeader,
-        params: DataImportParameters,
-    ) -> List[np.ndarray]:
-        t0 = params.tw_start_ns * 1e-9
-        t1 = params.tw_end_ns * 1e-9
-        f_start_usr = params.f_start_hz or header.start_frequency_hz
-        f_end_usr = params.f_end_hz or header.end_frequency_hz
-        sample_new = params.sample_count or header.sample_count
-        fs_bandwidth = f_end_usr - f_start_usr
-        kw = np.kaiser(sample_new, params.beta).astype(np.float32)
-        chunk_size = max(1, int(params.chunk_size))
-
-        if params.tf_method == 1:
-            ts_val = 1.0 / (fs_bandwidth / sample_new)
-            W = np.exp(1j * 2.0 * np.pi * (t1 - t0) / sample_new / ts_val)
-            A = np.exp(1j * 2.0 * np.pi * (-t0) / ts_val)
-        else:
-            t = np.linspace(t0, t1, sample_new).reshape(-1, 1)
-
-        data_out: List[np.ndarray] = []
-        for raw_mat in data_array:
-            if raw_mat.size == 0:
-                data_out.append(np.empty((0, 0), dtype=np.float32))
-                continue
-
-            I = raw_mat[0::2, :]
-            Q = raw_mat[1::2, :]
-            C = (I + 1j * Q).astype(np.complex64)
-            C, _, _, _ = trim_bad_tail_by_energy(C, 0.85, 100, 21)
-            n_freq, n_traces = C.shape
-            final_res = np.zeros((sample_new, n_traces), dtype=np.complex64)
-            orig_freq = np.linspace(header.start_frequency_hz, header.end_frequency_hz, n_freq)
-            target_freq = np.linspace(f_start_usr, f_end_usr, sample_new)
-            need_interp = len(orig_freq) != len(target_freq) or np.any(np.abs(orig_freq - target_freq) > 1)
-
-            for start in range(0, n_traces, chunk_size):
-                end = min(start + chunk_size, n_traces)
-                curr_cols = slice(start, end)
-                C_sub = C[:, curr_cols]
-
-                if need_interp:
-                    try:
-                        real_interp = interpolate.interp1d(
-                            orig_freq, C_sub.real, axis=0, kind="cubic", fill_value="extrapolate"
-                        )
-                        imag_interp = interpolate.interp1d(
-                            orig_freq, C_sub.imag, axis=0, kind="cubic", fill_value="extrapolate"
-                        )
-                        C_sub_interp = real_interp(target_freq) + 1j * imag_interp(target_freq)
-                    except Exception:
-                        C_sub_interp = C_sub
-                else:
-                    C_sub_interp = C_sub
-
-                if params.zero_correct:
-                    C_sub_corrected, _ = correct_direct_wave(C_sub_interp, target_freq)
-                    C_windowed = C_sub_corrected * kw[:, None]
-                else:
-                    C_windowed = C_sub_interp * kw[:, None]
-
-                if params.tf_method == 1:
-                    res_chunk = signal.czt(C_windowed, m=sample_new, w=W, a=A, axis=0)
-                else:
-                    if params.zero_correct:
-                        res_chunk = isdft_soft_phys(
-                            C_windowed,
-                            f_start_usr,
-                            f_end_usr,
-                            t.ravel(),
-                            params.isdft.alpha,
-                            params.isdft.th_db,
-                            params.isdft.smooth_len,
-                            0,
-                            params.isdft.ramp_ns,
-                        )
-                    else:
-                        _, tau_base = correct_direct_wave(C_sub_interp, target_freq)
-                        res_chunk = isdft_soft_phys(
-                            C_windowed,
-                            f_start_usr,
-                            f_end_usr,
-                            t.ravel(),
-                            params.isdft.alpha,
-                            params.isdft.th_db,
-                            params.isdft.smooth_len,
-                            tau_base,
-                            params.isdft.ramp_ns,
-                        )
-                final_res[:, curr_cols] = self._extract_attribute(res_chunk, params.selected_attr_idx)
-
-            if params.selected_attr_idx != 1:
-                final_res = final_res.real.astype(np.float32)
-            data_out.append(final_res)
-        return data_out
-
-    def _extract_attribute(self, res_chunk: np.ndarray, attr_idx: int) -> np.ndarray:
-        if attr_idx == 1:
-            return res_chunk
-        if attr_idx == 2:
-            return np.real(res_chunk)
-        if attr_idx == 3:
-            return np.abs(res_chunk)
-        if attr_idx == 4:
-            temp = np.abs(res_chunk)
-            return np.vstack([np.diff(temp, axis=0), np.zeros((1, temp.shape[1]), dtype=temp.dtype)])
-        if attr_idx == 5:
-            temp = np.abs(res_chunk)
-            return np.vstack([np.diff(temp, n=2, axis=0), np.zeros((2, temp.shape[1]), dtype=temp.dtype)])
-        if attr_idx == 6:
-            return np.angle(res_chunk)
-        if attr_idx == 7:
-            return np.cos(np.angle(res_chunk))
-        if attr_idx == 8:
-            u_ph = np.unwrap(np.angle(res_chunk), axis=0)
-            return np.vstack([np.diff(u_ph, axis=0), np.zeros((1, u_ph.shape[1]), dtype=u_ph.dtype)])
-        return res_chunk
 
     @classmethod
     def _extract_navigation_sample(

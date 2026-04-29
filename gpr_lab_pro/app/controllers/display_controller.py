@@ -38,6 +38,7 @@ class DisplayController:
         time_meta = self._resolve_time_meta(dataset, snapshot)
         dt_ns = float(time_meta["dt_ns"])
         tw_ns = float(time_meta["tw_ns"])
+        time_offset_ns = float(time_meta["t0_ns"])
 
         bscan_key = (
             snapshot.snapshot_id,
@@ -56,6 +57,7 @@ class DisplayController:
                 dt_ns,
                 display_state,
                 selection_state,
+                time_offset_ns=time_offset_ns,
             )
             self._bscan_cache_key = bscan_key
             self._bscan_cache_value = (bscan, bscan_limits, bscan_range)
@@ -92,6 +94,7 @@ class DisplayController:
             snapshot.data,
             selection_state,
             dt_ns=dt_ns,
+            time_offset_ns=time_offset_ns,
         )
         display = DisplayData(
             bscan=bscan,
@@ -109,6 +112,7 @@ class DisplayController:
             meta={
                 "tw_ns": tw_ns,
                 "dt_ns": dt_ns,
+                "t0_ns": time_offset_ns,
                 "line_count": dataset.line_count,
                 "trace_count": dataset.trace_count,
                 "sample_count": int(snapshot.data.shape[0]) if snapshot.data.ndim >= 1 else dataset.sample_count,
@@ -174,9 +178,10 @@ class DisplayController:
             return
         self.selection_state.trace_index = int(np.clip(trace_index, 0, dataset.trace_count - 1))
         dt_ns = max(self._resolve_time_meta(dataset, snapshot)["dt_ns"], 1e-9)
+        time_offset_ns = float(self._resolve_time_meta(dataset, snapshot)["t0_ns"])
         max_sample_index = int(snapshot.data.shape[0] - 1) if snapshot.data.ndim >= 1 else int(dataset.sample_count - 1)
         self.selection_state.sample_index = int(
-            np.clip(round(time_ns / dt_ns), 0, max_sample_index)
+            np.clip(round((time_ns - time_offset_ns) / dt_ns), 0, max_sample_index)
         )
 
     def select_line(self, line_index: int) -> None:
@@ -204,14 +209,16 @@ class DisplayController:
         if snapshot.domain is DataDomain.TIME:
             dt_ns = float(snapshot.meta.get("dt_ns", 0.0) or 0.0)
             tw_ns = float(snapshot.meta.get("tw_ns", 0.0) or 0.0)
+            t0_ns = float(snapshot.meta.get("t0_ns", 0.0) or 0.0)
         else:
             dt_ns = 0.0
             tw_ns = 0.0
+            t0_ns = 0.0
         if dt_ns <= 0:
             dt_ns = float(dataset.transformed_dt_ns())
         if tw_ns <= 0:
             tw_ns = float(dataset.transformed_time_window_ns())
-        return {"dt_ns": dt_ns, "tw_ns": tw_ns}
+        return {"dt_ns": dt_ns, "tw_ns": tw_ns, "t0_ns": t0_ns}
 
     @staticmethod
     def _build_crossline(volume: np.ndarray, display_state, selection_state) -> tuple[np.ndarray, tuple[float | None, float | None]]:
