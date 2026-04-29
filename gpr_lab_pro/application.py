@@ -194,14 +194,15 @@ class GPRApplication(QtCore.QObject):
         return self.task_controller.cancel_current_task()
 
     def current_time_window_ns(self) -> float:
+        dataset = self.dataset
+        dataset_tw_ns = dataset.transformed_time_window_ns() if dataset is not None else 0.0
         snapshot = self.result_state.active_snapshot
         if snapshot is not None and snapshot.domain is DataDomain.TIME:
             value = float(snapshot.meta.get("tw_ns", 0.0) or 0.0)
             if value > 0:
-                return value
-        dataset = self.dataset
-        if dataset is not None:
-            return dataset.transformed_time_window_ns()
+                return max(value, dataset_tw_ns)
+        if dataset_tw_ns > 0:
+            return dataset_tw_ns
         return max(60.0, self.display_state.end_time_ns)
 
     def current_dt_ns(self) -> float:

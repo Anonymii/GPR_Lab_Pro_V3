@@ -69,6 +69,9 @@ class DatasetRecord:
 
     @property
     def sample_count(self) -> int:
+        header_sample_count = int(self.header.get("sample_count", 0) or 0)
+        if header_sample_count > 0:
+            return header_sample_count
         return int(self.volume.shape[0]) if self.volume.ndim == 3 else 0
 
     @property
@@ -102,14 +105,23 @@ class DatasetRecord:
         sample_start: int,
         sample_stop: int,
         region_name: str,
+        crop_samples: bool = True,
     ) -> "DatasetRecord":
-        sample0 = int(np.clip(sample_start, 0, max(self.sample_count - 1, 0)))
-        sample1 = int(np.clip(sample_stop, sample0 + 1, max(self.sample_count, 1)))
+        logical_sample_count = max(int(self.sample_count), 1)
+        volume_sample_count = int(self.volume.shape[0]) if self.volume.ndim == 3 else 0
+        sample0 = int(np.clip(sample_start, 0, max(logical_sample_count - 1, 0)))
+        sample1 = int(np.clip(sample_stop, sample0 + 1, logical_sample_count))
         trace0 = int(np.clip(trace_start, 0, max(self.trace_count - 1, 0)))
         trace1 = int(np.clip(trace_stop, trace0 + 1, max(self.trace_count, 1)))
         line0 = int(np.clip(line_start, 0, max(self.line_count - 1, 0)))
         line1 = int(np.clip(line_stop, line0 + 1, max(self.line_count, 1)))
-        cropped = self.volume[sample0:sample1, trace0:trace1, line0:line1].copy()
+        if crop_samples:
+            crop_sample0 = int(np.clip(sample0, 0, max(volume_sample_count - 1, 0)))
+            crop_sample1 = int(np.clip(sample1, crop_sample0 + 1, max(volume_sample_count, 1)))
+        else:
+            crop_sample0 = 0
+            crop_sample1 = max(volume_sample_count, 1)
+        cropped = self.volume[crop_sample0:crop_sample1, trace0:trace1, line0:line1].copy()
         header = dict(self.header)
         header["region_sample_start"] = sample0
         header["region_sample_stop"] = sample1

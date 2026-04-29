@@ -29,6 +29,7 @@ class PipelineExecutor:
         cancel_callback=None,
         previous_steps: list[PipelineStep] | None = None,
         previous_snapshots: list[ResultSnapshot] | None = None,
+        display_time_window_ns: tuple[float, float] | None = None,
     ) -> list[ResultSnapshot]:
         snapshots = self.runtime.execute(
             dataset,
@@ -37,6 +38,7 @@ class PipelineExecutor:
             cancel_callback=cancel_callback,
             previous_steps=previous_steps,
             previous_snapshots=previous_snapshots,
+            display_time_window_ns=display_time_window_ns,
         )
         self.cache_manager.clear()
         self.cache_manager.store_many(snapshots)

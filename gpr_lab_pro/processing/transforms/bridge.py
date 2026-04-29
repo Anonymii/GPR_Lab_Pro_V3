@@ -30,6 +30,10 @@ class TimeFrequencyTransformBridge:
         self.direct_operator.configure(dataset)
         return self
 
+    def configure_display_time_window(self, window_ns: tuple[float, float] | None) -> "TimeFrequencyTransformBridge":
+        self.direct_operator.configure_display_time_window(window_ns)
+        return self
+
     def describe(self) -> dict[str, tuple[str, ...]]:
         return {
             "role": ("frequency-domain input", "time-frequency transform", "time-domain output"),

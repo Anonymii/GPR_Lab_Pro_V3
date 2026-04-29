@@ -288,6 +288,7 @@ class PipelineController:
         previous_steps: list[PipelineStep] | None = None,
         previous_snapshots: list | None = None,
     ):
+        display_state = self.context.display_state
         return self.context.pipeline_executor.execute(
             dataset,
             steps,
@@ -295,6 +296,10 @@ class PipelineController:
             cancel_callback=cancel_callback,
             previous_steps=previous_steps,
             previous_snapshots=previous_snapshots,
+            display_time_window_ns=(
+                float(display_state.start_time_ns),
+                float(display_state.end_time_ns),
+            ),
         )
 
     def apply_execution_result(self, snapshots: list) -> None:

@@ -21,13 +21,20 @@ class V11TimeFrequencyBridgeOperator:
     DEFAULT_IFFT_USE_FULL_BW: bool = True
     DEFAULT_IFFT_MIN_FREQ_MHZ: float = 30.0
     DEFAULT_IFFT_MAX_FREQ_MHZ: float = 3000.0
+    DEFAULT_TARGET_START_NS: float = 0.0
+    DEFAULT_TARGET_END_NS: float = 60.0
 
     def __init__(self, dataset: DatasetRecord | None = None) -> None:
         self.dataset = dataset
         self._last_time_meta: dict[str, float] = {}
+        self._display_time_window_ns: tuple[float, float] | None = None
 
     def configure(self, dataset: DatasetRecord) -> "V11TimeFrequencyBridgeOperator":
         self.dataset = dataset
+        return self
+
+    def configure_display_time_window(self, window_ns: tuple[float, float] | None) -> "V11TimeFrequencyBridgeOperator":
+        self._display_time_window_ns = window_ns
         return self
 
     def supports(self, op_type: str) -> bool:
@@ -49,7 +56,7 @@ class V11TimeFrequencyBridgeOperator:
     def _ifft_transform(self, data: np.ndarray, operation: PipelineOperation, progress_callback=None, cancel_callback=None) -> np.ndarray:
         cfg = self._resolve_ifft_config(operation.params)
         start_freq_hz, end_freq_hz = self._resolve_ifft_frequency_band(cfg["use_full_bw"], cfg["min_freq_mhz"], cfg["max_freq_mhz"])
-        sample_new = data.shape[0]
+        sample_new = self._resolve_transform_sample_count(data)
         resampled = self._resample_frequency_data(data, sample_new, start_freq_hz, end_freq_hz)
         check_cancelled(cancel_callback)
         self._report_progress(progress_callback, 40, "正在进行 IFFT 频域加窗")
@@ -64,7 +71,7 @@ class V11TimeFrequencyBridgeOperator:
     def _czt_transform(self, data: np.ndarray, operation: PipelineOperation, progress_callback=None, cancel_callback=None) -> np.ndarray:
         cfg = self._resolve_czt_config(operation.params)
         start_freq_hz, end_freq_hz = self._resolve_dataset_frequency_band()
-        sample_new = data.shape[0]
+        sample_new = self._resolve_transform_sample_count(data)
         prepared, _ = self._prepare_transform_input(
             data,
             sample_new=sample_new,
@@ -77,9 +84,10 @@ class V11TimeFrequencyBridgeOperator:
             cancel_callback=cancel_callback,
             stage_name="CZT",
         )
-        time_meta = self._build_band_time_meta(start_freq_hz, end_freq_hz, sample_new, 0.0)
-        t0_s = 0.0
-        t1_s = time_meta["tw_ns"] * 1e-9
+        target_start_ns, target_end_ns = self._resolve_target_time_window_ns()
+        time_meta = self._build_requested_time_meta(target_start_ns, target_end_ns, sample_new)
+        t0_s = target_start_ns * 1e-9
+        t1_s = target_end_ns * 1e-9
         bandwidth = max(end_freq_hz - start_freq_hz, 1.0)
         ts_val = 1.0 / (bandwidth / sample_new)
         w_value = np.exp(1j * 2.0 * np.pi * (t1_s - t0_s) / sample_new / ts_val)
@@ -94,7 +102,7 @@ class V11TimeFrequencyBridgeOperator:
     def _isdft_transform(self, data: np.ndarray, operation: PipelineOperation, progress_callback=None, cancel_callback=None) -> np.ndarray:
         cfg = self._resolve_isdft_config(operation.params)
         start_freq_hz, end_freq_hz = self._resolve_dataset_frequency_band()
-        sample_new = data.shape[0]
+        sample_new = self._resolve_transform_sample_count(data)
         prepared, tau_bases = self._prepare_transform_input(
             data,
             sample_new=sample_new,
@@ -107,8 +115,9 @@ class V11TimeFrequencyBridgeOperator:
             cancel_callback=cancel_callback,
             stage_name="ISDFT",
         )
-        time_meta = self._build_band_time_meta(start_freq_hz, end_freq_hz, sample_new, 0.0)
-        t = np.linspace(0.0, time_meta["tw_ns"] * 1e-9, sample_new)
+        target_start_ns, target_end_ns = self._resolve_target_time_window_ns()
+        time_meta = self._build_requested_time_meta(target_start_ns, target_end_ns, sample_new)
+        t = np.linspace(target_start_ns * 1e-9, target_end_ns * 1e-9, sample_new)
         out = np.zeros_like(prepared, dtype=np.complex64)
         for line_idx in range(prepared.shape[2]):
             check_cancelled(cancel_callback)
@@ -206,6 +215,24 @@ class V11TimeFrequencyBridgeOperator:
             "max_freq_mhz": self._float_param(params, 3, self.DEFAULT_IFFT_MAX_FREQ_MHZ),
         }
 
+    def _resolve_target_time_window_ns(self) -> tuple[float, float]:
+        if self._display_time_window_ns is not None:
+            start_ns = float(self._display_time_window_ns[0])
+            end_ns = float(self._display_time_window_ns[1])
+        else:
+            start_ns = self.DEFAULT_TARGET_START_NS
+            end_ns = self.DEFAULT_TARGET_END_NS
+        start_ns = max(0.0, start_ns)
+        end_ns = max(start_ns + 1e-6, end_ns)
+        return start_ns, end_ns
+
+    def _resolve_transform_sample_count(self, data: np.ndarray) -> int:
+        if self.dataset is not None:
+            header_sample_count = int(self.dataset.header.get("sample_count", 0) or 0)
+            if header_sample_count > 1:
+                return header_sample_count
+        return max(int(data.shape[0]), 1)
+
     def _import_params(self) -> dict[str, object]:
         if self.dataset is None or not isinstance(self.dataset.import_params, dict):
             return {}
@@ -284,6 +311,22 @@ class V11TimeFrequencyBridgeOperator:
             "t0_ns": float(t0_ns),
             "tw_ns": tw_ns,
             "dt_ns": dt_ns,
+        }
+
+    @staticmethod
+    def _build_requested_time_meta(start_ns: float, end_ns: float, sample_count: int) -> dict[str, float]:
+        if sample_count > 1:
+            dt_ns = (float(end_ns) - float(start_ns)) / float(sample_count - 1)
+            tw_ns = dt_ns * float(sample_count - 1)
+        else:
+            dt_ns = 0.0
+            tw_ns = 0.0
+        return {
+            "t0_ns": float(start_ns),
+            "tw_ns": tw_ns,
+            "dt_ns": dt_ns,
+            "transform_window_start_ns": float(start_ns),
+            "transform_window_end_ns": float(end_ns),
         }
 
     @staticmethod

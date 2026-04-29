@@ -153,14 +153,16 @@ class ProjectController:
         dataset = self.context.dataset_state.datasets_by_id.get(region.dataset_id)
         if dataset is None:
             return None
+        sample_start, sample_stop = self._resolve_region_sample_bounds(region, dataset)
         return dataset.crop_region(
-            sample_start=region.sample_start,
-            sample_stop=region.sample_stop,
+            sample_start=sample_start,
+            sample_stop=sample_stop,
             trace_start=region.trace_start,
             trace_stop=region.trace_stop,
             line_start=region.line_start,
             line_stop=region.line_stop,
             region_name=f"{dataset.filename} - {region.name}",
+            crop_samples=False,
         )
 
     def overview_depth_sample_index(self) -> int:
@@ -736,6 +738,18 @@ class ProjectController:
         start_idx = int(max(0, min(int(start), full_count - 1)))
         stop_idx = int(max(start_idx + 1, min(int(stop), full_count)))
         return (start_idx, stop_idx)
+
+    @staticmethod
+    def _resolve_region_sample_bounds(region: ProjectRegionState, dataset: DatasetRecord) -> tuple[int, int]:
+        sample_start = int(region.sample_start)
+        sample_stop = int(region.sample_stop)
+        logical_sample_count = max(int(dataset.sample_count), 1)
+        raw_sample_count = int(dataset.volume.shape[0]) if dataset.volume.ndim == 3 else 0
+        # Old frequency-domain regions used the raw frequency-bin count as the sample upper bound.
+        # Treat that exact full-range pattern as "no time crop" after the transform.
+        if sample_start == 0 and logical_sample_count > raw_sample_count > 0 and sample_stop >= raw_sample_count:
+            sample_stop = logical_sample_count
+        return ProjectController._normalize_bounds(sample_start, sample_stop, logical_sample_count)
 
     @staticmethod
     def _next_region_name(file_item: ProjectFileState, *, preferred: str | None = None) -> str:
