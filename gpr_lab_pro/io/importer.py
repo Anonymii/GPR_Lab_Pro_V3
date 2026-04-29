@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import math
 from pathlib import Path
 import struct
 from typing import List, Sequence
@@ -10,7 +11,7 @@ from scipy import interpolate, signal
 
 from gpr_lab_pro.algorithms import correct_direct_wave, isdft_soft_phys
 from gpr_lab_pro.infrastructure.workers import WorkerCancelled
-from gpr_lab_pro.io.dat_loader import DatFileHeader, read_dat_header
+from gpr_lab_pro.io.dat_loader import DatFileHeader, read_dat_frame_header_from_handle, read_dat_header
 
 
 ATTRIBUTES = {
@@ -48,6 +49,15 @@ class DataImportParameters:
     chunk_size: int = 10000
 
 
+@dataclass(frozen=True)
+class ImportedNavigationSample:
+    trace_index: int
+    latitude: float
+    longitude: float
+    gps_status: int | None = None
+    gps_timestamp: int | None = None
+
+
 @dataclass
 class ImportedGPRData:
     channels: List[np.ndarray]
@@ -58,6 +68,8 @@ class ImportedGPRData:
     fs_hz: float
     attribute: str
     transform_name: str
+    navigation_samples: list[ImportedNavigationSample] = field(default_factory=list)
+    gps_metadata_present: bool = False
 
     def as_3d(self) -> np.ndarray:
         if not self.channels:
@@ -86,7 +98,12 @@ class GPRDataImporter:
         header = read_dat_header(path)
         self._check_cancelled(cancel_callback)
         self._report_progress(progress_callback, 5, "已读取文件头，正在扫描数据帧")
-        parsed_channels = self._read_frames(path, header, progress_callback=progress_callback, cancel_callback=cancel_callback)
+        parsed_channels, navigation_samples, gps_metadata_present = self._read_frames(
+            path,
+            header,
+            progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
+        )
         self._check_cancelled(cancel_callback)
         self._report_progress(progress_callback, 92, "正在整理原始频域数据")
         frequency_channels = self._to_frequency_channels(parsed_channels)
@@ -106,9 +123,17 @@ class GPRDataImporter:
             fs_hz=fs_hz,
             attribute="RawComplex",
             transform_name="未转换",
+            navigation_samples=navigation_samples,
+            gps_metadata_present=bool(gps_metadata_present),
         )
 
-    def _read_frames(self, path: Path, header: DatFileHeader, progress_callback=None, cancel_callback=None) -> List[np.ndarray]:
+    def _read_frames(
+        self,
+        path: Path,
+        header: DatFileHeader,
+        progress_callback=None,
+        cancel_callback=None,
+    ) -> tuple[List[np.ndarray], list[ImportedNavigationSample], bool]:
         with path.open("rb") as fh:
             fh.seek(0, 2)
             file_end_pos = fh.tell()
@@ -163,12 +188,14 @@ class GPRDataImporter:
             data_cols: list[list[np.ndarray]] = [[] for _ in range(total_lines)]
             current_p = start_p_data
             keep_frame_cnt = 0
-            drop_frame_cnt = 0
+            navigation_rows: list[ImportedNavigationSample | None] = []
+            gps_metadata_present = False
 
             while current_p + 32 < file_end_pos:
                 self._check_cancelled(cancel_callback)
                 frame_ok = True
                 frame_blocks: list[bytes | None] = [None] * num_blocks
+                frame_navigation_meta: list[tuple[int | None, int | None, float | None, float | None]] = []
                 block_idx = 0
                 while block_idx < num_blocks:
                     self._check_cancelled(cancel_callback)
@@ -182,6 +209,14 @@ class GPRDataImporter:
                         break
                     if int(send_channel) != expected_send_seq[block_idx]:
                         frame_ok = False
+                    frame_header = read_dat_frame_header_from_handle(fh, current_p)
+                    gps_status = int(frame_header.gps_status)
+                    gps_timestamp = int(frame_header.gps_timestamp)
+                    longitude = float(frame_header.longitude)
+                    latitude = float(frame_header.latitude)
+                    if gps_status != 0 or gps_timestamp != 0 or self._is_valid_geo(latitude, longitude):
+                        gps_metadata_present = True
+                    frame_navigation_meta.append((gps_status, gps_timestamp, latitude, longitude))
                     payload_p = current_p + header.frame_header_size
                     if frame_ok:
                         fh.seek(payload_p)
@@ -192,7 +227,6 @@ class GPRDataImporter:
                         break
 
                 if (not frame_ok) or block_idx < num_blocks:
-                    drop_frame_cnt += 1
                     while current_p + 32 < file_end_pos:
                         sync_send = self._read_uint16(fh, current_p + 4)
                         if sync_send is None or int(sync_send) == first_send_expected:
@@ -203,7 +237,9 @@ class GPRDataImporter:
                         current_p += header.frame_header_size + sz
                     continue
 
+                trace_index = keep_frame_cnt
                 keep_frame_cnt += 1
+                navigation_rows.append(self._extract_navigation_sample(trace_index, frame_navigation_meta))
                 for bb in range(num_blocks):
                     self._check_cancelled(cancel_callback)
                     payload = frame_blocks[bb]
@@ -234,7 +270,7 @@ class GPRDataImporter:
                     data_array.append(np.empty((0, 0), dtype=np.float32))
                 else:
                     data_array.append(np.column_stack(cols).astype(np.float32, copy=False))
-            return data_array
+            return data_array, self._finalize_navigation_samples(navigation_rows), gps_metadata_present
 
     def _to_frequency_channels(self, data_array: Sequence[np.ndarray]) -> List[np.ndarray]:
         channels: List[np.ndarray] = []
@@ -244,8 +280,33 @@ class GPRDataImporter:
                 continue
             i_part = raw_mat[0::2, :]
             q_part = raw_mat[1::2, :]
-            channels.append((i_part + 1j * q_part).astype(np.complex64))
+            channel = (i_part + 1j * q_part).astype(np.complex64)
+            channels.append(self._sanitize_frequency_channel(channel))
         return channels
+
+    @staticmethod
+    def _sanitize_frequency_channel(channel: np.ndarray) -> np.ndarray:
+        arr = np.asarray(channel, dtype=np.complex64).copy()
+        invalid = ~np.isfinite(arr)
+        if not np.any(invalid):
+            return arr
+        for trace_idx in range(arr.shape[1]):
+            trace = arr[:, trace_idx]
+            mask = np.isfinite(trace)
+            if np.all(mask):
+                continue
+            if not np.any(mask):
+                arr[:, trace_idx] = 0.0
+                continue
+            valid_idx = np.flatnonzero(mask)
+            invalid_idx = np.flatnonzero(~mask)
+            real = trace.real
+            imag = trace.imag
+            real[invalid_idx] = np.interp(invalid_idx, valid_idx, real[valid_idx]).astype(np.float32, copy=False)
+            imag[invalid_idx] = np.interp(invalid_idx, valid_idx, imag[valid_idx]).astype(np.float32, copy=False)
+            arr[:, trace_idx] = real + 1j * imag
+        arr[~np.isfinite(arr)] = 0.0
+        return arr
 
     def _transform_channels(
         self,
@@ -366,6 +427,96 @@ class GPRDataImporter:
             u_ph = np.unwrap(np.angle(res_chunk), axis=0)
             return np.vstack([np.diff(u_ph, axis=0), np.zeros((1, u_ph.shape[1]), dtype=u_ph.dtype)])
         return res_chunk
+
+    @classmethod
+    def _extract_navigation_sample(
+        cls,
+        trace_index: int,
+        frame_navigation_meta: Sequence[tuple[int | None, int | None, float | None, float | None]],
+    ) -> ImportedNavigationSample | None:
+        best_sample: ImportedNavigationSample | None = None
+        best_rank: tuple[int, int, int] | None = None
+        for gps_status, gps_timestamp, latitude, longitude in frame_navigation_meta:
+            if not cls._is_valid_geo(latitude, longitude):
+                continue
+            timestamp_present = int((gps_timestamp or 0) != 0)
+            rank = (
+                int(gps_status or 0),
+                timestamp_present,
+                int(abs(float(latitude)) + abs(float(longitude)) > 0.0),
+            )
+            candidate = ImportedNavigationSample(
+                trace_index=trace_index,
+                latitude=float(latitude),
+                longitude=float(longitude),
+                gps_status=(None if gps_status is None else int(gps_status)),
+                gps_timestamp=(None if gps_timestamp in (None, 0) else int(gps_timestamp)),
+            )
+            if best_rank is None or rank > best_rank:
+                best_sample = candidate
+                best_rank = rank
+        return best_sample
+
+    @staticmethod
+    def _finalize_navigation_samples(
+        navigation_rows: Sequence[ImportedNavigationSample | None],
+    ) -> list[ImportedNavigationSample]:
+        if not navigation_rows:
+            return []
+        valid_rows = [
+            (index, sample)
+            for index, sample in enumerate(navigation_rows)
+            if sample is not None
+        ]
+        if not valid_rows:
+            return []
+
+        total = len(navigation_rows)
+        if len(valid_rows) == 1:
+            _, sample = valid_rows[0]
+            return [
+                ImportedNavigationSample(
+                    trace_index=index,
+                    latitude=float(sample.latitude),
+                    longitude=float(sample.longitude),
+                    gps_status=sample.gps_status,
+                    gps_timestamp=sample.gps_timestamp,
+                )
+                for index in range(total)
+            ]
+
+        trace_positions = np.array([index for index, _ in valid_rows], dtype=float)
+        latitude_values = np.array([float(sample.latitude) for _, sample in valid_rows], dtype=float)
+        longitude_values = np.array([float(sample.longitude) for _, sample in valid_rows], dtype=float)
+        all_positions = np.arange(total, dtype=float)
+        filled_latitudes = np.interp(all_positions, trace_positions, latitude_values)
+        filled_longitudes = np.interp(all_positions, trace_positions, longitude_values)
+
+        finalized: list[ImportedNavigationSample] = []
+        for index in range(total):
+            original = navigation_rows[index]
+            finalized.append(
+                ImportedNavigationSample(
+                    trace_index=index,
+                    latitude=float(filled_latitudes[index]),
+                    longitude=float(filled_longitudes[index]),
+                    gps_status=(None if original is None else original.gps_status),
+                    gps_timestamp=(None if original is None else original.gps_timestamp),
+                )
+            )
+        return finalized
+
+    @staticmethod
+    def _is_valid_geo(latitude: float | None, longitude: float | None) -> bool:
+        if latitude is None or longitude is None:
+            return False
+        lat = float(latitude)
+        lon = float(longitude)
+        if not math.isfinite(lat) or not math.isfinite(lon):
+            return False
+        if abs(lat) > 90.0 or abs(lon) > 180.0:
+            return False
+        return abs(lat) > 1e-9 or abs(lon) > 1e-9
 
     @staticmethod
     def _read_uint16(fh, pos: int) -> int | None:

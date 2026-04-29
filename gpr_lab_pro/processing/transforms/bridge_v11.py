@@ -116,16 +116,19 @@ class V11TimeFrequencyBridgeOperator:
         return max(int(fallback_count), estimated)
 
     def _resample_frequency_data(self, data: np.ndarray, target_count: int) -> np.ndarray:
-        source_count = int(data.shape[0])
+        safe_data = np.asarray(data, dtype=np.complex64)
+        if not np.all(np.isfinite(safe_data)):
+            safe_data = np.nan_to_num(safe_data, nan=0.0, posinf=0.0, neginf=0.0).astype(np.complex64, copy=False)
+        source_count = int(safe_data.shape[0])
         if target_count <= 0 or target_count == source_count:
-            return np.asarray(data, dtype=np.complex64)
+            return safe_data
         start_freq = float(self.dataset.header.get("start_frequency_hz", 0.0))
         end_freq = float(self.dataset.header.get("end_frequency_hz", 0.0))
         if end_freq <= start_freq:
-            return np.asarray(data, dtype=np.complex64)
+            return safe_data
         orig_freq = np.linspace(start_freq, end_freq, source_count, dtype=np.float64)
         target_freq = np.linspace(start_freq, end_freq, target_count, dtype=np.float64)
-        reshaped = np.asarray(data, dtype=np.complex64).reshape(source_count, -1)
+        reshaped = safe_data.reshape(source_count, -1)
         interpolator = interp1d(
             orig_freq,
             reshaped,

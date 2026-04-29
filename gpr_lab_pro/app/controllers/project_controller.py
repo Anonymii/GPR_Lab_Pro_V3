@@ -572,7 +572,7 @@ class ProjectController:
         dataset_id = dataset.dataset_id or uuid.uuid4().hex
         dataset.dataset_id = dataset_id
         region = self._create_default_region(dataset)
-        navigation = self._create_simulated_navigation(dataset, file_index=len(self.state.files))
+        navigation = self._create_navigation_for_dataset(dataset, file_index=len(self.state.files))
         return ProjectFileState(
             file_id=file_id,
             dataset_id=dataset_id,
@@ -635,29 +635,57 @@ class ProjectController:
                 sample.latitude is not None and sample.longitude is not None
                 for sample in file_item.navigation.samples
             )
-            if has_geo and self._navigation_within_offline_coverage(file_item.navigation):
+            if has_geo and file_item.navigation.mode != "simulated":
                 return file_item.navigation
+        if dataset is None:
+            return file_item.navigation
         file_index = next((idx for idx, item in enumerate(self.state.files) if item.file_id == file_item.file_id), 0)
-        file_item.navigation = self._create_simulated_navigation(dataset, file_index=file_index)
+        file_item.navigation = self._create_navigation_for_dataset(dataset, file_index=file_index)
         return file_item.navigation
 
+    def _create_navigation_for_dataset(self, dataset: DatasetRecord, *, file_index: int) -> NavigationTrack:
+        imported_navigation = self._create_imported_navigation(dataset)
+        if imported_navigation is not None:
+            return imported_navigation
+        if bool(dataset.gps_metadata_present):
+            return NavigationTrack(mode="gps_missing", source_path=dataset.source_path, samples=[])
+        return self._create_simulated_navigation(dataset, file_index=file_index)
+
     @staticmethod
-    def _navigation_within_offline_coverage(navigation: NavigationTrack) -> bool:
-        coverage = OnlineMapConfigStore.offline_tiles_coverage()
-        if coverage is None or not navigation.samples:
-            return True
-        margin_lat = max((coverage.max_lat - coverage.min_lat) * 0.02, 0.0001)
-        margin_lon = max((coverage.max_lon - coverage.min_lon) * 0.02, 0.0001)
-        for sample in navigation.samples:
-            lat = sample.latitude
-            lon = sample.longitude
-            if lat is None or lon is None:
-                return False
-            if not (coverage.min_lat - margin_lat <= lat <= coverage.max_lat + margin_lat):
-                return False
-            if not (coverage.min_lon - margin_lon <= lon <= coverage.max_lon + margin_lon):
-                return False
-        return True
+    def _create_imported_navigation(dataset: DatasetRecord) -> NavigationTrack | None:
+        samples = list(dataset.navigation_samples or [])
+        trace_count = int(dataset.trace_count)
+        if trace_count <= 0 or len(samples) != trace_count:
+            return None
+        geo_samples = [
+            sample
+            for sample in samples
+            if sample.latitude is not None and sample.longitude is not None
+        ]
+        if not geo_samples:
+            return None
+        latitudes = np.array([float(sample.latitude) for sample in geo_samples], dtype=float)
+        longitudes = np.array([float(sample.longitude) for sample in geo_samples], dtype=float)
+        base_lat = float(latitudes[0])
+        base_lon = float(longitudes[0])
+        center_lat = float(latitudes.mean())
+        meters_per_deg_lat = 111320.0
+        meters_per_deg_lon = max(111320.0 * float(np.cos(np.deg2rad(center_lat))), 1.0)
+        navigation_samples: list[NavigationSample] = []
+        for trace_index, sample in enumerate(samples):
+            latitude = float(sample.latitude)
+            longitude = float(sample.longitude)
+            navigation_samples.append(
+                NavigationSample(
+                    trace_index=trace_index,
+                    x=(longitude - base_lon) * meters_per_deg_lon,
+                    y=(latitude - base_lat) * meters_per_deg_lat,
+                    timestamp_s=None,
+                    latitude=latitude,
+                    longitude=longitude,
+                )
+            )
+        return NavigationTrack(mode="gps", source_path=dataset.source_path, samples=navigation_samples)
 
     def _create_simulated_navigation(self, dataset: DatasetRecord, *, file_index: int) -> NavigationTrack:
         trace_count = max(int(dataset.trace_count), 1)

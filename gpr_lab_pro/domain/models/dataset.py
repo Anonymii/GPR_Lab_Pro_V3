@@ -6,7 +6,7 @@ import uuid
 
 import numpy as np
 
-from gpr_lab_pro.io.importer import ImportedGPRData
+from gpr_lab_pro.io.importer import ImportedGPRData, ImportedNavigationSample
 from gpr_lab_pro.io.importers import DataImportParameters
 
 
@@ -24,6 +24,8 @@ class DatasetRecord:
     header: dict[str, Any] = field(default_factory=dict)
     source_path: str = ""
     import_params: dict[str, Any] = field(default_factory=dict)
+    navigation_samples: list[ImportedNavigationSample] = field(default_factory=list)
+    gps_metadata_present: bool = False
 
     @classmethod
     def from_import(
@@ -42,6 +44,7 @@ class DatasetRecord:
             "end_frequency_hz": imported.header.end_frequency_hz,
             "sample_count": imported.header.sample_count,
             "file_size": imported.header.file_size,
+            "gps_metadata_present": bool(imported.gps_metadata_present),
         }
         return cls(
             dataset_id=uuid.uuid4().hex,
@@ -56,6 +59,8 @@ class DatasetRecord:
             header=header,
             source_path=source_path,
             import_params=asdict(import_params or DataImportParameters()),
+            navigation_samples=list(imported.navigation_samples),
+            gps_metadata_present=bool(imported.gps_metadata_present),
         )
 
     @property
@@ -125,4 +130,6 @@ class DatasetRecord:
             header=header,
             source_path=self.source_path,
             import_params=dict(self.import_params),
+            navigation_samples=list(self.navigation_samples),
+            gps_metadata_present=bool(self.gps_metadata_present),
         )
