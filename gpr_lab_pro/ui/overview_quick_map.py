@@ -886,6 +886,16 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
                     continue
                 if not quad_rect.intersects(output.rect()):
                     continue
+                center_step = float(
+                    np.hypot(
+                        x_coords[col_index + 1] - x_coords[col_index],
+                        y_coords[col_index + 1] - y_coords[col_index],
+                    )
+                )
+                local_width = max(float(widths[col_index]), float(widths[col_index + 1]), 1.0)
+                row_step = abs(float(offset1 - offset0)) * local_width
+                if not self._quad_is_stable(target_quad, center_step=center_step, row_step=row_step, local_width=local_width):
+                    continue
                 quad_path = self._quad_path(target_quad)
                 source_quad = QtGui.QPolygonF(
                     [
@@ -1104,6 +1114,48 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         path.addPolygon(polygon)
         path.closeSubpath()
         return path
+
+    @staticmethod
+    def _quad_is_stable(
+        polygon: QtGui.QPolygonF,
+        *,
+        center_step: float,
+        row_step: float,
+        local_width: float,
+    ) -> bool:
+        if polygon.size() < 4:
+            return False
+        points = np.array([[float(polygon.at(idx).x()), float(polygon.at(idx).y())] for idx in range(4)], dtype=float)
+        if not np.all(np.isfinite(points)):
+            return False
+        edges = np.roll(points, -1, axis=0) - points
+        edge_lengths = np.hypot(edges[:, 0], edges[:, 1])
+        if float(np.min(edge_lengths)) < 0.05:
+            return False
+        cross_values = []
+        for idx in range(4):
+            first = points[(idx + 1) % 4] - points[idx]
+            second = points[(idx + 2) % 4] - points[(idx + 1) % 4]
+            cross_values.append(float(first[0] * second[1] - first[1] * second[0]))
+        crosses = np.asarray(cross_values, dtype=float)
+        if np.any(np.isclose(crosses, 0.0, atol=1e-4)):
+            return False
+        if not (np.all(crosses > 0.0) or np.all(crosses < 0.0)):
+            return False
+        rect = polygon.boundingRect()
+        max_span = max(float(rect.width()), float(rect.height()))
+        allowed_span = max(float(center_step) * 5.0, float(row_step) * 8.0, float(local_width) * 5.0, 64.0)
+        if max_span > allowed_span:
+            return False
+        polygon_area = 0.5 * abs(
+            float(np.dot(points[:, 0], np.roll(points[:, 1], -1)) - np.dot(points[:, 1], np.roll(points[:, 0], -1)))
+        )
+        if polygon_area <= 1e-4:
+            return False
+        bbox_area = max(float(rect.width()) * float(rect.height()), 1e-4)
+        if bbox_area / polygon_area > 18.0:
+            return False
+        return True
 
     @classmethod
     def _apply_path_alpha_mask(cls, image: QtGui.QImage, path: QtGui.QPainterPath) -> None:
