@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
+
 import numpy as np
 from scipy import signal
 from scipy.interpolate import interp1d
 
-from gpr_lab_pro.algorithms import correct_direct_wave, isdft_soft_phys
+from gpr_lab_pro.algorithms import (
+    apply_isdft_soft_phys_operator,
+    build_isdft_soft_phys_operator,
+    correct_direct_wave,
+    estimate_direct_wave_tau_base,
+    isdft_soft_phys,
+)
 from gpr_lab_pro.domain.models.dataset import DatasetRecord
 from gpr_lab_pro.models import PipelineOperation
 from gpr_lab_pro.processing.transforms.bridge_support import check_cancelled
@@ -18,6 +27,9 @@ class V11TimeFrequencyBridgeOperator:
     DEFAULT_ISDFT_TH_DB: float = -3.0
     DEFAULT_ISDFT_SMOOTH_LEN: int = 9
     DEFAULT_ISDFT_RAMP_NS: float = 3.0
+    DEFAULT_ISDFT_MAX_WORKERS: int = 4
+    DEFAULT_ISDFT_TRACE_BLOCK_SIZE: int = 4096
+    DEFAULT_PREPARE_MAX_WORKERS: int = 4
     DEFAULT_IFFT_USE_FULL_BW: bool = True
     DEFAULT_IFFT_MIN_FREQ_MHZ: float = 30.0
     DEFAULT_IFFT_MAX_FREQ_MHZ: float = 3000.0
@@ -118,24 +130,123 @@ class V11TimeFrequencyBridgeOperator:
         target_start_ns, target_end_ns = self._resolve_target_time_window_ns()
         time_meta = self._build_requested_time_meta(target_start_ns, target_end_ns, sample_new)
         t = np.linspace(target_start_ns * 1e-9, target_end_ns * 1e-9, sample_new)
+        out = self._run_isdft_lines(
+            prepared,
+            tau_bases,
+            start_freq_hz,
+            end_freq_hz,
+            t,
+            sample_new,
+            cfg,
+            progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
+        )
+        self._last_time_meta = time_meta
+        return out.astype(np.complex64, copy=False)
+
+    def _run_isdft_lines(
+        self,
+        prepared: np.ndarray,
+        tau_bases: np.ndarray,
+        start_freq_hz: float,
+        end_freq_hz: float,
+        t: np.ndarray,
+        sample_new: int,
+        cfg: dict[str, float | bool | int],
+        progress_callback=None,
+        cancel_callback=None,
+    ) -> np.ndarray:
         out = np.zeros_like(prepared, dtype=np.complex64)
-        for line_idx in range(prepared.shape[2]):
-            check_cancelled(cancel_callback)
-            self._report_line_progress(progress_callback, line_idx, prepared.shape[2], 55, 100, "正在执行 ISDFT")
-            tau_base = 0.0 if cfg["zero_correct"] else float(tau_bases[line_idx])
-            out[:, :, line_idx] = isdft_soft_phys(
-                prepared[:, :, line_idx],
+        total_lines = int(prepared.shape[2])
+        shared_operator = None
+        if cfg["zero_correct"]:
+            shared_operator = build_isdft_soft_phys_operator(
+                sample_new,
                 start_freq_hz,
                 end_freq_hz,
                 t,
                 cfg["alpha"],
                 cfg["th_db"],
                 cfg["smooth_len"],
-                tau_base,
+                0.0,
                 cfg["ramp_ns"],
             )
-        self._last_time_meta = time_meta
-        return out.astype(np.complex64, copy=False)
+
+        max_workers = self._resolve_isdft_workers(total_lines)
+        if max_workers <= 1:
+            for line_idx in range(total_lines):
+                check_cancelled(cancel_callback)
+                self._report_line_progress(progress_callback, line_idx, total_lines, 55, 100, "正在执行 ISDFT")
+                out[:, :, line_idx] = self._execute_isdft_line(
+                    prepared[:, :, line_idx],
+                    start_freq_hz,
+                    end_freq_hz,
+                    t,
+                    cfg,
+                    0.0 if cfg["zero_correct"] else float(tau_bases[line_idx]),
+                    shared_operator,
+                )
+            return out
+
+        def run_line(line_idx: int) -> tuple[int, np.ndarray]:
+            check_cancelled(cancel_callback)
+            tau_base = 0.0 if cfg["zero_correct"] else float(tau_bases[line_idx])
+            result = self._execute_isdft_line(
+                prepared[:, :, line_idx],
+                start_freq_hz,
+                end_freq_hz,
+                t,
+                cfg,
+                tau_base,
+                shared_operator,
+            )
+            check_cancelled(cancel_callback)
+            return line_idx, result
+
+        completed = 0
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="gpr-isdft") as executor:
+            futures = [executor.submit(run_line, line_idx) for line_idx in range(total_lines)]
+            try:
+                for future in as_completed(futures):
+                    check_cancelled(cancel_callback)
+                    line_idx, result = future.result()
+                    out[:, :, line_idx] = result
+                    self._report_line_progress(progress_callback, completed, total_lines, 55, 100, "正在执行 ISDFT")
+                    completed += 1
+            except Exception:
+                for future in futures:
+                    future.cancel()
+                raise
+        return out
+
+    def _execute_isdft_line(
+        self,
+        line_data: np.ndarray,
+        start_freq_hz: float,
+        end_freq_hz: float,
+        t: np.ndarray,
+        cfg: dict[str, float | bool | int],
+        tau_base: float,
+        shared_operator: np.ndarray | None,
+    ) -> np.ndarray:
+        if shared_operator is not None:
+            return apply_isdft_soft_phys_operator(
+                line_data,
+                shared_operator,
+                block_size=self.DEFAULT_ISDFT_TRACE_BLOCK_SIZE,
+            )
+        return isdft_soft_phys(
+            line_data,
+            start_freq_hz,
+            end_freq_hz,
+            t,
+            float(cfg["alpha"]),
+            float(cfg["th_db"]),
+            int(cfg["smooth_len"]),
+            tau_base,
+            float(cfg["ramp_ns"]),
+            block_size=self.DEFAULT_ISDFT_TRACE_BLOCK_SIZE,
+        )
 
     def _prepare_transform_input(
         self,
@@ -163,15 +274,81 @@ class V11TimeFrequencyBridgeOperator:
         else:
             self._report_progress(progress_callback, 10, f"正在进行 {stage_name} 频域加窗")
 
+        if not zero_correct and not need_tau_base:
+            prepared = (resampled * window[:, None, None]).astype(np.complex64, copy=False)
+            self._report_progress(progress_callback, 50, f"正在准备 {stage_name} 输入")
+            return prepared, tau_bases
+
+        max_workers = self._resolve_prepare_workers(total_lines)
+        if max_workers > 1:
+            return self._prepare_transform_input_parallel(
+                resampled,
+                freq_axis,
+                window,
+                zero_correct=zero_correct,
+                need_tau_base=need_tau_base,
+                max_workers=max_workers,
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+                stage_name=stage_name,
+            )
+
         for line_idx in range(total_lines):
             check_cancelled(cancel_callback)
             current = resampled[:, :, line_idx]
             if zero_correct:
                 current, _ = correct_direct_wave(current, freq_axis)
             elif need_tau_base:
-                _, tau_bases[line_idx] = correct_direct_wave(current, freq_axis)
+                tau_bases[line_idx] = estimate_direct_wave_tau_base(current, freq_axis)
             prepared[:, :, line_idx] = (current * window[:, None]).astype(np.complex64, copy=False)
             self._report_line_progress(progress_callback, line_idx, total_lines, 10, 50, f"正在准备 {stage_name} 输入")
+        return prepared, tau_bases
+
+    def _prepare_transform_input_parallel(
+        self,
+        resampled: np.ndarray,
+        freq_axis: np.ndarray,
+        window: np.ndarray,
+        *,
+        zero_correct: bool,
+        need_tau_base: bool,
+        max_workers: int,
+        progress_callback=None,
+        cancel_callback=None,
+        stage_name: str,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        prepared = np.zeros_like(resampled, dtype=np.complex64)
+        tau_bases = np.zeros(resampled.shape[2], dtype=np.float32)
+        total_lines = int(resampled.shape[2])
+
+        def run_line(line_idx: int) -> tuple[int, np.ndarray, np.float32]:
+            check_cancelled(cancel_callback)
+            current = resampled[:, :, line_idx]
+            tau_base = np.float32(0.0)
+            if zero_correct:
+                current, tau_base = correct_direct_wave(current, freq_axis)
+            elif need_tau_base:
+                tau_base = estimate_direct_wave_tau_base(current, freq_axis)
+            line_prepared = (current * window[:, None]).astype(np.complex64, copy=False)
+            check_cancelled(cancel_callback)
+            return line_idx, line_prepared, np.float32(tau_base)
+
+        completed = 0
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="gpr-prepare") as executor:
+            futures = [executor.submit(run_line, line_idx) for line_idx in range(total_lines)]
+            try:
+                for future in as_completed(futures):
+                    check_cancelled(cancel_callback)
+                    line_idx, line_prepared, tau_base = future.result()
+                    prepared[:, :, line_idx] = line_prepared
+                    if need_tau_base:
+                        tau_bases[line_idx] = tau_base
+                    self._report_line_progress(progress_callback, completed, total_lines, 10, 50, f"正在准备 {stage_name} 输入")
+                    completed += 1
+            except Exception:
+                for future in futures:
+                    future.cancel()
+                raise
         return prepared, tau_bases
 
     def _resolve_czt_config(self, params: tuple[float, ...]) -> dict[str, float | bool]:
@@ -232,6 +409,20 @@ class V11TimeFrequencyBridgeOperator:
             if header_sample_count > 1:
                 return header_sample_count
         return max(int(data.shape[0]), 1)
+
+    def _resolve_isdft_workers(self, total_lines: int) -> int:
+        if total_lines <= 1:
+            return 1
+        cpu_count = os.cpu_count() or 1
+        cpu_limited = max(1, cpu_count // 2)
+        return max(1, min(int(total_lines), self.DEFAULT_ISDFT_MAX_WORKERS, cpu_limited))
+
+    def _resolve_prepare_workers(self, total_lines: int) -> int:
+        if total_lines <= 1:
+            return 1
+        cpu_count = os.cpu_count() or 1
+        cpu_limited = max(1, cpu_count // 2)
+        return max(1, min(int(total_lines), self.DEFAULT_PREPARE_MAX_WORKERS, cpu_limited))
 
     def _import_params(self) -> dict[str, object]:
         if self.dataset is None or not isinstance(self.dataset.import_params, dict):

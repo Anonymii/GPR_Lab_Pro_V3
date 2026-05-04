@@ -13,7 +13,10 @@ from .core import (
     soft_threshold,
 )
 from .external import (
+    apply_isdft_soft_phys_operator,
+    build_isdft_soft_phys_operator,
     correct_direct_wave,
+    estimate_direct_wave_tau_base,
     gpr_cs_wavelet_tv,
     isdft_soft_phys,
     kw_czt,
@@ -23,7 +26,10 @@ from .external import (
 __all__ = [
     "bg_remove_adaptive_protect",
     "bg_remove_highpass",
+    "apply_isdft_soft_phys_operator",
+    "build_isdft_soft_phys_operator",
     "correct_direct_wave",
+    "estimate_direct_wave_tau_base",
     "fk_notch_shift",
     "gpr_cs_wavelet_tv",
     "gradual_lowpass_filter",

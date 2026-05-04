@@ -34,11 +34,39 @@ def isdft_soft_phys(
     smooth_len: int,
     t_ground: float = 0.0,
     ramp_ns: float = 2.0,
+    *,
+    block_size: int = 4096,
 ) -> np.ndarray:
     X = np.asarray(X)
+    operator = build_isdft_soft_phys_operator(
+        X.shape[0],
+        f_start,
+        f_end,
+        t,
+        alpha,
+        th_db,
+        smooth_len,
+        t_ground,
+        ramp_ns,
+    )
+    return apply_isdft_soft_phys_operator(X, operator, block_size=block_size)
+
+
+def build_isdft_soft_phys_operator(
+    sample_count: int,
+    f_start: float,
+    f_end: float,
+    t: np.ndarray,
+    alpha: float,
+    th_db: float,
+    smooth_len: int,
+    t_ground: float = 0.0,
+    ramp_ns: float = 2.0,
+) -> np.ndarray:
     t = np.asarray(t).reshape(-1)
-    n, _ = X.shape
-    x = np.zeros_like(X, dtype=np.complex128)
+    n = int(sample_count)
+    if n <= 0:
+        return np.empty((0, 0), dtype=np.complex128)
     df = (f_end - f_start) / max(1, n - 1)
     fk = f_start + np.arange(n) * df
     dt = t[1] - t[0]
@@ -65,6 +93,7 @@ def isdft_soft_phys(
 
     k = np.arange(n, dtype=float)
     base_tw = max(16, round(0.08 * n))
+    operator = np.empty((n, n), dtype=np.complex128)
     for idx in range(n):
         if idx <= n_g:
             gate = 0.0
@@ -79,8 +108,31 @@ def isdft_soft_phys(
             wexp = np.exp(-(alpha * (idx - n_g) / max(1, (n - n_g))) * (k / max(1, n - 1)))
             m = (1.0 - gate) * 1.0 + gate * (m0 * wexp)
         phase = np.exp(1j * 2.0 * np.pi * fk * t[idx])
-        x[idx, :] = (phase * m) @ X / n
-    return x.astype(X.dtype, copy=False)
+        operator[idx, :] = (phase * m) / n
+    return operator
+
+
+def apply_isdft_soft_phys_operator(
+    X: np.ndarray,
+    operator: np.ndarray,
+    *,
+    block_size: int = 4096,
+) -> np.ndarray:
+    X = np.asarray(X)
+    operator = np.asarray(operator)
+    if X.ndim != 2:
+        raise ValueError("ISDFT input must be a 2D array.")
+    if operator.shape != (X.shape[0], X.shape[0]):
+        raise ValueError("ISDFT operator shape does not match input sample count.")
+
+    n_traces = int(X.shape[1])
+    out = np.empty_like(X)
+    step = int(block_size) if block_size and block_size > 0 else n_traces
+    step = max(1, step)
+    for start in range(0, n_traces, step):
+        stop = min(start + step, n_traces)
+        out[:, start:stop] = operator @ X[:, start:stop]
+    return out.astype(X.dtype, copy=False)
 
 
 def correct_direct_wave(
@@ -88,6 +140,27 @@ def correct_direct_wave(
 ) -> Tuple[np.ndarray, np.float32]:
     C_freq = np.asarray(C_freq, dtype=np.complex64)
     freq_axis = np.asarray(freq_axis, dtype=np.float32).reshape(-1)
+    tau_direct_all, tau_base = _direct_wave_tau_profile(C_freq, freq_axis)
+    phase_comp_absolute = np.exp(1j * 2.0 * np.pi * freq_axis[:, None] * tau_base)
+    phase_comp_relative = np.exp(
+        1j * 2.0 * np.pi * freq_axis[:, None] * (tau_direct_all - tau_base)[None, :]
+    )
+    corrected = C_freq * phase_comp_absolute * phase_comp_relative
+    return corrected.astype(np.complex64, copy=False), tau_base
+
+
+def estimate_direct_wave_tau_base(
+    C_freq: np.ndarray, freq_axis: np.ndarray
+) -> np.float32:
+    C_freq = np.asarray(C_freq, dtype=np.complex64)
+    freq_axis = np.asarray(freq_axis, dtype=np.float32).reshape(-1)
+    _, tau_base = _direct_wave_tau_profile(C_freq, freq_axis)
+    return tau_base
+
+
+def _direct_wave_tau_profile(
+    C_freq: np.ndarray, freq_axis: np.ndarray
+) -> tuple[np.ndarray, np.float32]:
     n_freq, n_traces = C_freq.shape
     phase_raw = np.angle(C_freq)
     phase_unwrap = np.unwrap(phase_raw, axis=0)
@@ -153,12 +226,7 @@ def correct_direct_wave(
         tau_base = np.float32(abs(np.median(tau_local[~np.isnan(tau_local)])))
         tau_direct_all = tau_local
 
-    phase_comp_absolute = np.exp(1j * 2.0 * np.pi * freq_axis[:, None] * tau_base)
-    phase_comp_relative = np.exp(
-        1j * 2.0 * np.pi * freq_axis[:, None] * (tau_direct_all - tau_base)[None, :]
-    )
-    corrected = C_freq * phase_comp_absolute * phase_comp_relative
-    return corrected.astype(np.complex64, copy=False), tau_base
+    return tau_direct_all, tau_base
 
 
 def pred_decon(
