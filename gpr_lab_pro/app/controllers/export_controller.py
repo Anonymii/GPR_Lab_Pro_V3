@@ -17,7 +17,7 @@ from gpr_lab_pro.processing.catalog_v11 import SPEC_BY_TYPE
 class ExportController:
     TRANSFORM_CATEGORY = "时频域桥接"
     TRANSFORM_NAMES = {
-        "czt": "CZT",
+        "czt": "时域窗变换",
         "ifft": "IFFT",
         "isdft": "ISDFT",
     }

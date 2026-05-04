@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from gpr_lab_pro.app.context import ApplicationContext
-from gpr_lab_pro.domain.enums import DataDomain
+from gpr_lab_pro.domain.enums import DataDomain, StepKind
 from gpr_lab_pro.domain.models.display import DisplayData
 from gpr_lab_pro.render.adapters.ascan_adapter_v11 import build_ascan
 from gpr_lab_pro.render.adapters.bscan_adapter import build_bscan
@@ -151,6 +151,7 @@ class DisplayController:
             self.display_state.start_time_ns = float(max(0.0, start_time_ns))
         if end_time_ns is not None:
             self.display_state.end_time_ns = float(max(0.0, end_time_ns))
+        self._clamp_to_czt_window()
         if self.display_state.end_time_ns <= self.display_state.start_time_ns:
             self.display_state.end_time_ns = self.display_state.start_time_ns + 1.0
         if colormap is not None:
@@ -167,6 +168,7 @@ class DisplayController:
         self.display_state.cscan_attr = state.cscan_attr
         self.display_state.start_time_ns = float(max(0.0, state.start_time_ns))
         self.display_state.end_time_ns = float(max(self.display_state.start_time_ns + 1.0, state.end_time_ns))
+        self._clamp_to_czt_window()
         self.display_state.colormap = state.colormap
         self.display_state.invert = bool(state.invert)
         self.display_state.show_axes = bool(state.show_axes)
@@ -203,6 +205,37 @@ class DisplayController:
             return
         max_sample_index = int(snapshot.data.shape[0] - 1) if snapshot.data.ndim >= 1 else int(dataset.sample_count - 1)
         self.selection_state.sample_index = int(np.clip(sample_index, 0, max_sample_index))
+
+    def czt_time_window_ns(self) -> tuple[float, float] | None:
+        steps = self.context.pipeline_state.draft_steps or self.context.pipeline_state.applied_steps
+        for step in steps:
+            if step.kind is StepKind.TRANSFORM and step.op_type.lower() == "czt":
+                params = tuple(step.params)
+                if len(params) >= 4:
+                    start_ns = float(params[1])
+                    end_ns = float(params[2])
+                elif len(params) == 3:
+                    start_ns = float(params[1])
+                    end_ns = float(params[2])
+                else:
+                    start_ns = 0.0
+                    end_ns = 40.0
+                start_ns = max(0.0, start_ns)
+                end_ns = max(start_ns + 1e-6, end_ns)
+                return start_ns, end_ns
+        return None
+
+    def _clamp_to_czt_window(self) -> None:
+        window = self.czt_time_window_ns()
+        if window is None:
+            return
+        min_ns, max_ns = window
+        self.display_state.start_time_ns = float(np.clip(self.display_state.start_time_ns, min_ns, max_ns))
+        self.display_state.end_time_ns = float(np.clip(self.display_state.end_time_ns, min_ns, max_ns))
+        if self.display_state.end_time_ns <= self.display_state.start_time_ns:
+            self.display_state.end_time_ns = min(max_ns, self.display_state.start_time_ns + 0.1)
+            if self.display_state.end_time_ns <= self.display_state.start_time_ns:
+                self.display_state.start_time_ns = max(min_ns, self.display_state.end_time_ns - 0.1)
 
     @staticmethod
     def _resolve_time_meta(dataset, snapshot) -> dict[str, float]:

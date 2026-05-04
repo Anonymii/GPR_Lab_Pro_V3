@@ -11,12 +11,12 @@ class TimeFrequencyTransformBridge:
     """
     Bridge layer between frequency-domain data and time-domain data.
 
-    In the current milestone, CZT and ISDFT are completed during DAT import,
+    In the current milestone, the runtime transform operators are handled here,
     while IFFT is kept as a runtime bridge step. This class provides the
     formal dispatch point for transform-stage execution in the V11 framework.
     """
 
-    supported_transforms: tuple[str, ...] = ("CZT", "ISDFT", "IFFT")
+    supported_transforms: tuple[str, ...] = ("时域窗变换", "ISDFT", "IFFT")
 
     def __init__(self, processor: PipelineProcessor | None = None) -> None:
         self.processor = processor
@@ -38,7 +38,7 @@ class TimeFrequencyTransformBridge:
         return {
             "role": ("frequency-domain input", "time-frequency transform", "time-domain output"),
             "supported": self.supported_transforms,
-            "runtime_direct": ("IFFT", "CZT", "ISDFT"),
+            "runtime_direct": ("IFFT", "时域窗变换", "ISDFT"),
             "import_stage": (),
         }
 

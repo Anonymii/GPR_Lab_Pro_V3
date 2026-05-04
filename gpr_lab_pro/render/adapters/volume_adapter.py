@@ -42,6 +42,6 @@ def build_display_data(
             "import_attribute": dataset.attribute,
             "runtime_domain": snapshot.domain.value,
             "bridge_runtime": "IFFT",
-            "bridge_import_stage": "CZT/ISDFT",
+            "bridge_import_stage": "时域窗变换/ISDFT",
         },
     )

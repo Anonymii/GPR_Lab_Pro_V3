@@ -9,7 +9,7 @@ from gpr_lab_pro.processing.module_registry_v11 import module_for_operation
 
 
 TRANSFORM_OPERATION_OPTIONS: tuple[tuple[str, str], ...] = (
-    ("czt", "CZT"),
+    ("czt", "时域窗变换"),
     ("ifft", "IFFT"),
     ("isdft", "ISDFT"),
 )
@@ -42,7 +42,7 @@ class PipelineController:
     def default_transform_step(self) -> PipelineStep:
         return PipelineStep.from_sequence(
             op_type="czt",
-            name="CZT",
+            name=TRANSFORM_LABELS["czt"],
             category=self.TRANSFORM_CATEGORY,
             kind=StepKind.TRANSFORM,
             params=[],
@@ -258,8 +258,16 @@ class PipelineController:
                 continue
             params = tuple(step.params)
             op_type = step.op_type.lower()
-            if op_type == "czt" and len(params) >= 4:
-                step.params = (params[0], params[3])
+            if op_type == "czt":
+                step.name = TRANSFORM_LABELS["czt"]
+                if len(params) >= 4:
+                    step.params = (params[0], params[1], params[2], params[3])
+                elif len(params) == 3:
+                    step.params = (params[0], params[1], params[2], 1.0)
+                elif len(params) >= 2:
+                    step.params = (params[0], 0.0, 40.0, params[1])
+                elif len(params) == 1:
+                    step.params = (params[0], 0.0, 40.0, 1.0)
             elif op_type == "isdft" and len(params) >= 7:
                 step.params = (params[0], params[3], params[4], params[5], params[6])
             elif op_type == "ifft" and len(params) >= 4:

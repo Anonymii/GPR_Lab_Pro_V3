@@ -34,7 +34,7 @@ class V11TimeFrequencyBridgeOperator:
     DEFAULT_IFFT_MIN_FREQ_MHZ: float = 30.0
     DEFAULT_IFFT_MAX_FREQ_MHZ: float = 3000.0
     DEFAULT_TARGET_START_NS: float = 0.0
-    DEFAULT_TARGET_END_NS: float = 60.0
+    DEFAULT_TARGET_END_NS: float = 40.0
 
     def __init__(self, dataset: DatasetRecord | None = None) -> None:
         self.dataset = dataset
@@ -94,9 +94,10 @@ class V11TimeFrequencyBridgeOperator:
             need_tau_base=False,
             progress_callback=progress_callback,
             cancel_callback=cancel_callback,
-            stage_name="CZT",
+            stage_name="时域窗变换",
         )
-        target_start_ns, target_end_ns = self._resolve_target_time_window_ns()
+        target_start_ns = float(cfg["start_ns"])
+        target_end_ns = float(cfg["end_ns"])
         time_meta = self._build_requested_time_meta(target_start_ns, target_end_ns, sample_new)
         t0_s = target_start_ns * 1e-9
         t1_s = target_end_ns * 1e-9
@@ -105,9 +106,9 @@ class V11TimeFrequencyBridgeOperator:
         w_value = np.exp(1j * 2.0 * np.pi * (t1_s - t0_s) / sample_new / ts_val)
         a_value = np.exp(1j * 2.0 * np.pi * (-t0_s) / ts_val)
         check_cancelled(cancel_callback)
-        self._report_progress(progress_callback, 75, "正在执行 CZT")
+        self._report_progress(progress_callback, 75, "正在执行时域窗变换")
         out = signal.czt(prepared, m=sample_new, w=w_value, a=a_value, axis=0)
-        self._report_progress(progress_callback, 100, "CZT 执行完成")
+        self._report_progress(progress_callback, 100, "时域窗变换执行完成")
         self._last_time_meta = time_meta
         return np.asarray(out, dtype=np.complex64)
 
@@ -355,11 +356,23 @@ class V11TimeFrequencyBridgeOperator:
         import_params = self._import_params()
         if len(params) >= 4:
             zero_correct = self._bool_param(params, 3, import_params.get("zero_correct", self.DEFAULT_ZERO_CORRECT))
+            start_ns = self._float_param(params, 1, self.DEFAULT_TARGET_START_NS)
+            end_ns = self._float_param(params, 2, self.DEFAULT_TARGET_END_NS)
+        elif len(params) == 3:
+            zero_correct = bool(import_params.get("zero_correct", self.DEFAULT_ZERO_CORRECT))
+            start_ns = self._float_param(params, 1, self.DEFAULT_TARGET_START_NS)
+            end_ns = self._float_param(params, 2, self.DEFAULT_TARGET_END_NS)
         else:
             zero_correct = self._bool_param(params, 1, import_params.get("zero_correct", self.DEFAULT_ZERO_CORRECT))
+            start_ns = self.DEFAULT_TARGET_START_NS
+            end_ns = self.DEFAULT_TARGET_END_NS
+        start_ns = max(0.0, float(start_ns))
+        end_ns = max(start_ns + 1e-6, float(end_ns))
         return {
             "beta": self._float_param(params, 0, import_params.get("beta", self.DEFAULT_KAISER_BETA)),
             "zero_correct": zero_correct,
+            "start_ns": start_ns,
+            "end_ns": end_ns,
         }
 
     def _resolve_isdft_config(self, params: tuple[float, ...]) -> dict[str, float | bool | int]:

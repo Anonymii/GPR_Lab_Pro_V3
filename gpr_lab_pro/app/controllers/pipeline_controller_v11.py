@@ -10,7 +10,7 @@ from gpr_lab_pro.processing.module_registry_v11 import module_for_operation
 
 TRANSFORM_OPERATION_OPTIONS: tuple[tuple[str, str], ...] = (
     ("ifft", "IFFT"),
-    ("czt", "CZT"),
+    ("czt", "时域窗变换"),
     ("isdft", "ISDFT"),
 )
 

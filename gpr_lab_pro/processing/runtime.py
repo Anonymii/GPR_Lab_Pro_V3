@@ -158,7 +158,7 @@ class PipelineRuntime:
         target_end_ns = float(display_time_window_ns[1])
         matched = 0
         for step_index, step in enumerate(enabled_steps, start=1):
-            if step.kind is StepKind.TRANSFORM and step.op_type.lower() in {"czt", "isdft"}:
+            if step.kind is StepKind.TRANSFORM and step.op_type.lower() == "isdft":
                 if step_index >= len(previous_snapshots):
                     return matched
                 meta = dict(previous_snapshots[step_index].meta)

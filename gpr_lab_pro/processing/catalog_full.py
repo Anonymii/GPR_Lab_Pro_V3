@@ -32,8 +32,10 @@ def _int_cast(value: str) -> int:
 
 
 OPERATION_SPECS: tuple[OperationSpec, ...] = (
-    OperationSpec("czt", "时频域变换", StepKind.TRANSFORM, ("处理流程",), "CZT", (
+    OperationSpec("czt", "时频域变换", StepKind.TRANSFORM, ("处理流程",), "时域窗变换", (
         ParameterSpec("beta", "Kaiser beta", "6"),
+        ParameterSpec("tw_start", "起始时间(ns)", "0"),
+        ParameterSpec("tw_end", "终止时间(ns)", "40"),
         ParameterSpec("zero_correct", "零点校正(1/0)", "1", _int_cast),
     )),
     OperationSpec("ifft", "时频域变换", StepKind.TRANSFORM, ("处理流程",), "IFFT", (

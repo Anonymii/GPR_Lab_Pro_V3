@@ -10,6 +10,7 @@ class MenuPlacement:
 
 
 OPERATION_LABELS: dict[str, str] = {
+    "czt": "时域窗变换",
     "dewow": "去直流漂移",
     "t0": "零点校正(峰值对齐)",
     "t0_fb": "零点校正(首波对齐)",
@@ -63,6 +64,8 @@ PARAMETER_LABELS: dict[str, str] = {
     "time": "目标时间(ns)",
     "k": "阈值系数 K",
     "beta": "Kaiser beta",
+    "tw_start": "起始时间(ns)",
+    "tw_end": "终止时间(ns)",
     "zero_correct": "零点校正(1/0)",
     "use_full_bw": "使用全带宽(1/0)",
     "min_freq": "最小频率(MHz)",

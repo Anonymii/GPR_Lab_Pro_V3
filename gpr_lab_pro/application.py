@@ -205,6 +205,12 @@ class GPRApplication(QtCore.QObject):
             return dataset_tw_ns
         return max(60.0, self.display_state.end_time_ns)
 
+    def current_display_time_range_ns(self) -> tuple[float, float]:
+        czt_window = self.display_controller.czt_time_window_ns()
+        if czt_window is not None:
+            return czt_window
+        return 0.0, self.current_time_window_ns()
+
     def current_dt_ns(self) -> float:
         snapshot = self.result_state.active_snapshot
         if snapshot is not None and snapshot.domain is DataDomain.TIME:

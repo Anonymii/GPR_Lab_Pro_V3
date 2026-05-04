@@ -236,8 +236,14 @@ class DisplaySettingsDialog(QtWidgets.QDialog):
         self.slice_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.slice_slider.setRange(0, 40)
         self.slice_slider.setValue(int(max(0, state.slice_thickness)))
-        self.start_time_edit = QtWidgets.QLineEdit(f"{max(0.0, state.start_time_ns):.2f}")
-        self.end_time_edit = QtWidgets.QLineEdit(f"{max(state.end_time_ns, 0.0):.2f}")
+        min_time_ns, max_time_ns = self.app_controller.current_display_time_range_ns()
+        initial_start_ns = float(np.clip(state.start_time_ns, min_time_ns, max_time_ns))
+        initial_end_ns = float(np.clip(state.end_time_ns, min_time_ns, max_time_ns))
+        if initial_end_ns <= initial_start_ns:
+            initial_end_ns = max_time_ns
+            initial_start_ns = min(initial_start_ns, max(min_time_ns, initial_end_ns - 0.1))
+        self.start_time_edit = QtWidgets.QLineEdit(f"{initial_start_ns:.2f}")
+        self.end_time_edit = QtWidgets.QLineEdit(f"{initial_end_ns:.2f}")
 
         self.b_attr_combo = QtWidgets.QComboBox()
         self.b_attr_combo.addItems(["Real", "Envelope", "Phase", "Inst Freq"])
@@ -310,17 +316,21 @@ class DisplaySettingsDialog(QtWidgets.QDialog):
         self._update_summary()
 
     def _time_window(self) -> tuple[float, float]:
-        total_tw_ns = self.app_controller.current_time_window_ns()
+        min_time_ns, max_time_ns = self.app_controller.current_display_time_range_ns()
         try:
-            start_ns = float(self.start_time_edit.text().strip() or 0.0)
+            start_ns = float(self.start_time_edit.text().strip() or min_time_ns)
         except ValueError:
-            start_ns = 0.0
+            start_ns = min_time_ns
         try:
-            end_ns = float(self.end_time_edit.text().strip() or total_tw_ns)
+            end_ns = float(self.end_time_edit.text().strip() or max_time_ns)
         except ValueError:
-            end_ns = total_tw_ns
-        start_ns = max(0.0, min(start_ns, max(total_tw_ns, start_ns)))
-        end_ns = max(start_ns + 0.1, min(end_ns, max(total_tw_ns, start_ns + 0.1)))
+            end_ns = max_time_ns
+        start_ns = float(np.clip(start_ns, min_time_ns, max_time_ns))
+        end_ns = float(np.clip(end_ns, min_time_ns, max_time_ns))
+        if end_ns <= start_ns:
+            end_ns = min(max_time_ns, start_ns + 0.1)
+            if end_ns <= start_ns:
+                start_ns = max(min_time_ns, end_ns - 0.1)
         return start_ns, end_ns
 
     def _build_rendering_panel(self) -> QtWidgets.QWidget:
@@ -5636,7 +5646,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _current_transform_name(self) -> str:
         steps = self.app_controller.pipeline_state.draft_steps or self.app_controller.pipeline_state.applied_steps
-        transform = next((step.name for step in steps if step.kind is StepKind.TRANSFORM), "CZT")
+        transform = next((step.name for step in steps if step.kind is StepKind.TRANSFORM), "时域窗变换")
         if self.app_controller.pipeline_state.has_unapplied_changes:
             return f"{transform}（草稿未应用）"
         return transform
