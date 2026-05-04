@@ -481,6 +481,10 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
     point_selected = QtCore.Signal(str, int, int)
 
     _TILE_SIZE = 256
+    _MAX_RENDER_NAV_POINTS = 900
+    _MAX_PREVIEW_QUADS = 700
+    _MAX_OVERVIEW_TEXTURE_WIDTH = 4096
+    _MAX_OVERVIEW_TEXTURE_HEIGHT = 2160
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -498,16 +502,13 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         self._center_world_x = 0.0
         self._center_world_y = 0.0
         self._pending_map_state: tuple[float, float, float] | None = None
-        self._layout_cache_key: tuple[float, float, float, int, int, int] | None = None
+        self._layout_cache_key: tuple[float, float, float, int, int, int, bool] | None = None
         self._layout_cache: list[tuple[str, QtGui.QPainterPath, dict[str, object]]] = []
-        self._map_state_timer = QtCore.QTimer(self)
-        self._map_state_timer.setSingleShot(True)
-        self._map_state_timer.setInterval(10)
-        self._map_state_timer.timeout.connect(self._apply_pending_map_state)
+        self._preview_lod_cache: OrderedDict[tuple[int, int, int], QtGui.QImage] = OrderedDict()
         self._interaction_timer = QtCore.QTimer(self)
         self._interaction_timer.setSingleShot(True)
-        self._interaction_timer.setInterval(90)
-        self._interaction_timer.timeout.connect(self.update)
+        self._interaction_timer.setInterval(650)
+        self._interaction_timer.timeout.connect(self._finish_map_interaction)
 
     def clear_scene(self) -> None:
         self._files = []
@@ -517,6 +518,7 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         self._active_trace = 0
         self._layout_rects = []
         self._clear_layout_cache()
+        self._preview_lod_cache.clear()
         self.update()
 
     def set_scene(
@@ -536,6 +538,7 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         self._active_file_id = active_file_id
         self._active_trace = int(active_trace)
         self._clear_layout_cache()
+        self._preview_lod_cache.clear()
         self.update()
 
     def set_map_state(self, latitude: float, longitude: float, zoom: float) -> None:
@@ -543,9 +546,9 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         if state == self._pending_map_state:
             return
         self._pending_map_state = state
+        if not self._interaction_timer.isActive():
+            self.hide()
         self._interaction_timer.start()
-        if not self._map_state_timer.isActive():
-            self._map_state_timer.start()
 
     def handle_tap(self, point: QtCore.QPointF) -> None:
         region = self._region_at(point)
@@ -588,24 +591,38 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         *,
         fast_mode: bool,
     ) -> None:
-        strip_quads = item.get("preview_strip_quads", [])
-        if isinstance(strip_quads, list) and strip_quads:
-            self._draw_preview_base_fill(painter, item, path, preview_image, fast_mode=fast_mode)
-            for source_quad, target_quad in strip_quads:
-                transform = QtGui.QTransform.quadToQuad(source_quad, target_quad)
-                if transform.isIdentity() and source_quad != target_quad:
-                    continue
-                painter.save()
-                quad_path = QtGui.QPainterPath()
-                quad_path.addPolygon(target_quad)
-                painter.setClipPath(path)
-                painter.setClipPath(quad_path, QtCore.Qt.IntersectClip)
-                painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, not fast_mode)
-                painter.setTransform(transform, False)
-                painter.drawImage(QtCore.QPointF(0.0, 0.0), preview_image)
-                painter.restore()
-            return
-        self._draw_preview_base_fill(painter, item, path, preview_image, fast_mode=fast_mode)
+        target_rect = path.boundingRect()
+        lod_image = self._preview_lod_image(preview_image, target_rect, fast_mode=fast_mode)
+        self._draw_preview_base_fill(painter, item, path, lod_image, fast_mode=fast_mode)
+
+    def _preview_lod_image(self, image: QtGui.QImage, target_rect: QtCore.QRectF, *, fast_mode: bool) -> QtGui.QImage:
+        if image.isNull():
+            return image
+        dpr = max(float(self.devicePixelRatioF()), 1.0)
+        target_width = int(np.ceil(max(float(target_rect.width()), 1.0) * dpr))
+        target_height = int(np.ceil(max(float(target_rect.height()), 1.0) * dpr))
+        if fast_mode:
+            target_width = min(target_width, 512)
+            target_height = min(target_height, 192)
+        target_width = int(np.clip(target_width, 1, self._MAX_OVERVIEW_TEXTURE_WIDTH))
+        target_height = int(np.clip(target_height, 1, self._MAX_OVERVIEW_TEXTURE_HEIGHT))
+        if image.width() <= target_width and image.height() <= target_height:
+            return image
+        target_size = QtCore.QSize(
+            min(max(1, target_width), max(1, image.width())),
+            min(max(1, target_height), max(1, image.height())),
+        )
+        key = (int(image.cacheKey()), target_size.width(), target_size.height())
+        cached = self._preview_lod_cache.get(key)
+        if cached is not None and not cached.isNull():
+            self._preview_lod_cache.move_to_end(key)
+            return cached
+        scaled = image.scaled(target_size, QtCore.Qt.IgnoreAspectRatio, QtCore.Qt.FastTransformation)
+        self._preview_lod_cache[key] = scaled
+        self._preview_lod_cache.move_to_end(key)
+        while len(self._preview_lod_cache) > 96:
+            self._preview_lod_cache.popitem(last=False)
+        return scaled
 
     def _draw_preview_base_fill(
         self,
@@ -654,6 +671,7 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
             int(canvas.width()),
             int(canvas.height()),
             len(self._prepared_regions),
+            bool(self._interaction_timer.isActive()),
         )
         if cache_key == self._layout_cache_key:
             return self._layout_cache
@@ -700,15 +718,7 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
             item["screen_centerline_path"] = centerline_path
             item["screen_geometry"] = self._region_screen_geometry(item)
             preview_image = item.get("preview_image")
-            if isinstance(preview_image, QtGui.QImage) and not preview_image.isNull():
-                item["preview_strip_quads"] = self._build_preview_strip_quads(
-                    item.get("render_navigation_samples", []),
-                    item.get("screen_polygon", []),
-                    preview_image.width(),
-                    preview_image.height(),
-                )
-            else:
-                item["preview_strip_quads"] = []
+            item["preview_strip_quads"] = []
             rects.append((str(prepared.get("region_id", "")), path, item))
         self._layout_cache_key = cache_key
         self._layout_cache = rects
@@ -826,7 +836,11 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
             dtype=float,
         )
         half_widths = OverviewOverlayWidget._estimate_half_widths(screen_polygon, point_count)
-        for idx in range(point_count - 1):
+        indices = np.arange(point_count - 1, dtype=int)
+        if indices.size > OverviewOverlayWidget._MAX_PREVIEW_QUADS:
+            sample_at = np.linspace(0, indices.size - 1, OverviewOverlayWidget._MAX_PREVIEW_QUADS, dtype=int)
+            indices = np.unique(indices[sample_at])
+        for idx in indices:
             u0 = float(source_u[idx])
             u1 = float(source_u[idx + 1])
             if abs(u1 - u0) < 0.25:
@@ -1025,6 +1039,8 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
             target = np.arange(0.0, float(cumulative[-1]), step_m, dtype=float)
             if target.size == 0 or target[-1] < cumulative[-1]:
                 target = np.append(target, cumulative[-1])
+            if target.size > cls._MAX_RENDER_NAV_POINTS:
+                target = np.linspace(0.0, float(cumulative[-1]), cls._MAX_RENDER_NAV_POINTS, dtype=float)
             x_coords = np.interp(target, cumulative, x_coords)
             y_coords = np.interp(target, cumulative, y_coords)
             trace_positions = np.interp(target, cumulative, trace_positions)
@@ -1067,6 +1083,11 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         self._pending_map_state = None
         self._clear_layout_cache()
         self.update()
+
+    def _finish_map_interaction(self) -> None:
+        self._apply_pending_map_state()
+        self.show()
+        self.raise_()
 
     @staticmethod
     def _region_label_text(file_item: dict[str, object], region: dict[str, object]) -> str:

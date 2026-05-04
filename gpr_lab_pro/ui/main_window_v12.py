@@ -16,7 +16,7 @@ from PySide6 import QtCore, QtGui, QtNetwork, QtWebChannel, QtWebEngineCore, QtW
 
 from gpr_lab_pro.application import GPRApplication
 from gpr_lab_pro.domain.enums import StepKind
-from gpr_lab_pro.domain.models.display import DisplayData
+from gpr_lab_pro.domain.models.display import DisplayData, DisplayState, SelectionState
 from gpr_lab_pro.infrastructure.online_map import OnlineMapConfig, OnlineMapConfigStore
 from gpr_lab_pro.ui.overview_quick_map import OverviewMapHostWidget, OverviewOnlineQuickMapWidget, OverviewQuickMapWidget
 from gpr_lab_pro.render.adapters.cscan_adapter import build_cscan
@@ -2970,7 +2970,48 @@ class ClosableProgressDialog(QtWidgets.QProgressDialog):
         event.accept()
 
 
+class _OverviewPreviewBridge(QtCore.QObject):
+    preview_ready = QtCore.Signal(object, str, object)
+    preview_failed = QtCore.Signal(object, str)
+
+
+class _OverviewPreviewTask(QtCore.QRunnable):
+    def __init__(
+        self,
+        cache_key: tuple[object, ...],
+        region_id: str,
+        volume: np.ndarray,
+        display_state: DisplayState,
+        sample_index: int,
+        bridge: _OverviewPreviewBridge,
+    ) -> None:
+        super().__init__()
+        self.cache_key = cache_key
+        self.region_id = region_id
+        self.volume = volume
+        self.display_state = display_state
+        self.sample_index = int(sample_index)
+        self.bridge = bridge
+        self.setAutoDelete(True)
+
+    def run(self) -> None:
+        try:
+            selection = SelectionState(sample_index=self.sample_index)
+            cscan, _limits = build_cscan(self.volume, self.display_state, selection)
+            if cscan.size == 0:
+                self.bridge.preview_failed.emit(self.cache_key, self.region_id)
+                return
+            image = MainWindow._overview_preview_image_from_cscan(cscan)
+        except Exception:
+            self.bridge.preview_failed.emit(self.cache_key, self.region_id)
+            return
+        self.bridge.preview_ready.emit(self.cache_key, self.region_id, image)
+
+
 class MainWindow(QtWidgets.QMainWindow):
+    _OVERVIEW_FILE_TRACK_MAX_POINTS = 2500
+    _OVERVIEW_REGION_MAX_POINTS = 2000
+
     def __init__(self, app_controller: GPRApplication):
         super().__init__()
         self.app_controller = app_controller
@@ -2994,6 +3035,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._overview_map_mode = "offline"
         self._overview_region_preview_cache: dict[tuple[object, ...], QtGui.QImage] = {}
         self._overview_region_preview_by_region: dict[str, QtGui.QImage] = {}
+        self._overview_preview_pending_keys: set[tuple[object, ...]] = set()
+        self._overview_preview_pending_limit = 1
+        self._overview_preview_bridge = _OverviewPreviewBridge(self)
+        self._overview_preview_bridge.preview_ready.connect(self._on_overview_preview_ready)
+        self._overview_preview_bridge.preview_failed.connect(self._on_overview_preview_failed)
+        self._overview_preview_pool = QtCore.QThreadPool.globalInstance()
+        self._overview_preview_refresh_timer = QtCore.QTimer(self)
+        self._overview_preview_refresh_timer.setSingleShot(True)
+        self._overview_preview_refresh_timer.setInterval(80)
+        self._overview_preview_refresh_timer.timeout.connect(self._refresh_overview_scene)
         self._overview_map_image_cache: tuple[str, QtGui.QImage | None] = ("", None)
         self._overview_depth_text_editing = False
         self._overview_depth_pending_value: int | None = None
@@ -3001,6 +3052,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._overview_depth_refresh_timer.setSingleShot(True)
         self._overview_depth_refresh_timer.setInterval(45)
         self._overview_depth_refresh_timer.timeout.connect(self._flush_overview_depth_refresh)
+        self._overview_scene_refresh_timer = QtCore.QTimer(self)
+        self._overview_scene_refresh_timer.setSingleShot(True)
+        self._overview_scene_refresh_timer.setInterval(120)
+        self._overview_scene_refresh_timer.timeout.connect(self._refresh_overview_scene)
 
         self.action_new_project: QtGui.QAction | None = None
         self.action_open_project: QtGui.QAction | None = None
@@ -4358,7 +4413,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_project_tree()
         self._refresh_interface_controls()
         self._refresh_overview_controls()
-        self._refresh_overview_scene()
+        self._schedule_overview_scene_refresh(80)
         self._refresh_interface_overlays()
         if self.app_controller.dataset is None:
             self.display_data = None
@@ -4427,6 +4482,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.project_tree.blockSignals(False)
 
     def _refresh_overview_scene(self) -> None:
+        if hasattr(self, "_overview_scene_refresh_timer") and self._overview_scene_refresh_timer.isActive():
+            self._overview_scene_refresh_timer.stop()
         project_state = self.app_controller.project_state
         if not project_state.files:
             self.overview_map.clear_scene()
@@ -4486,21 +4543,23 @@ class MainWindow(QtWidgets.QMainWindow):
             cache_root_path=str(self.app_controller.project_state.root_path or ""),
         )
 
+    def _schedule_overview_scene_refresh(self, delay_ms: int = 120) -> None:
+        self._overview_scene_refresh_timer.setInterval(max(1, int(delay_ms)))
+        self._overview_scene_refresh_timer.start()
+
     def _build_region_overview_preview(self, region) -> QtGui.QImage | None:
         snapshots = self.app_controller.context.region_runtime_results.get(region.region_id) or []
         if not snapshots:
             return None
         snapshot = snapshots[-1]
-        dataset = self.app_controller.project_controller.build_region_dataset(region)
-        if dataset is None:
+        if snapshot.data.size == 0 or snapshot.data.ndim < 2:
             return None
-        selection = deepcopy(region.selection_state)
+        max_sample = int(snapshot.data.shape[0] - 1) if snapshot.data.ndim >= 1 else 0
         overview_sample = int(np.clip(
             self.app_controller.project_state.overview_state.depth_sample_index,
             0,
-            max(region.sample_count() - 1, 0),
+            max(max_sample, 0),
         ))
-        selection.sample_index = overview_sample
         display_state = region.display_state
         cache_key = (
             region.region_id,
@@ -4512,14 +4571,41 @@ class MainWindow(QtWidgets.QMainWindow):
         cached = self._overview_region_preview_cache.get(cache_key)
         if cached is not None and not cached.isNull():
             return cached
-        cscan, _ = build_cscan(snapshot.data, display_state, selection)
-        if cscan.size == 0:
-            return None
-        cscan_view = self._smooth_image(cscan, axis=0)
-        image = self._array_to_qimage(cscan_view, "gray", self._preview_image_limits(cscan_view))
-        self._overview_region_preview_cache[cache_key] = image
-        self._overview_region_preview_by_region[region.region_id] = image
-        return image
+        previous = self._overview_region_preview_by_region.get(region.region_id)
+        if isinstance(previous, QtGui.QImage) and not previous.isNull():
+            return previous
+        if region.region_id == self.app_controller.project_state.active_region_id:
+            self._schedule_overview_preview(cache_key, region.region_id, snapshot.data, deepcopy(display_state), overview_sample)
+        return None
+
+    def _schedule_overview_preview(
+        self,
+        cache_key: tuple[object, ...],
+        region_id: str,
+        volume: np.ndarray,
+        display_state: DisplayState,
+        sample_index: int,
+    ) -> None:
+        if cache_key in self._overview_preview_pending_keys:
+            return
+        if len(self._overview_preview_pending_keys) >= self._overview_preview_pending_limit:
+            return
+        self._overview_preview_pending_keys.add(cache_key)
+        task = _OverviewPreviewTask(cache_key, region_id, volume, display_state, sample_index, self._overview_preview_bridge)
+        self._overview_preview_pool.start(task, -1)
+
+    def _on_overview_preview_ready(self, cache_key: tuple[object, ...], region_id: str, image: QtGui.QImage) -> None:
+        self._overview_preview_pending_keys.discard(cache_key)
+        if isinstance(image, QtGui.QImage) and not image.isNull():
+            self._overview_region_preview_cache[cache_key] = image
+            self._overview_region_preview_by_region[region_id] = image
+        if not self._overview_preview_refresh_timer.isActive():
+            self._overview_preview_refresh_timer.start()
+
+    def _on_overview_preview_failed(self, cache_key: tuple[object, ...], _region_id: str) -> None:
+        self._overview_preview_pending_keys.discard(cache_key)
+        if not self._overview_preview_refresh_timer.isActive():
+            self._overview_preview_refresh_timer.start()
 
     def _cache_active_region_overview_preview(self, display: DisplayData) -> None:
         region = self.app_controller.project_controller.get_active_region()
@@ -4542,12 +4628,7 @@ class MainWindow(QtWidgets.QMainWindow):
             int(state.slice_thickness),
             str(state.cscan_attr),
         )
-        cscan_view = self._smooth_image(display.cscan, axis=0)
-        self._overview_region_preview_cache[cache_key] = self._array_to_qimage(
-            cscan_view,
-            "gray",
-            self._preview_image_limits(cscan_view),
-        )
+        self._overview_region_preview_cache[cache_key] = self._overview_preview_image_from_cscan(display.cscan)
         self._overview_region_preview_by_region[region.region_id] = self._overview_region_preview_cache[cache_key]
 
     def _region_has_processed_result(self, region_id: str, preview_image: QtGui.QImage | None) -> bool:
@@ -4563,6 +4644,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _navigation_track_points(navigation) -> list[dict[str, float | int]]:
         if navigation is None:
             return []
+        samples = navigation.samples
+        indices = MainWindow._overview_sample_indices(len(samples), MainWindow._OVERVIEW_FILE_TRACK_MAX_POINTS)
         return [
             {
                 "trace_index": int(sample.trace_index),
@@ -4571,7 +4654,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "latitude": None if sample.latitude is None else float(sample.latitude),
                 "longitude": None if sample.longitude is None else float(sample.longitude),
             }
-            for sample in navigation.samples
+            for sample in (samples[idx] for idx in indices)
         ]
 
     @staticmethod
@@ -4579,10 +4662,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if navigation is None or not navigation.samples:
             return []
         start = int(max(0, trace_start))
-        stop = int(max(start + 1, trace_stop))
-        subset = navigation.samples[start:stop]
-        if len(subset) == 1:
-            subset = subset + subset
+        stop = int(min(max(start + 1, trace_stop), len(navigation.samples)))
+        count = max(stop - start, 0)
+        if count <= 0:
+            return []
+        offsets = MainWindow._overview_sample_indices(count, MainWindow._OVERVIEW_REGION_MAX_POINTS)
+        indices = [start + offset for offset in offsets]
+        if len(indices) == 1:
+            indices = indices + indices
         return [
             {
                 "trace_index": int(sample.trace_index),
@@ -4591,8 +4678,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 "latitude": None if sample.latitude is None else float(sample.latitude),
                 "longitude": None if sample.longitude is None else float(sample.longitude),
             }
-            for sample in subset
+            for sample in (navigation.samples[idx] for idx in indices)
         ]
+
+    @staticmethod
+    def _overview_sample_indices(count: int, max_points: int) -> list[int]:
+        count = int(max(0, count))
+        if count == 0:
+            return []
+        max_points = int(max(2, max_points))
+        if count <= max_points:
+            return list(range(count))
+        indices = np.linspace(0, count - 1, max_points, dtype=int)
+        return [int(index) for index in np.unique(indices)]
 
     @staticmethod
     def _region_render_width(region) -> float:
@@ -5584,6 +5682,31 @@ class MainWindow(QtWidgets.QMainWindow):
         return QtGui.QIcon(pixmap)
 
     @staticmethod
+    def _overview_preview_image_from_cscan(data: np.ndarray) -> QtGui.QImage:
+        preview = MainWindow._overview_preview_array(data)
+        if preview.size == 0:
+            return QtGui.QImage()
+        return MainWindow._array_to_qimage(preview, "gray", MainWindow._preview_image_limits(preview))
+
+    @staticmethod
+    def _overview_preview_array(data: np.ndarray, *, max_width: int = 2048, max_height: int = 192) -> np.ndarray:
+        array = np.asarray(data)
+        if array.ndim != 2 or array.size == 0:
+            return np.empty((0, 0), dtype=float)
+        rows, cols = array.shape
+        row_count = min(max(int(max_height), 1), rows)
+        col_count = min(max(int(max_width), 1), cols)
+        if rows == row_count:
+            row_idx = np.arange(rows, dtype=int)
+        else:
+            row_idx = np.linspace(0, rows - 1, row_count, dtype=int)
+        if cols == col_count:
+            col_idx = np.arange(cols, dtype=int)
+        else:
+            col_idx = np.linspace(0, cols - 1, col_count, dtype=int)
+        return np.asarray(array[np.ix_(row_idx, col_idx)], dtype=float)
+
+    @staticmethod
     def _array_to_qimage(
         data: np.ndarray,
         cmap_name: str,
@@ -5599,6 +5722,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if not np.isfinite(vmax) or vmax <= vmin:
             vmax = vmin + 1.0
         normalized = np.clip((array - vmin) / (vmax - vmin), 0.0, 1.0)
+        if cmap_name in {"gray", "grey", "gray_r", "grey_r"}:
+            if cmap_name.endswith("_r"):
+                normalized = 1.0 - normalized
+            gray = np.ascontiguousarray((normalized * 255.0).astype(np.uint8))
+            image = QtGui.QImage(
+                gray.data,
+                gray.shape[1],
+                gray.shape[0],
+                gray.strides[0],
+                QtGui.QImage.Format_Grayscale8,
+            )
+            return image.copy()
         rgba = cm.get_cmap(cmap_name)(normalized, bytes=True)
         rgba = np.ascontiguousarray(rgba)
         image = QtGui.QImage(
@@ -6090,7 +6225,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_processing_finished(self) -> None:
         self._set_stage_status("处理完成")
         self._refresh_settings_info()
-        self._refresh_overview_scene()
+        self._schedule_overview_scene_refresh(120)
         self.statusBar().showMessage("处理完成，结果已刷新到 A/B/C-scan。", 4000)
         self._update_top_actions()
 
