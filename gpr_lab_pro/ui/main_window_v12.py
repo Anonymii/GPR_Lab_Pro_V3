@@ -3021,6 +3021,7 @@ class _OverviewPreviewTask(QtCore.QRunnable):
 class MainWindow(QtWidgets.QMainWindow):
     _OVERVIEW_FILE_TRACK_MAX_POINTS = 2500
     _OVERVIEW_REGION_MAX_POINTS = 2000
+    _OVERVIEW_PREVIEW_VERSION = 2
 
     def __init__(self, app_controller: GPRApplication):
         super().__init__()
@@ -4572,6 +4573,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ))
         display_state = region.display_state
         cache_key = (
+            self._OVERVIEW_PREVIEW_VERSION,
             region.region_id,
             snapshot.snapshot_id,
             int(overview_sample),
@@ -4581,11 +4583,10 @@ class MainWindow(QtWidgets.QMainWindow):
         cached = self._overview_region_preview_cache.get(cache_key)
         if cached is not None and not cached.isNull():
             return cached
+        self._schedule_overview_preview(cache_key, region.region_id, snapshot.data, deepcopy(display_state), overview_sample)
         previous = self._overview_region_preview_by_region.get(region.region_id)
         if isinstance(previous, QtGui.QImage) and not previous.isNull():
             return previous
-        if region.region_id == self.app_controller.project_state.active_region_id:
-            self._schedule_overview_preview(cache_key, region.region_id, snapshot.data, deepcopy(display_state), overview_sample)
         return None
 
     def _schedule_overview_preview(
@@ -4632,6 +4633,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if int(selection.sample_index) != overview_sample:
             return
         cache_key = (
+            self._OVERVIEW_PREVIEW_VERSION,
             region.region_id,
             snapshot.snapshot_id,
             int(overview_sample),
@@ -5699,7 +5701,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return MainWindow._array_to_qimage(preview, "gray", MainWindow._preview_image_limits(preview))
 
     @staticmethod
-    def _overview_preview_array(data: np.ndarray, *, max_width: int = 2048, max_height: int = 192) -> np.ndarray:
+    def _overview_preview_array(data: np.ndarray, *, max_width: int = 4096, max_height: int = 384) -> np.ndarray:
         array = np.asarray(data)
         if array.ndim != 2 or array.size == 0:
             return np.empty((0, 0), dtype=float)

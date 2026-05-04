@@ -482,9 +482,13 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
 
     _TILE_SIZE = 256
     _MAX_RENDER_NAV_POINTS = 900
-    _MAX_PREVIEW_QUADS = 700
+    _MAX_PREVIEW_QUADS = 2400
     _MAX_OVERVIEW_TEXTURE_WIDTH = 4096
     _MAX_OVERVIEW_TEXTURE_HEIGHT = 2160
+    _MAX_OVERVIEW_TEXTURE_PIXELS = 3_000_000
+    _MAX_CHANNEL_SWEEP_ROWS = 28
+    _MAX_CHANNEL_SWEEP_COLUMNS = 260
+    _MAX_CHANNEL_SWEEP_CELLS = 6000
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -505,6 +509,7 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         self._layout_cache_key: tuple[float, float, float, int, int, int, bool] | None = None
         self._layout_cache: list[tuple[str, QtGui.QPainterPath, dict[str, object]]] = []
         self._preview_lod_cache: OrderedDict[tuple[int, int, int], QtGui.QImage] = OrderedDict()
+        self._raster_overlay_cache: OrderedDict[tuple[object, ...], dict[str, object]] = OrderedDict()
         self._interaction_timer = QtCore.QTimer(self)
         self._interaction_timer.setSingleShot(True)
         self._interaction_timer.setInterval(650)
@@ -519,6 +524,7 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         self._layout_rects = []
         self._clear_layout_cache()
         self._preview_lod_cache.clear()
+        self._raster_overlay_cache.clear()
         self.update()
 
     def set_scene(
@@ -539,16 +545,30 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         self._active_trace = int(active_trace)
         self._clear_layout_cache()
         self._preview_lod_cache.clear()
+        self._raster_overlay_cache.clear()
         self.update()
 
     def set_map_state(self, latitude: float, longitude: float, zoom: float) -> None:
         state = (float(latitude), float(longitude), float(zoom))
-        if state == self._pending_map_state:
+        if (
+            self._pending_map_state == state
+            or (
+                self._pending_map_state is None
+                and abs(state[0] - self._center_lat) < 1e-12
+                and abs(state[1] - self._center_lon) < 1e-12
+                and abs(state[2] - self._zoom) < 1e-9
+            )
+        ):
             return
-        self._pending_map_state = state
-        if not self._interaction_timer.isActive():
-            self.hide()
+        self._center_lat, self._center_lon, self._zoom = state
+        self._center_world_x, self._center_world_y = self._geo_to_world(self._center_lat, self._center_lon)
+        self._pending_map_state = None
+        self._clear_layout_cache()
+        if not self.isVisible():
+            self.show()
+            self.raise_()
         self._interaction_timer.start()
+        self.update()
 
     def handle_tap(self, point: QtCore.QPointF) -> None:
         region = self._region_at(point)
@@ -570,10 +590,24 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         painter = QtGui.QPainter(self)
         fast_mode = self._interaction_timer.isActive()
         painter.setRenderHint(QtGui.QPainter.Antialiasing, not fast_mode)
+        canvas_rect = QtCore.QRectF(self.rect())
+        raster_region_ids: set[str] = set()
+        for prepared in self._prepared_regions:
+            region_id = str(prepared.get("region_id", "") or "")
+            if self._draw_cached_raster_overlay(
+                painter,
+                prepared,
+                canvas_rect,
+                fast_mode=fast_mode,
+                allow_build=not fast_mode,
+            ):
+                raster_region_ids.add(region_id)
+        if fast_mode:
+            return
         self._layout_rects = self._compute_layout(self.rect())
         for region_id, path, item in self._layout_rects:
             preview_image = item.get("preview_image")
-            if isinstance(preview_image, QtGui.QImage) and not preview_image.isNull():
+            if region_id not in raster_region_ids and isinstance(preview_image, QtGui.QImage) and not preview_image.isNull():
                 self._draw_preview_image(painter, item, path, preview_image, fast_mode=fast_mode)
             border_color = QtGui.QColor("#ff9500" if region_id == self._active_region_id else "#ff8c00")
             border_pen = QtGui.QPen(border_color, 2.0 if region_id == self._active_region_id else 1.6)
@@ -581,6 +615,598 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
             painter.setBrush(QtCore.Qt.NoBrush)
             painter.drawPath(path)
             self._draw_region_label(painter, item)
+
+    def _draw_cached_raster_overlay(
+        self,
+        painter: QtGui.QPainter,
+        prepared: dict[str, object],
+        canvas_rect: QtCore.QRectF,
+        *,
+        fast_mode: bool,
+        allow_build: bool,
+    ) -> bool:
+        overlay = self._raster_overlay_for_region(prepared, canvas_rect, allow_build=allow_build)
+        if overlay is None:
+            return False
+        image = overlay.get("image")
+        bounds = overlay.get("world_bounds")
+        if not isinstance(image, QtGui.QImage) or image.isNull() or not isinstance(bounds, tuple) or len(bounds) != 4:
+            return False
+        target_rect = self._world_bounds_to_canvas_rect(bounds, canvas_rect)
+        if not target_rect.isValid() or not target_rect.intersects(canvas_rect.adjusted(-16.0, -16.0, 16.0, 16.0)):
+            return False
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, not fast_mode)
+        painter.drawImage(target_rect, image)
+        painter.restore()
+        return True
+
+    def _raster_overlay_for_region(
+        self,
+        prepared: dict[str, object],
+        canvas_rect: QtCore.QRectF,
+        *,
+        allow_build: bool,
+    ) -> dict[str, object] | None:
+        preview_image = prepared.get("preview_image")
+        if not isinstance(preview_image, QtGui.QImage) or preview_image.isNull():
+            return None
+        region_id = str(prepared.get("region_id", "") or "")
+        polygon_world = prepared.get("geo_polygon_world")
+        render_world = prepared.get("render_navigation_world")
+        trace_indices = prepared.get("render_navigation_trace_indices", [])
+        if (
+            not isinstance(polygon_world, np.ndarray)
+            or polygon_world.size == 0
+            or not isinstance(render_world, np.ndarray)
+            or render_world.shape[0] < 2
+        ):
+            return None
+        cache_key = (
+            region_id,
+            int(preview_image.cacheKey()),
+            int(preview_image.width()),
+            int(preview_image.height()),
+            int(render_world.shape[0]),
+            int(polygon_world.shape[0]),
+        )
+        cached = self._raster_overlay_cache.get(cache_key)
+        if cached is not None:
+            self._raster_overlay_cache.move_to_end(cache_key)
+            return cached
+        if not allow_build:
+            return None
+        overlay = self._build_raster_overlay(
+            prepared,
+            preview_image,
+            polygon_world,
+            render_world,
+            trace_indices,
+            canvas_rect,
+        )
+        if overlay is None:
+            return None
+        self._raster_overlay_cache[cache_key] = overlay
+        self._raster_overlay_cache.move_to_end(cache_key)
+        while len(self._raster_overlay_cache) > 24:
+            self._raster_overlay_cache.popitem(last=False)
+        return overlay
+
+    def _build_raster_overlay(
+        self,
+        prepared: dict[str, object],
+        preview_image: QtGui.QImage,
+        polygon_world: np.ndarray,
+        render_world: np.ndarray,
+        trace_indices: object,
+        canvas_rect: QtCore.QRectF,
+    ) -> dict[str, object] | None:
+        bounds = self._expanded_world_bounds(polygon_world)
+        if bounds is None:
+            return None
+        image_size = self._raster_overlay_size(bounds, canvas_rect, preview_image)
+        if image_size.isEmpty():
+            return None
+        image = QtGui.QImage(image_size, QtGui.QImage.Format_ARGB32_Premultiplied)
+        image.fill(QtCore.Qt.transparent)
+        min_x, min_y, max_x, max_y = bounds
+        world_width = max(max_x - min_x, 1e-12)
+        world_height = max(max_y - min_y, 1e-12)
+
+        def to_local_array(world_array: np.ndarray) -> np.ndarray:
+            x = (world_array[:, 0] - min_x) / world_width * float(image.width() - 1)
+            y = (world_array[:, 1] - min_y) / world_height * float(image.height() - 1)
+            return np.column_stack((x, y))
+
+        polygon_local = to_local_array(polygon_world)
+        render_local = to_local_array(render_world)
+        polygon_points = [QtCore.QPointF(float(x), float(y)) for x, y in polygon_local]
+        trace_values = self._trace_values_for_render_samples(trace_indices, render_local.shape[0])
+        render_samples = [
+            {
+                "trace_index": float(trace_values[idx]),
+                "screen_x": float(render_local[idx, 0]),
+                "screen_y": float(render_local[idx, 1]),
+            }
+            for idx in range(render_local.shape[0])
+        ]
+        centerline_path = self._build_centerline_path(render_samples)
+        path = self._build_region_path(polygon_points, render_samples, centerline_path)
+        if path.isEmpty():
+            return None
+
+        painter = QtGui.QPainter(image)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.fillPath(path, QtGui.QColor(48, 48, 48, 42))
+        texture = self._render_channel_sweep_texture(
+            preview_image,
+            path,
+            render_samples,
+            polygon_points,
+        )
+        if texture is not None and not texture.isNull():
+            painter.drawImage(QtCore.QPointF(0.0, 0.0), texture)
+        else:
+            strip_quads = self._build_preview_strip_quads(
+                render_samples,
+                polygon_points,
+                preview_image.width(),
+                preview_image.height(),
+                max_quads=self._MAX_PREVIEW_QUADS,
+            )
+            for source_quad, target_quad in strip_quads:
+                transform = QtGui.QTransform.quadToQuad(source_quad, target_quad)
+                if transform.isIdentity() and source_quad != target_quad:
+                    continue
+                painter.save()
+                quad_path = QtGui.QPainterPath()
+                quad_path.addPolygon(target_quad)
+                quad_path.closeSubpath()
+                painter.setClipPath(path)
+                painter.setClipPath(quad_path, QtCore.Qt.IntersectClip)
+                painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
+                painter.setTransform(transform, False)
+                painter.drawImage(QtCore.QPointF(0.0, 0.0), preview_image)
+                painter.restore()
+        border_color = QtGui.QColor("#ff9500" if str(prepared.get("region_id", "") or "") == self._active_region_id else "#ff8c00")
+        painter.setPen(QtGui.QPen(border_color, 2.0))
+        painter.setBrush(QtCore.Qt.NoBrush)
+        painter.drawPath(path)
+        painter.end()
+        return {
+            "image": image,
+            "world_bounds": bounds,
+        }
+
+    def _render_channel_sweep_texture(
+        self,
+        preview_image: QtGui.QImage,
+        path: QtGui.QPainterPath,
+        render_samples: list[dict[str, object]],
+        screen_polygon: list[QtCore.QPointF],
+    ) -> QtGui.QImage | None:
+        if preview_image.isNull() or path.isEmpty() or len(render_samples) < 2:
+            return None
+        source = preview_image.convertToFormat(QtGui.QImage.Format_ARGB32)
+        source_array = self._qimage_uint8_view(source, channels=4).copy()
+        if source_array.size == 0:
+            return None
+        source_array = self._smooth_channel_source(source_array)
+        source = self._argb32_image_from_array(source_array)
+        if source.isNull():
+            return None
+        source_height, source_width = source_array.shape[:2]
+        if source_width < 2 or source_height < 1:
+            return None
+        centers = np.array(
+            [
+                [float(sample.get("screen_x", 0.0)), float(sample.get("screen_y", 0.0))]
+                for sample in render_samples
+            ],
+            dtype=float,
+        )
+        point_count = centers.shape[0]
+        if point_count < 2:
+            return None
+        trace_positions = np.array([float(sample.get("trace_index", 0.0)) for sample in render_samples], dtype=float)
+        if float(trace_positions[-1] - trace_positions[0]) <= 1e-9:
+            sample_u = np.linspace(0.0, float(source_width - 1), point_count, dtype=float)
+        else:
+            sample_u = (
+                (trace_positions - float(trace_positions[0]))
+                / float(trace_positions[-1] - trace_positions[0])
+                * float(source_width - 1)
+            )
+        keep = np.concatenate(([True], np.diff(sample_u) > 1e-6))
+        if int(np.count_nonzero(keep)) < 2:
+            return None
+        sample_u = sample_u[keep]
+        centers = centers[keep]
+        point_count = centers.shape[0]
+        half_widths = self._estimate_half_widths(screen_polygon, len(render_samples))
+        half_widths = half_widths[keep] if half_widths.size == len(render_samples) else np.full((point_count,), 3.0, dtype=float)
+        normals = self._centerline_vertex_normals(centers)
+
+        output = QtGui.QImage(path.boundingRect().toAlignedRect().size(), QtGui.QImage.Format_ARGB32_Premultiplied)
+        if output.isNull():
+            return None
+        output.fill(QtCore.Qt.transparent)
+        origin = path.boundingRect().toAlignedRect().topLeft()
+        local_path = QtGui.QPainterPath(path)
+        local_path.translate(-float(origin.x()), -float(origin.y()))
+        row_count = min(int(source_height), self._MAX_CHANNEL_SWEEP_ROWS)
+        row_count = max(row_count, 2)
+        column_budget = max(int(self._MAX_CHANNEL_SWEEP_CELLS // max(row_count - 1, 1)) + 1, 8)
+        column_count = min(int(source_width), self._MAX_CHANNEL_SWEEP_COLUMNS, column_budget)
+        columns = np.linspace(0.0, float(source_width - 1), max(column_count, 2), dtype=float)
+        x_coords = np.interp(columns, sample_u, centers[:, 0]) - float(origin.x())
+        y_coords = np.interp(columns, sample_u, centers[:, 1]) - float(origin.y())
+        normal_x = np.interp(columns, sample_u, normals[:, 0])
+        normal_y = np.interp(columns, sample_u, normals[:, 1])
+        normal_norm = np.hypot(normal_x, normal_y)
+        normal_norm = np.where(normal_norm > 1e-9, normal_norm, 1.0)
+        normal_x = normal_x / normal_norm
+        normal_y = normal_y / normal_norm
+        widths = np.interp(columns, sample_u, half_widths)
+
+        rows = np.linspace(0.0, float(source_height - 1), max(row_count, 2), dtype=float)
+        if rows.size < 2:
+            return None
+        denominator = max(float(source_height - 1), 1.0)
+        row_offsets = 1.0 - 2.0 * (rows / denominator)
+        painter = QtGui.QPainter(output)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        source_bottom = float(source_height - 1)
+        source_right = float(source_width - 1)
+        drawn_cells = 0
+        for row_index in range(rows.size - 1):
+            row0 = float(rows[row_index])
+            row1 = float(rows[row_index + 1])
+            offset0 = float(row_offsets[row_index])
+            offset1 = float(row_offsets[row_index + 1])
+            left_x0 = x_coords + normal_x * widths * offset0
+            left_y0 = y_coords + normal_y * widths * offset0
+            left_x1 = x_coords + normal_x * widths * offset1
+            left_y1 = y_coords + normal_y * widths * offset1
+            for col_index in range(columns.size - 1):
+                col0 = float(columns[col_index])
+                col1 = float(columns[col_index + 1])
+                if abs(col1 - col0) < 1e-6:
+                    continue
+                target_quad = QtGui.QPolygonF(
+                    [
+                        QtCore.QPointF(float(left_x0[col_index]), float(left_y0[col_index])),
+                        QtCore.QPointF(float(left_x0[col_index + 1]), float(left_y0[col_index + 1])),
+                        QtCore.QPointF(float(left_x1[col_index + 1]), float(left_y1[col_index + 1])),
+                        QtCore.QPointF(float(left_x1[col_index]), float(left_y1[col_index])),
+                    ]
+                )
+                quad_rect = target_quad.boundingRect()
+                if quad_rect.width() < 0.4 and quad_rect.height() < 0.4:
+                    continue
+                if not quad_rect.intersects(output.rect()):
+                    continue
+                quad_path = self._quad_path(target_quad)
+                source_quad = QtGui.QPolygonF(
+                    [
+                        QtCore.QPointF(float(np.clip(col0, 0.0, source_right)), float(np.clip(row0, 0.0, source_bottom))),
+                        QtCore.QPointF(float(np.clip(col1, 0.0, source_right)), float(np.clip(row0, 0.0, source_bottom))),
+                        QtCore.QPointF(float(np.clip(col1, 0.0, source_right)), float(np.clip(row1, 0.0, source_bottom))),
+                        QtCore.QPointF(float(np.clip(col0, 0.0, source_right)), float(np.clip(row1, 0.0, source_bottom))),
+                    ]
+                )
+                transform = QtGui.QTransform.quadToQuad(source_quad, target_quad)
+                if transform.isIdentity() and source_quad != target_quad:
+                    continue
+                painter.save()
+                painter.setClipPath(local_path)
+                painter.setClipPath(quad_path, QtCore.Qt.IntersectClip)
+                painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
+                painter.setTransform(transform, False)
+                painter.drawImage(QtCore.QPointF(0.0, 0.0), source)
+                painter.restore()
+                drawn_cells += 1
+        painter.end()
+        if drawn_cells <= 0:
+            return None
+        self._apply_path_alpha_mask(output, local_path)
+
+        full = QtGui.QImage(path.boundingRect().toAlignedRect().right() + 1, path.boundingRect().toAlignedRect().bottom() + 1, QtGui.QImage.Format_ARGB32_Premultiplied)
+        if full.isNull():
+            return output
+        full.fill(QtCore.Qt.transparent)
+        full_painter = QtGui.QPainter(full)
+        full_painter.drawImage(origin, output)
+        full_painter.end()
+        return full
+
+    @classmethod
+    def _smooth_channel_source(cls, source: np.ndarray) -> np.ndarray:
+        if source.ndim != 3 or source.shape[0] <= 1:
+            return source
+        source_height = int(source.shape[0])
+        target_height = min(max(80, source_height * 12), cls._MAX_CHANNEL_SWEEP_ROWS)
+        if target_height <= source_height:
+            return source
+        old_y = np.arange(source_height, dtype=float)
+        new_y = np.linspace(0.0, float(source_height - 1), target_height, dtype=float)
+        y0 = np.floor(new_y).astype(np.int32)
+        y1 = np.minimum(y0 + 1, source_height - 1)
+        wy = (new_y - y0).astype(np.float32)
+        interpolated = (
+            source[y0].astype(np.float32) * (1.0 - wy[:, None, None])
+            + source[y1].astype(np.float32) * wy[:, None, None]
+        )
+        if target_height >= 5:
+            kernel = np.array([1.0, 4.0, 6.0, 4.0, 1.0], dtype=np.float32)
+            kernel /= float(kernel.sum())
+            padded = np.pad(interpolated, ((2, 2), (0, 0), (0, 0)), mode="edge")
+            interpolated = (
+                padded[:-4] * kernel[0]
+                + padded[1:-3] * kernel[1]
+                + padded[2:-2] * kernel[2]
+                + padded[3:-1] * kernel[3]
+                + padded[4:] * kernel[4]
+            )
+        return np.clip(interpolated, 0, 255).astype(np.uint8)
+
+    def _render_curvilinear_texture(
+        self,
+        preview_image: QtGui.QImage,
+        path: QtGui.QPainterPath,
+        render_samples: list[dict[str, object]],
+        screen_polygon: list[QtCore.QPointF],
+        target_size: QtCore.QSize,
+    ) -> QtGui.QImage | None:
+        if preview_image.isNull() or path.isEmpty() or len(render_samples) < 2:
+            return None
+        target_rect = path.boundingRect().toAlignedRect().intersected(
+            QtCore.QRect(0, 0, int(target_size.width()), int(target_size.height()))
+        )
+        if target_rect.isEmpty():
+            return None
+        image_size = target_rect.size()
+        mask = QtGui.QImage(image_size, QtGui.QImage.Format_Grayscale8)
+        mask.fill(0)
+        mask_painter = QtGui.QPainter(mask)
+        mask_painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        mask_painter.translate(-target_rect.left(), -target_rect.top())
+        mask_painter.fillPath(path, QtGui.QColor(255, 255, 255))
+        mask_painter.end()
+        mask_array = self._qimage_uint8_view(mask, channels=1).copy()
+        if mask_array.size == 0 or not np.any(mask_array):
+            return None
+
+        source = preview_image.convertToFormat(QtGui.QImage.Format_ARGB32)
+        source_array = self._qimage_uint8_view(source, channels=4).copy()
+        if source_array.size == 0:
+            return None
+        source_height, source_width = source_array.shape[:2]
+        centers = np.array(
+            [
+                [float(sample.get("screen_x", 0.0)) - float(target_rect.left()), float(sample.get("screen_y", 0.0)) - float(target_rect.top())]
+                for sample in render_samples
+            ],
+            dtype=float,
+        )
+        point_count = centers.shape[0]
+        trace_positions = np.array([float(sample.get("trace_index", 0.0)) for sample in render_samples], dtype=float)
+        if float(trace_positions[-1] - trace_positions[0]) <= 1e-9:
+            source_u = np.linspace(0.0, float(source_width - 1), point_count, dtype=float)
+        else:
+            source_u = (
+                (trace_positions - float(trace_positions[0]))
+                / float(trace_positions[-1] - trace_positions[0])
+                * float(source_width - 1)
+            )
+        local_polygon = [
+            QtCore.QPointF(float(point.x() - target_rect.left()), float(point.y() - target_rect.top()))
+            for point in screen_polygon
+        ]
+        half_widths = self._estimate_half_widths(local_polygon, point_count)
+        output = np.zeros((image_size.height(), image_size.width(), 4), dtype=np.uint8)
+        best_score = np.full((image_size.height(), image_size.width()), np.inf, dtype=np.float32)
+        image_bottom = float(source_height - 1)
+        for idx in range(point_count - 1):
+            start = centers[idx]
+            stop = centers[idx + 1]
+            segment = stop - start
+            segment_len2 = float(np.dot(segment, segment))
+            if segment_len2 <= 1e-9:
+                continue
+            segment_len = float(np.sqrt(segment_len2))
+            normal = np.array([-segment[1] / segment_len, segment[0] / segment_len], dtype=float)
+            max_half_width = max(float(half_widths[idx]), float(half_widths[idx + 1])) + 2.0
+            min_x = int(max(np.floor(min(start[0], stop[0]) - max_half_width), 0))
+            max_x = int(min(np.ceil(max(start[0], stop[0]) + max_half_width), image_size.width() - 1))
+            min_y = int(max(np.floor(min(start[1], stop[1]) - max_half_width), 0))
+            max_y = int(min(np.ceil(max(start[1], stop[1]) + max_half_width), image_size.height() - 1))
+            if min_x > max_x or min_y > max_y:
+                continue
+            yy, xx = np.mgrid[min_y : max_y + 1, min_x : max_x + 1]
+            px = xx.astype(float) + 0.5
+            py = yy.astype(float) + 0.5
+            rel_x = px - float(start[0])
+            rel_y = py - float(start[1])
+            t = np.clip((rel_x * float(segment[0]) + rel_y * float(segment[1])) / segment_len2, 0.0, 1.0)
+            closest_x = float(start[0]) + t * float(segment[0])
+            closest_y = float(start[1]) + t * float(segment[1])
+            offset_x = px - closest_x
+            offset_y = py - closest_y
+            signed = offset_x * float(normal[0]) + offset_y * float(normal[1])
+            half_width = (1.0 - t) * float(half_widths[idx]) + t * float(half_widths[idx + 1])
+            half_width = np.maximum(half_width, 0.5)
+            score = np.abs(signed) / half_width
+            local_mask = (mask_array[min_y : max_y + 1, min_x : max_x + 1] > 0) & (score <= 1.08)
+            current = best_score[min_y : max_y + 1, min_x : max_x + 1]
+            update_mask = local_mask & (score < current)
+            if not np.any(update_mask):
+                continue
+            u = (1.0 - t) * float(source_u[idx]) + t * float(source_u[idx + 1])
+            v = (0.5 - signed / (2.0 * half_width)) * image_bottom
+            sampled = self._sample_argb32_bilinear(source_array, u, v)
+            alpha = mask_array[min_y : max_y + 1, min_x : max_x + 1]
+            target = output[min_y : max_y + 1, min_x : max_x + 1]
+            for channel in range(4):
+                channel_values = sampled[:, :, channel]
+                if channel == 3:
+                    channel_values = alpha
+                target_channel = target[:, :, channel]
+                target_channel[update_mask] = channel_values[update_mask]
+            current[update_mask] = score[update_mask].astype(np.float32)
+
+        missing = (mask_array > 0) & ~np.isfinite(best_score)
+        if np.any(missing):
+            output[missing, 0] = 48
+            output[missing, 1] = 48
+            output[missing, 2] = 48
+            output[missing, 3] = mask_array[missing]
+
+        result = QtGui.QImage(image_size, QtGui.QImage.Format_ARGB32)
+        result_array = self._qimage_uint8_view(result, channels=4)
+        result_array[:, :, :] = output
+        if target_rect.left() == 0 and target_rect.top() == 0 and image_size == target_size:
+            return result
+        full = QtGui.QImage(target_size, QtGui.QImage.Format_ARGB32)
+        full.fill(QtCore.Qt.transparent)
+        full_painter = QtGui.QPainter(full)
+        full_painter.drawImage(QtCore.QPoint(target_rect.left(), target_rect.top()), result)
+        full_painter.end()
+        return full
+
+    @staticmethod
+    def _qimage_uint8_view(image: QtGui.QImage, *, channels: int) -> np.ndarray:
+        height = int(image.height())
+        width = int(image.width())
+        if height <= 0 or width <= 0:
+            return np.empty((0, 0, channels), dtype=np.uint8) if channels > 1 else np.empty((0, 0), dtype=np.uint8)
+        buffer = image.bits()
+        array = np.frombuffer(buffer, dtype=np.uint8).reshape((height, int(image.bytesPerLine())))
+        if channels == 1:
+            return array[:, :width]
+        return array[:, : width * channels].reshape((height, width, channels))
+
+    @classmethod
+    def _argb32_image_from_array(cls, array: np.ndarray) -> QtGui.QImage:
+        if array.ndim != 3 or array.shape[2] != 4 or array.size == 0:
+            return QtGui.QImage()
+        height, width = array.shape[:2]
+        image = QtGui.QImage(int(width), int(height), QtGui.QImage.Format_ARGB32)
+        if image.isNull():
+            return image
+        target = cls._qimage_uint8_view(image, channels=4)
+        target[:, :, :] = np.asarray(array, dtype=np.uint8)
+        return image
+
+    @staticmethod
+    def _quad_path(polygon: QtGui.QPolygonF) -> QtGui.QPainterPath:
+        path = QtGui.QPainterPath()
+        path.addPolygon(polygon)
+        path.closeSubpath()
+        return path
+
+    @classmethod
+    def _apply_path_alpha_mask(cls, image: QtGui.QImage, path: QtGui.QPainterPath) -> None:
+        if image.isNull() or path.isEmpty():
+            return
+        mask = QtGui.QImage(image.size(), QtGui.QImage.Format_Grayscale8)
+        mask.fill(0)
+        painter = QtGui.QPainter(mask)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.fillPath(path, QtGui.QColor(255, 255, 255))
+        painter.end()
+        image_array = cls._qimage_uint8_view(image, channels=4)
+        mask_array = cls._qimage_uint8_view(mask, channels=1)
+        if image_array.size == 0 or mask_array.size == 0:
+            return
+        image_array[:, :, 3] = np.minimum(image_array[:, :, 3], mask_array)
+
+    @staticmethod
+    def _sample_argb32_bilinear(source: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
+        height, width = source.shape[:2]
+        u = np.clip(u, 0.0, float(max(width - 1, 0)))
+        v = np.clip(v, 0.0, float(max(height - 1, 0)))
+        x0 = np.floor(u).astype(np.int32)
+        y0 = np.floor(v).astype(np.int32)
+        x1 = np.minimum(x0 + 1, width - 1)
+        y1 = np.minimum(y0 + 1, height - 1)
+        wx = (u - x0).astype(np.float32)
+        wy = (v - y0).astype(np.float32)
+        top = source[y0, x0].astype(np.float32) * (1.0 - wx[:, :, None]) + source[y0, x1].astype(np.float32) * wx[:, :, None]
+        bottom = source[y1, x0].astype(np.float32) * (1.0 - wx[:, :, None]) + source[y1, x1].astype(np.float32) * wx[:, :, None]
+        return np.clip(top * (1.0 - wy[:, :, None]) + bottom * wy[:, :, None], 0, 255).astype(np.uint8)
+
+    @staticmethod
+    def _trace_values_for_render_samples(trace_indices: object, point_count: int) -> np.ndarray:
+        try:
+            values = np.asarray(list(trace_indices), dtype=float)
+        except (TypeError, ValueError):
+            values = np.empty((0,), dtype=float)
+        if values.size == point_count:
+            return values
+        if values.size >= 2:
+            return np.linspace(float(values[0]), float(values[-1]), point_count, dtype=float)
+        return np.arange(point_count, dtype=float)
+
+    @staticmethod
+    def _expanded_world_bounds(world_array: np.ndarray) -> tuple[float, float, float, float] | None:
+        if world_array.size == 0:
+            return None
+        min_x = float(np.nanmin(world_array[:, 0]))
+        max_x = float(np.nanmax(world_array[:, 0]))
+        min_y = float(np.nanmin(world_array[:, 1]))
+        max_y = float(np.nanmax(world_array[:, 1]))
+        if not all(np.isfinite([min_x, max_x, min_y, max_y])):
+            return None
+        width = max(max_x - min_x, 1e-12)
+        height = max(max_y - min_y, 1e-12)
+        margin_x = max(width * 0.04, 1e-9)
+        margin_y = max(height * 0.04, 1e-9)
+        return (min_x - margin_x, min_y - margin_y, max_x + margin_x, max_y + margin_y)
+
+    def _raster_overlay_size(
+        self,
+        bounds: tuple[float, float, float, float],
+        canvas_rect: QtCore.QRectF,
+        preview_image: QtGui.QImage,
+    ) -> QtCore.QSize:
+        min_x, min_y, max_x, max_y = bounds
+        world_width = max(max_x - min_x, 1e-12)
+        world_height = max(max_y - min_y, 1e-12)
+        aspect = float(np.clip(world_width / world_height, 0.05, 20.0))
+        dpr = max(float(self.devicePixelRatioF()), 1.0)
+        screen_width = max(world_width * self._world_scale() * dpr, 1.0)
+        screen_height = max(world_height * self._world_scale() * dpr, 1.0)
+        source_width_hint = min(max(int(preview_image.width()), 256), self._MAX_OVERVIEW_TEXTURE_WIDTH)
+        target_width = max(screen_width, float(source_width_hint))
+        target_height = max(screen_height, target_width / aspect)
+        target_width = max(target_width, target_height * aspect)
+        max_width = float(self._MAX_OVERVIEW_TEXTURE_WIDTH)
+        max_height = float(self._MAX_OVERVIEW_TEXTURE_HEIGHT)
+        scale = min(max_width / target_width, max_height / target_height, 1.0)
+        target_width *= scale
+        target_height *= scale
+        pixel_count = target_width * target_height
+        if pixel_count > self._MAX_OVERVIEW_TEXTURE_PIXELS:
+            scale = float(np.sqrt(self._MAX_OVERVIEW_TEXTURE_PIXELS / pixel_count))
+            target_width *= scale
+            target_height *= scale
+        width = int(np.clip(round(target_width), 32, self._MAX_OVERVIEW_TEXTURE_WIDTH))
+        height = int(np.clip(round(target_height), 32, self._MAX_OVERVIEW_TEXTURE_HEIGHT))
+        return QtCore.QSize(width, height)
+
+    def _world_bounds_to_canvas_rect(
+        self,
+        bounds: tuple[float, float, float, float],
+        canvas_rect: QtCore.QRectF,
+    ) -> QtCore.QRectF:
+        min_x, min_y, max_x, max_y = bounds
+        scale = self._world_scale()
+        left = canvas_rect.center().x() + (float(min_x) - self._center_world_x) * scale
+        top = canvas_rect.center().y() + (float(min_y) - self._center_world_y) * scale
+        width = max((float(max_x) - float(min_x)) * scale, 1.0)
+        height = max((float(max_y) - float(min_y)) * scale, 1.0)
+        return QtCore.QRectF(float(left), float(top), float(width), float(height))
 
     def _draw_preview_image(
         self,
@@ -593,7 +1219,40 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
     ) -> None:
         target_rect = path.boundingRect()
         lod_image = self._preview_lod_image(preview_image, target_rect, fast_mode=fast_mode)
-        self._draw_preview_base_fill(painter, item, path, lod_image, fast_mode=fast_mode)
+        if fast_mode:
+            self._draw_preview_base_fill(painter, item, path, lod_image, fast_mode=fast_mode)
+            return
+        strip_quads = self._build_preview_strip_quads(
+            item.get("render_navigation_samples", []),
+            item.get("screen_polygon", []),
+            lod_image.width(),
+            lod_image.height(),
+            max_quads=self._preview_quad_budget(target_rect),
+        )
+        if not strip_quads:
+            self._draw_preview_base_fill(painter, item, path, lod_image, fast_mode=fast_mode)
+            return
+        painter.save()
+        painter.fillPath(path, QtGui.QColor(48, 48, 48, 48))
+        painter.restore()
+        for source_quad, target_quad in strip_quads:
+            transform = QtGui.QTransform.quadToQuad(source_quad, target_quad)
+            if transform.isIdentity() and source_quad != target_quad:
+                continue
+            painter.save()
+            quad_path = QtGui.QPainterPath()
+            quad_path.addPolygon(target_quad)
+            painter.setClipPath(path)
+            painter.setClipPath(quad_path, QtCore.Qt.IntersectClip)
+            painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
+            painter.setTransform(transform, False)
+            painter.drawImage(QtCore.QPointF(0.0, 0.0), lod_image)
+            painter.restore()
+
+    @classmethod
+    def _preview_quad_budget(cls, target_rect: QtCore.QRectF) -> int:
+        visible_pixels = max(float(target_rect.width()), float(target_rect.height()), 1.0)
+        return int(np.clip(np.ceil(visible_pixels / 12.0), 24, cls._MAX_PREVIEW_QUADS))
 
     def _preview_lod_image(self, image: QtGui.QImage, target_rect: QtCore.QRectF, *, fast_mode: bool) -> QtGui.QImage:
         if image.isNull():
@@ -809,6 +1468,8 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         screen_polygon: list[QtCore.QPointF],
         image_width: int,
         image_height: int,
+        *,
+        max_quads: int | None = None,
     ) -> list[tuple[QtGui.QPolygonF, QtGui.QPolygonF]]:
         if image_width <= 1 or image_height <= 0:
             return []
@@ -837,9 +1498,12 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         )
         half_widths = OverviewOverlayWidget._estimate_half_widths(screen_polygon, point_count)
         indices = np.arange(point_count - 1, dtype=int)
-        if indices.size > OverviewOverlayWidget._MAX_PREVIEW_QUADS:
-            sample_at = np.linspace(0, indices.size - 1, OverviewOverlayWidget._MAX_PREVIEW_QUADS, dtype=int)
+        quad_limit = int(max_quads or OverviewOverlayWidget._MAX_PREVIEW_QUADS)
+        quad_limit = int(np.clip(quad_limit, 1, OverviewOverlayWidget._MAX_PREVIEW_QUADS))
+        if indices.size > quad_limit:
+            sample_at = np.linspace(0, indices.size - 1, quad_limit, dtype=int)
             indices = np.unique(indices[sample_at])
+        segment_edges: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
         for idx in indices:
             u0 = float(source_u[idx])
             u1 = float(source_u[idx + 1])
@@ -855,32 +1519,22 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
             normal = np.array([-tangent[1], tangent[0]], dtype=float)
             half_width_start = float(half_widths[idx])
             half_width_stop = float(half_widths[idx + 1])
-            overlap_target = min(1.15, max(0.35, segment_length * 0.18))
-            start_ext = start - tangent * overlap_target * 0.5
-            stop_ext = stop + tangent * overlap_target * 0.5
+            left_start = start + normal * half_width_start
+            left_stop = stop + normal * half_width_stop
+            right_stop = stop - normal * half_width_stop
+            right_start = start - normal * half_width_start
+            segment_edges[int(idx)] = (left_start, right_start, left_stop, right_stop)
             target_quad = QtGui.QPolygonF(
                 [
-                    QtCore.QPointF(
-                        float(start_ext[0] + normal[0] * half_width_start),
-                        float(start_ext[1] + normal[1] * half_width_start),
-                    ),
-                    QtCore.QPointF(
-                        float(stop_ext[0] + normal[0] * half_width_stop),
-                        float(stop_ext[1] + normal[1] * half_width_stop),
-                    ),
-                    QtCore.QPointF(
-                        float(stop_ext[0] - normal[0] * half_width_stop),
-                        float(stop_ext[1] - normal[1] * half_width_stop),
-                    ),
-                    QtCore.QPointF(
-                        float(start_ext[0] - normal[0] * half_width_start),
-                        float(start_ext[1] - normal[1] * half_width_start),
-                    ),
+                    QtCore.QPointF(float(left_start[0]), float(left_start[1])),
+                    QtCore.QPointF(float(left_stop[0]), float(left_stop[1])),
+                    QtCore.QPointF(float(right_stop[0]), float(right_stop[1])),
+                    QtCore.QPointF(float(right_start[0]), float(right_start[1])),
                 ]
             )
             if target_quad.boundingRect().width() < 0.5 and target_quad.boundingRect().height() < 0.5:
                 continue
-            overlap_source = min(1.2, max(0.6, (u1 - u0) * 0.08))
+            overlap_source = min(1.5, max(0.8, (u1 - u0) * 0.10))
             src_u0 = max(0.0, u0 - overlap_source)
             src_u1 = min(float(image_width - 1), u1 + overlap_source)
             source_quad = QtGui.QPolygonF(
@@ -892,7 +1546,92 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
                 ]
             )
             quads.append((source_quad, target_quad))
-        return quads
+        main_quads = list(quads)
+        connector_quads: list[tuple[QtGui.QPolygonF, QtGui.QPolygonF]] = []
+        for idx in indices[:-1]:
+            idx = int(idx)
+            next_idx = idx + 1
+            if next_idx not in segment_edges or idx not in segment_edges:
+                continue
+            _prev_left_start, _prev_right_start, prev_left_stop, prev_right_stop = segment_edges[idx]
+            next_left_start, next_right_start, _next_left_stop, _next_right_stop = segment_edges[next_idx]
+            connector = QtGui.QPolygonF(
+                [
+                    QtCore.QPointF(float(prev_left_stop[0]), float(prev_left_stop[1])),
+                    QtCore.QPointF(float(next_left_start[0]), float(next_left_start[1])),
+                    QtCore.QPointF(float(next_right_start[0]), float(next_right_start[1])),
+                    QtCore.QPointF(float(prev_right_stop[0]), float(prev_right_stop[1])),
+                ]
+            )
+            if connector.boundingRect().width() < 0.5 and connector.boundingRect().height() < 0.5:
+                continue
+            u_center = float(source_u[next_idx])
+            connector_source_width = 2.5
+            source_quad = QtGui.QPolygonF(
+                [
+                    QtCore.QPointF(max(0.0, u_center - connector_source_width), 0.0),
+                    QtCore.QPointF(min(float(image_width - 1), u_center + connector_source_width), 0.0),
+                    QtCore.QPointF(min(float(image_width - 1), u_center + connector_source_width), image_bottom),
+                    QtCore.QPointF(max(0.0, u_center - connector_source_width), image_bottom),
+                ]
+            )
+            connector_quads.append((source_quad, connector))
+        return connector_quads + main_quads
+
+    @staticmethod
+    def _strip_boundary_vertices(
+        screen_polygon: list[QtCore.QPointF],
+        centers: np.ndarray,
+        half_widths: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        point_count = int(centers.shape[0])
+        if isinstance(screen_polygon, list) and len(screen_polygon) >= point_count * 2 and point_count > 0:
+            left = np.array(
+                [[float(point.x()), float(point.y())] for point in screen_polygon[:point_count]],
+                dtype=float,
+            )
+            right = np.array(
+                [[float(point.x()), float(point.y())] for point in reversed(screen_polygon[point_count : point_count * 2])],
+                dtype=float,
+            )
+            if left.shape[0] == point_count and right.shape[0] == point_count:
+                return left, right
+        normals = OverviewOverlayWidget._centerline_vertex_normals(centers)
+        widths = np.asarray(half_widths, dtype=float)
+        if widths.size != point_count:
+            widths = np.full((point_count,), 3.0, dtype=float)
+        return centers + normals * widths[:, None], centers - normals * widths[:, None]
+
+    @staticmethod
+    def _centerline_vertex_normals(centers: np.ndarray) -> np.ndarray:
+        point_count = int(centers.shape[0])
+        normals = np.zeros_like(centers, dtype=float)
+        if point_count == 0:
+            return normals
+        if point_count == 1:
+            normals[0] = np.array([0.0, 1.0], dtype=float)
+            return normals
+        deltas = np.diff(centers, axis=0)
+        lengths = np.hypot(deltas[:, 0], deltas[:, 1])
+        safe_lengths = np.where(lengths > 1e-9, lengths, 1.0)
+        tangents = deltas / safe_lengths[:, None]
+        tangents[lengths <= 1e-9] = np.array([1.0, 0.0], dtype=float)
+        vertex_tangents = np.zeros_like(centers, dtype=float)
+        vertex_tangents[0] = tangents[0]
+        vertex_tangents[-1] = tangents[-1]
+        if point_count > 2:
+            vertex_tangents[1:-1] = tangents[:-1] + tangents[1:]
+            tangent_lengths = np.hypot(vertex_tangents[1:-1, 0], vertex_tangents[1:-1, 1])
+            sharp_mask = tangent_lengths <= 1e-9
+            middle_tangents = vertex_tangents[1:-1]
+            middle_tangents[sharp_mask] = tangents[:-1][sharp_mask]
+            vertex_tangents[1:-1] = middle_tangents
+        tangent_lengths = np.hypot(vertex_tangents[:, 0], vertex_tangents[:, 1])
+        tangent_lengths = np.where(tangent_lengths > 1e-9, tangent_lengths, 1.0)
+        vertex_tangents = vertex_tangents / tangent_lengths[:, None]
+        normals[:, 0] = -vertex_tangents[:, 1]
+        normals[:, 1] = vertex_tangents[:, 0]
+        return normals
 
     @staticmethod
     def _estimate_half_widths(screen_polygon: list[QtCore.QPointF], point_count: int) -> np.ndarray:
@@ -986,23 +1725,48 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         render_navigation_samples: list[dict[str, object]],
         centerline_path: QtGui.QPainterPath,
     ) -> QtGui.QPainterPath:
-        if not centerline_path.isEmpty() and isinstance(render_navigation_samples, list) and len(render_navigation_samples) >= 2:
-            point_count = len(render_navigation_samples)
-            half_widths = cls._estimate_half_widths(screen_polygon, point_count)
-            stroke_width = max(float(np.mean(half_widths) * 2.0), 1.0)
-            stroker = QtGui.QPainterPathStroker()
-            stroker.setWidth(stroke_width)
-            stroker.setJoinStyle(QtCore.Qt.RoundJoin)
-            stroker.setCapStyle(QtCore.Qt.RoundCap)
-            path = stroker.createStroke(centerline_path)
-            path.setFillRule(QtCore.Qt.WindingFill)
-            return path.simplified()
-        path = QtGui.QPainterPath()
+        del render_navigation_samples, centerline_path
         if isinstance(screen_polygon, list) and screen_polygon:
-            polygon = QtGui.QPolygonF(screen_polygon)
-            path.addPolygon(polygon)
-            path.closeSubpath()
-            path.setFillRule(QtCore.Qt.WindingFill)
+            return cls._smooth_polygon_path(screen_polygon)
+        return QtGui.QPainterPath()
+
+    @staticmethod
+    def _smooth_polygon_path(points: list[QtCore.QPointF]) -> QtGui.QPainterPath:
+        cleaned: list[QtCore.QPointF] = []
+        for point in points:
+            if not cleaned:
+                cleaned.append(point)
+                continue
+            dx = float(point.x() - cleaned[-1].x())
+            dy = float(point.y() - cleaned[-1].y())
+            if dx * dx + dy * dy >= 0.04:
+                cleaned.append(point)
+        if len(cleaned) >= 2:
+            dx = float(cleaned[0].x() - cleaned[-1].x())
+            dy = float(cleaned[0].y() - cleaned[-1].y())
+            if dx * dx + dy * dy < 0.04:
+                cleaned.pop()
+        path = QtGui.QPainterPath()
+        if len(cleaned) < 3:
+            if cleaned:
+                path.moveTo(cleaned[0])
+                for point in cleaned[1:]:
+                    path.lineTo(point)
+            return path
+        start = QtCore.QPointF(
+            (cleaned[-1].x() + cleaned[0].x()) * 0.5,
+            (cleaned[-1].y() + cleaned[0].y()) * 0.5,
+        )
+        path.moveTo(start)
+        for index, point in enumerate(cleaned):
+            next_point = cleaned[(index + 1) % len(cleaned)]
+            mid = QtCore.QPointF(
+                (point.x() + next_point.x()) * 0.5,
+                (point.y() + next_point.y()) * 0.5,
+            )
+            path.quadTo(point, mid)
+        path.closeSubpath()
+        path.setFillRule(QtCore.Qt.WindingFill)
         return path
 
     @classmethod
@@ -1088,6 +1852,7 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         self._apply_pending_map_state()
         self.show()
         self.raise_()
+        self.update()
 
     @staticmethod
     def _region_label_text(file_item: dict[str, object], region: dict[str, object]) -> str:
