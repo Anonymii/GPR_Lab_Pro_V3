@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.server
+import re
 import socketserver
 import threading
 import time
@@ -45,6 +46,7 @@ class _OfflineTileHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer
 
 class OfflineTileServer(QtCore.QObject):
     _MEMORY_CACHE_LIMIT = 384
+    _REQUEST_RE = re.compile(r"^(?P<z>\d+)/(?P<x>\d+)/(?P<y>\d+)(?:@[0-9]+x)?\.(?:png|jpg|jpeg|webp)$", re.IGNORECASE)
 
     def __init__(self, root: Path, parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
@@ -108,18 +110,11 @@ class OfflineTileServer(QtCore.QObject):
     def resolve_request_path(self, request_path: str) -> Path | None:
         self.request_count += 1
         self.last_request_path = str(request_path)
-        normalized = request_path.split("?", 1)[0].strip("/")
-        parts = normalized.split("/")
-        if len(parts) != 4 or parts[0] != "tiles":
+        key = self._parse_request_key(request_path)
+        if key is None:
             self.miss_count += 1
             return None
-        try:
-            zoom = int(parts[1])
-            tile_x = int(parts[2])
-            tile_y = int(parts[3].removesuffix(".png"))
-        except ValueError:
-            self.miss_count += 1
-            return None
+        zoom, tile_x, tile_y = key
         tile_name = f"osm_100-l-3-{zoom}-{tile_x}-{tile_y}.png"
         candidate = self._root / tile_name
         if candidate.exists():
@@ -127,6 +122,20 @@ class OfflineTileServer(QtCore.QObject):
             return candidate
         self.miss_count += 1
         return None
+
+    @classmethod
+    def _parse_request_key(cls, request_path: str) -> tuple[int, int, int] | None:
+        normalized = request_path.split("?", 1)[0].strip("/")
+        if normalized.startswith("tiles/"):
+            normalized = normalized[6:]
+        match = cls._REQUEST_RE.match(normalized)
+        if match is None:
+            return None
+        return (
+            int(match.group("z")),
+            int(match.group("x")),
+            int(match.group("y")),
+        )
 
     def _remember_payload(self, key: str, payload: bytes) -> None:
         self._payload_cache[key] = payload
@@ -164,8 +173,16 @@ class _OnlineTileHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer)
 
 
 class OnlineTileServer(QtCore.QObject):
-    _MAP_TILE_TEMPLATE_AMAP = "http://wprd03.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scl=1&style=7&x={x}&y={y}&z={z}"
     _MEMORY_CACHE_LIMIT = 384
+    _REQUEST_RE = re.compile(r"^(?P<z>\d+)/(?P<x>\d+)/(?P<y>\d+)(?:@[0-9]+x)?\.(?:png|jpg|jpeg|webp)$", re.IGNORECASE)
+    _MAP_TILE_URLS_AMAP = (
+        "https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scl=1&style=7&x={x}&y={y}&z={z}",
+        "https://webrd02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scl=1&style=7&x={x}&y={y}&z={z}",
+        "https://webrd03.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scl=1&style=7&x={x}&y={y}&z={z}",
+        "http://wprd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scl=1&style=7&x={x}&y={y}&z={z}",
+        "http://wprd02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scl=1&style=7&x={x}&y={y}&z={z}",
+        "http://wprd03.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scl=1&style=7&x={x}&y={y}&z={z}",
+    )
 
     def __init__(self, config, parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
@@ -254,18 +271,16 @@ class OnlineTileServer(QtCore.QObject):
 
     def _parse_request_key(self, request_path: str) -> tuple[int, int, int] | None:
         normalized = request_path.split("?", 1)[0].strip("/")
-        parts = normalized.split("/")
-        if len(parts) == 4 and parts[0] == "tiles":
-            parts = parts[1:]
-        if len(parts) != 3:
+        if normalized.startswith("tiles/"):
+            normalized = normalized[6:]
+        match = self._REQUEST_RE.match(normalized)
+        if match is None:
             return None
-        try:
-            zoom = int(parts[0])
-            tile_x = int(parts[1])
-            tile_y = int(parts[2].removesuffix(".png"))
-        except ValueError:
-            return None
-        return (zoom, tile_x, tile_y)
+        return (
+            int(match.group("z")),
+            int(match.group("x")),
+            int(match.group("y")),
+        )
 
     def _tile_cache_path(self, key: tuple[int, int, int]) -> Path:
         zoom, tile_x, tile_y = key
@@ -278,25 +293,29 @@ class OnlineTileServer(QtCore.QObject):
         if provider != "amap":
             self.last_error = f"不支持的在线地图提供器: {provider}"
             return None
-        url = self._MAP_TILE_TEMPLATE_AMAP.format(z=zoom, x=tile_x, y=tile_y)
-        request = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                "Referer": "https://lbs.amap.com/",
-            },
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=8.0) as response:
-                payload = response.read()
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            self.last_error = str(exc)
-            return None
-        if not payload:
-            self.last_error = f"空瓦片返回: {url}"
-            return None
-        return payload
+        errors: list[str] = []
+        for template in self._MAP_TILE_URLS_AMAP:
+            url = template.format(z=zoom, x=tile_x, y=tile_y)
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                    "Referer": "https://lbs.amap.com/",
+                },
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=8.0) as response:
+                    payload = response.read()
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                errors.append(f"{url}: {exc}")
+                continue
+            if payload:
+                self.last_error = ""
+                return payload
+            errors.append(f"{url}: empty payload")
+        self.last_error = " | ".join(errors[-3:]) if errors else "unknown fetch error"
+        return None
 
     def _cleanup_cache_if_needed(self) -> None:
         now = time.monotonic()
@@ -552,26 +571,65 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         for region_id, path, item in self._layout_rects:
             preview_image = item.get("preview_image")
             if isinstance(preview_image, QtGui.QImage) and not preview_image.isNull():
-                painter.save()
-                painter.setClipPath(path)
-                geometry = item.get("screen_geometry")
-                if geometry is not None:
-                    painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, not fast_mode)
-                    painter.translate(geometry["center"])
-                    painter.rotate(geometry["angle_deg"])
-                    painter.drawImage(geometry["target_rect_local"], preview_image)
-                else:
-                    polygon_points = item.get("screen_polygon", [])
-                    if polygon_points:
-                        polygon = QtGui.QPolygonF(polygon_points)
-                        painter.drawImage(polygon.boundingRect(), preview_image)
-                painter.restore()
+                self._draw_preview_image(painter, item, path, preview_image, fast_mode=fast_mode)
             border_color = QtGui.QColor("#ff9500" if region_id == self._active_region_id else "#ff8c00")
             border_pen = QtGui.QPen(border_color, 2.0 if region_id == self._active_region_id else 1.6)
             painter.setPen(border_pen)
             painter.setBrush(QtCore.Qt.NoBrush)
             painter.drawPath(path)
             self._draw_region_label(painter, item)
+
+    def _draw_preview_image(
+        self,
+        painter: QtGui.QPainter,
+        item: dict[str, object],
+        path: QtGui.QPainterPath,
+        preview_image: QtGui.QImage,
+        *,
+        fast_mode: bool,
+    ) -> None:
+        strip_quads = item.get("preview_strip_quads", [])
+        if isinstance(strip_quads, list) and strip_quads:
+            self._draw_preview_base_fill(painter, item, path, preview_image, fast_mode=fast_mode)
+            for source_quad, target_quad in strip_quads:
+                transform = QtGui.QTransform.quadToQuad(source_quad, target_quad)
+                if transform.isIdentity() and source_quad != target_quad:
+                    continue
+                painter.save()
+                quad_path = QtGui.QPainterPath()
+                quad_path.addPolygon(target_quad)
+                painter.setClipPath(path)
+                painter.setClipPath(quad_path, QtCore.Qt.IntersectClip)
+                painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, not fast_mode)
+                painter.setTransform(transform, False)
+                painter.drawImage(QtCore.QPointF(0.0, 0.0), preview_image)
+                painter.restore()
+            return
+        self._draw_preview_base_fill(painter, item, path, preview_image, fast_mode=fast_mode)
+
+    def _draw_preview_base_fill(
+        self,
+        painter: QtGui.QPainter,
+        item: dict[str, object],
+        path: QtGui.QPainterPath,
+        preview_image: QtGui.QImage,
+        *,
+        fast_mode: bool,
+    ) -> None:
+        painter.save()
+        painter.setClipPath(path)
+        geometry = item.get("screen_geometry")
+        if geometry is not None:
+            painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, not fast_mode)
+            painter.translate(geometry["center"])
+            painter.rotate(geometry["angle_deg"])
+            painter.drawImage(geometry["target_rect_local"], preview_image)
+        else:
+            polygon_points = item.get("screen_polygon", [])
+            if polygon_points:
+                polygon = QtGui.QPolygonF(polygon_points)
+                painter.drawImage(polygon.boundingRect(), preview_image)
+        painter.restore()
 
     def _draw_region_label(self, painter: QtGui.QPainter, item: dict[str, object]) -> None:
         geometry = item.get("screen_geometry")
@@ -607,12 +665,6 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
                 continue
             polygon_screen = self._world_arrays_to_canvas(polygon_world_array, canvas_rect)
             polygon = QtGui.QPolygonF([QtCore.QPointF(float(x), float(y)) for x, y in polygon_screen])
-            path = QtGui.QPainterPath()
-            if not polygon.isEmpty():
-                path.moveTo(polygon.first())
-                for idx in range(1, polygon.size()):
-                    path.lineTo(polygon.at(idx))
-                path.closeSubpath()
             item = dict(prepared)
             item["screen_polygon"] = [polygon.at(idx) for idx in range(polygon.size())]
             navigation_array = prepared.get("navigation_world")
@@ -629,7 +681,34 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
                 ]
             else:
                 item["navigation_samples"] = []
+            render_navigation_array = prepared.get("render_navigation_world")
+            render_trace_indices = prepared.get("render_navigation_trace_indices", [])
+            if isinstance(render_navigation_array, np.ndarray) and render_navigation_array.size > 0:
+                render_navigation_screen = self._world_arrays_to_canvas(render_navigation_array, canvas_rect)
+                item["render_navigation_samples"] = [
+                    {
+                        "trace_index": float(render_trace_indices[idx]),
+                        "screen_x": float(render_navigation_screen[idx, 0]),
+                        "screen_y": float(render_navigation_screen[idx, 1]),
+                    }
+                    for idx in range(min(len(render_trace_indices), render_navigation_screen.shape[0]))
+                ]
+            else:
+                item["render_navigation_samples"] = []
+            centerline_path = self._build_centerline_path(item.get("render_navigation_samples", []))
+            path = self._build_region_path(item.get("screen_polygon", []), item.get("render_navigation_samples", []), centerline_path)
+            item["screen_centerline_path"] = centerline_path
             item["screen_geometry"] = self._region_screen_geometry(item)
+            preview_image = item.get("preview_image")
+            if isinstance(preview_image, QtGui.QImage) and not preview_image.isNull():
+                item["preview_strip_quads"] = self._build_preview_strip_quads(
+                    item.get("render_navigation_samples", []),
+                    item.get("screen_polygon", []),
+                    preview_image.width(),
+                    preview_image.height(),
+                )
+            else:
+                item["preview_strip_quads"] = []
             rects.append((str(prepared.get("region_id", "")), path, item))
         self._layout_cache_key = cache_key
         self._layout_cache = rects
@@ -637,7 +716,7 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
 
     @staticmethod
     def _region_screen_geometry(item: dict[str, object]) -> dict[str, object] | None:
-        samples = item.get("navigation_samples", [])
+        samples = item.get("render_navigation_samples") or item.get("navigation_samples", [])
         screen_polygon = item.get("screen_polygon", [])
         if not isinstance(samples, list) or len(samples) < 2:
             return None
@@ -714,6 +793,107 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
             "label_angle_deg": label_angle,
         }
 
+    @staticmethod
+    def _build_preview_strip_quads(
+        render_navigation_samples: list[dict[str, object]],
+        screen_polygon: list[QtCore.QPointF],
+        image_width: int,
+        image_height: int,
+    ) -> list[tuple[QtGui.QPolygonF, QtGui.QPolygonF]]:
+        if image_width <= 1 or image_height <= 0:
+            return []
+        if not isinstance(render_navigation_samples, list) or len(render_navigation_samples) < 2:
+            return []
+        point_count = len(render_navigation_samples)
+        trace_positions = np.array([float(sample.get("trace_index", 0.0)) for sample in render_navigation_samples], dtype=float)
+        if trace_positions.size < 2:
+            return []
+        if float(trace_positions[-1] - trace_positions[0]) <= 1e-9:
+            source_u = np.linspace(0.0, float(image_width - 1), point_count, dtype=float)
+        else:
+            source_u = (
+                (trace_positions - float(trace_positions[0]))
+                / float(trace_positions[-1] - trace_positions[0])
+                * float(image_width - 1)
+            )
+        quads: list[tuple[QtGui.QPolygonF, QtGui.QPolygonF]] = []
+        image_bottom = float(image_height - 1)
+        centers = np.array(
+            [
+                [float(sample.get("screen_x", 0.0)), float(sample.get("screen_y", 0.0))]
+                for sample in render_navigation_samples
+            ],
+            dtype=float,
+        )
+        half_widths = OverviewOverlayWidget._estimate_half_widths(screen_polygon, point_count)
+        for idx in range(point_count - 1):
+            u0 = float(source_u[idx])
+            u1 = float(source_u[idx + 1])
+            if abs(u1 - u0) < 0.25:
+                continue
+            start = centers[idx]
+            stop = centers[idx + 1]
+            segment = stop - start
+            segment_length = float(np.hypot(segment[0], segment[1]))
+            if segment_length < 1e-6:
+                continue
+            tangent = segment / segment_length
+            normal = np.array([-tangent[1], tangent[0]], dtype=float)
+            half_width_start = float(half_widths[idx])
+            half_width_stop = float(half_widths[idx + 1])
+            overlap_target = min(1.15, max(0.35, segment_length * 0.18))
+            start_ext = start - tangent * overlap_target * 0.5
+            stop_ext = stop + tangent * overlap_target * 0.5
+            target_quad = QtGui.QPolygonF(
+                [
+                    QtCore.QPointF(
+                        float(start_ext[0] + normal[0] * half_width_start),
+                        float(start_ext[1] + normal[1] * half_width_start),
+                    ),
+                    QtCore.QPointF(
+                        float(stop_ext[0] + normal[0] * half_width_stop),
+                        float(stop_ext[1] + normal[1] * half_width_stop),
+                    ),
+                    QtCore.QPointF(
+                        float(stop_ext[0] - normal[0] * half_width_stop),
+                        float(stop_ext[1] - normal[1] * half_width_stop),
+                    ),
+                    QtCore.QPointF(
+                        float(start_ext[0] - normal[0] * half_width_start),
+                        float(start_ext[1] - normal[1] * half_width_start),
+                    ),
+                ]
+            )
+            if target_quad.boundingRect().width() < 0.5 and target_quad.boundingRect().height() < 0.5:
+                continue
+            overlap_source = min(1.2, max(0.6, (u1 - u0) * 0.08))
+            src_u0 = max(0.0, u0 - overlap_source)
+            src_u1 = min(float(image_width - 1), u1 + overlap_source)
+            source_quad = QtGui.QPolygonF(
+                [
+                    QtCore.QPointF(src_u0, 0.0),
+                    QtCore.QPointF(src_u1, 0.0),
+                    QtCore.QPointF(src_u1, image_bottom),
+                    QtCore.QPointF(src_u0, image_bottom),
+                ]
+            )
+            quads.append((source_quad, target_quad))
+        return quads
+
+    @staticmethod
+    def _estimate_half_widths(screen_polygon: list[QtCore.QPointF], point_count: int) -> np.ndarray:
+        default = np.full((point_count,), 3.0, dtype=float)
+        if not isinstance(screen_polygon, list) or len(screen_polygon) < point_count * 2 or point_count <= 0:
+            return default
+        upper_points = screen_polygon[:point_count]
+        lower_points = list(reversed(screen_polygon[point_count:]))
+        widths = []
+        for idx in range(point_count):
+            dx = float(upper_points[idx].x() - lower_points[idx].x())
+            dy = float(upper_points[idx].y() - lower_points[idx].y())
+            widths.append(max(float(np.hypot(dx, dy)) * 0.5, 1.0))
+        return np.asarray(widths, dtype=float)
+
     def _prepare_regions(self, files: list[dict[str, object]]) -> list[dict[str, object]]:
         prepared_regions: list[dict[str, object]] = []
         for file_item in files:
@@ -722,9 +902,6 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
             for region in file_item.get("regions", []):
                 polygon_points = region.get("navigation_samples", [])
                 if not polygon_points:
-                    continue
-                polygon_geo = self._region_polygon_geo_points(polygon_points, float(region.get("render_width", 0.0)))
-                if len(polygon_geo) < 3:
                     continue
                 navigation_samples = [
                     {
@@ -735,9 +912,19 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
                     for sample in polygon_points
                     if sample.get("latitude") is not None and sample.get("longitude") is not None
                 ]
+                render_width = float(region.get("render_width", 0.0))
+                render_navigation_samples = self._build_render_navigation_samples(navigation_samples, render_width)
+                polygon_geo = self._region_polygon_geo_points(render_navigation_samples, render_width)
+                if len(polygon_geo) < 3:
+                    continue
                 navigation_array = (
                     np.array([[sample["latitude"], sample["longitude"]] for sample in navigation_samples], dtype=float)
                     if navigation_samples
+                    else np.empty((0, 2), dtype=float)
+                )
+                render_navigation_array = (
+                    np.array([[sample["latitude"], sample["longitude"]] for sample in render_navigation_samples], dtype=float)
+                    if render_navigation_samples
                     else np.empty((0, 2), dtype=float)
                 )
                 prepared_regions.append(
@@ -760,9 +947,117 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
                         "navigation_array": navigation_array,
                         "navigation_world": self._geo_arrays_to_world(navigation_array),
                         "navigation_trace_indices": [sample["trace_index"] for sample in navigation_samples],
+                        "render_navigation_samples": render_navigation_samples,
+                        "render_navigation_world": self._geo_arrays_to_world(render_navigation_array),
+                        "render_navigation_trace_indices": [float(sample["trace_index"]) for sample in render_navigation_samples],
                     }
                 )
         return prepared_regions
+
+    @staticmethod
+    def _build_centerline_path(render_navigation_samples: list[dict[str, object]]) -> QtGui.QPainterPath:
+        path = QtGui.QPainterPath()
+        if not isinstance(render_navigation_samples, list) or not render_navigation_samples:
+            return path
+        first = render_navigation_samples[0]
+        path.moveTo(float(first.get("screen_x", 0.0)), float(first.get("screen_y", 0.0)))
+        for sample in render_navigation_samples[1:]:
+            path.lineTo(float(sample.get("screen_x", 0.0)), float(sample.get("screen_y", 0.0)))
+        return path
+
+    @classmethod
+    def _build_region_path(
+        cls,
+        screen_polygon: list[QtCore.QPointF],
+        render_navigation_samples: list[dict[str, object]],
+        centerline_path: QtGui.QPainterPath,
+    ) -> QtGui.QPainterPath:
+        if not centerline_path.isEmpty() and isinstance(render_navigation_samples, list) and len(render_navigation_samples) >= 2:
+            point_count = len(render_navigation_samples)
+            half_widths = cls._estimate_half_widths(screen_polygon, point_count)
+            stroke_width = max(float(np.mean(half_widths) * 2.0), 1.0)
+            stroker = QtGui.QPainterPathStroker()
+            stroker.setWidth(stroke_width)
+            stroker.setJoinStyle(QtCore.Qt.RoundJoin)
+            stroker.setCapStyle(QtCore.Qt.RoundCap)
+            path = stroker.createStroke(centerline_path)
+            path.setFillRule(QtCore.Qt.WindingFill)
+            return path.simplified()
+        path = QtGui.QPainterPath()
+        if isinstance(screen_polygon, list) and screen_polygon:
+            polygon = QtGui.QPolygonF(screen_polygon)
+            path.addPolygon(polygon)
+            path.closeSubpath()
+            path.setFillRule(QtCore.Qt.WindingFill)
+        return path
+
+    @classmethod
+    def _build_render_navigation_samples(
+        cls,
+        navigation_samples: list[dict[str, object]],
+        width_m: float,
+    ) -> list[dict[str, float]]:
+        if not isinstance(navigation_samples, list) or len(navigation_samples) < 2:
+            return list(navigation_samples or [])
+        trace_positions = np.array([float(sample.get("trace_index", 0.0)) for sample in navigation_samples], dtype=float)
+        latitudes = np.array([float(sample.get("latitude", 0.0)) for sample in navigation_samples], dtype=float)
+        longitudes = np.array([float(sample.get("longitude", 0.0)) for sample in navigation_samples], dtype=float)
+        window = min(15, max(5, ((len(navigation_samples) // 600) * 2) + 5))
+        if window % 2 == 0:
+            window += 1
+        smooth_latitudes = cls._smooth_series(latitudes, window)
+        smooth_longitudes = cls._smooth_series(longitudes, window)
+        center_lat = float(np.mean(smooth_latitudes))
+        center_lon = float(np.mean(smooth_longitudes))
+        meters_per_deg_lat = 111320.0
+        meters_per_deg_lon = max(111320.0 * float(np.cos(np.deg2rad(center_lat))), 1.0)
+        x_coords = (smooth_longitudes - center_lon) * meters_per_deg_lon
+        y_coords = (smooth_latitudes - center_lat) * meters_per_deg_lat
+        cumulative = np.concatenate(([0.0], np.cumsum(np.hypot(np.diff(x_coords), np.diff(y_coords)))))
+        if cumulative.size >= 2:
+            keep_mask = np.concatenate((np.array([True]), np.diff(cumulative) > 1e-6))
+            cumulative = cumulative[keep_mask]
+            x_coords = x_coords[keep_mask]
+            y_coords = y_coords[keep_mask]
+            trace_positions = trace_positions[keep_mask]
+        step_m = float(np.clip(max(float(width_m) * 0.08, 0.18), 0.18, 0.60))
+        if cumulative.size >= 2 and cumulative[-1] > step_m * 2.0:
+            target = np.arange(0.0, float(cumulative[-1]), step_m, dtype=float)
+            if target.size == 0 or target[-1] < cumulative[-1]:
+                target = np.append(target, cumulative[-1])
+            x_coords = np.interp(target, cumulative, x_coords)
+            y_coords = np.interp(target, cumulative, y_coords)
+            trace_positions = np.interp(target, cumulative, trace_positions)
+        resampled_latitudes = center_lat + (y_coords / meters_per_deg_lat)
+        resampled_longitudes = center_lon + (x_coords / meters_per_deg_lon)
+        return [
+            {
+                "trace_index": float(trace_positions[idx]),
+                "latitude": float(resampled_latitudes[idx]),
+                "longitude": float(resampled_longitudes[idx]),
+            }
+            for idx in range(len(resampled_latitudes))
+        ]
+
+    @staticmethod
+    def _smooth_series(values: np.ndarray, window: int) -> np.ndarray:
+        array = np.asarray(values, dtype=float)
+        if array.size < 3:
+            return array.copy()
+        size = int(max(3, min(window, array.size if array.size % 2 == 1 else array.size - 1)))
+        if size < 3:
+            return array.copy()
+        if size % 2 == 0:
+            size -= 1
+        if size < 3:
+            return array.copy()
+        pad = size // 2
+        kernel = np.ones(size, dtype=float) / float(size)
+        padded = np.pad(array, (pad, pad), mode="edge")
+        smoothed = np.convolve(padded, kernel, mode="valid")
+        smoothed[0] = array[0]
+        smoothed[-1] = array[-1]
+        return smoothed
 
     def _apply_pending_map_state(self) -> None:
         if self._pending_map_state is None:

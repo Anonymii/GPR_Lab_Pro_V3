@@ -184,7 +184,7 @@ class GPRDataImporter:
             data_cols: list[list[np.ndarray]] = [[] for _ in range(total_lines)]
             current_p = start_p_data
             keep_frame_cnt = 0
-            navigation_rows: list[ImportedNavigationSample | None] = []
+            navigation_rows_raw: list[tuple[int | None, int | None, float | None, float | None] | None] = []
             gps_metadata_present = False
 
             while current_p + 32 < file_end_pos:
@@ -210,9 +210,16 @@ class GPRDataImporter:
                     gps_timestamp = int(frame_header.gps_timestamp)
                     longitude = float(frame_header.longitude)
                     latitude = float(frame_header.latitude)
-                    if gps_status != 0 or gps_timestamp != 0 or self._is_valid_geo(latitude, longitude):
+                    if gps_status != 0 or gps_timestamp != 0 or self._has_geo_hint(latitude, longitude):
                         gps_metadata_present = True
-                    frame_navigation_meta.append((gps_status, gps_timestamp, latitude, longitude))
+                    frame_navigation_meta.append(
+                        (
+                            gps_status,
+                            gps_timestamp,
+                            latitude,
+                            longitude,
+                        )
+                    )
                     payload_p = current_p + header.frame_header_size
                     if frame_ok:
                         fh.seek(payload_p)
@@ -235,7 +242,7 @@ class GPRDataImporter:
 
                 trace_index = keep_frame_cnt
                 keep_frame_cnt += 1
-                navigation_rows.append(self._extract_navigation_sample(trace_index, frame_navigation_meta))
+                navigation_rows_raw.append(self._extract_navigation_meta(frame_navigation_meta))
                 for bb in range(num_blocks):
                     self._check_cancelled(cancel_callback)
                     payload = frame_blocks[bb]
@@ -266,7 +273,8 @@ class GPRDataImporter:
                     data_array.append(np.empty((0, 0), dtype=np.float32))
                 else:
                     data_array.append(np.column_stack(cols).astype(np.float32, copy=False))
-            return data_array, self._finalize_navigation_samples(navigation_rows), gps_metadata_present
+            navigation_samples = self._decode_navigation_rows(navigation_rows_raw)
+            return data_array, navigation_samples, gps_metadata_present
 
     def _to_frequency_channels(self, data_array: Sequence[np.ndarray]) -> List[np.ndarray]:
         channels: List[np.ndarray] = []
@@ -322,33 +330,65 @@ class GPRDataImporter:
         return arr
 
     @classmethod
-    def _extract_navigation_sample(
+    def _extract_navigation_meta(
         cls,
-        trace_index: int,
         frame_navigation_meta: Sequence[tuple[int | None, int | None, float | None, float | None]],
-    ) -> ImportedNavigationSample | None:
-        best_sample: ImportedNavigationSample | None = None
+    ) -> tuple[int | None, int | None, float | None, float | None] | None:
+        best_sample: tuple[int | None, int | None, float | None, float | None] | None = None
         best_rank: tuple[int, int, int] | None = None
         for gps_status, gps_timestamp, latitude, longitude in frame_navigation_meta:
-            if not cls._is_valid_geo(latitude, longitude):
-                continue
             timestamp_present = int((gps_timestamp or 0) != 0)
             rank = (
                 int(gps_status or 0),
                 timestamp_present,
-                int(abs(float(latitude)) + abs(float(longitude)) > 0.0),
+                int(cls._has_geo_hint(latitude, longitude)),
             )
-            candidate = ImportedNavigationSample(
-                trace_index=trace_index,
-                latitude=float(latitude),
-                longitude=float(longitude),
-                gps_status=(None if gps_status is None else int(gps_status)),
-                gps_timestamp=(None if gps_timestamp in (None, 0) else int(gps_timestamp)),
+            candidate = (
+                (None if gps_status is None else int(gps_status)),
+                (None if gps_timestamp in (None, 0) else int(gps_timestamp)),
+                (None if latitude is None else float(latitude)),
+                (None if longitude is None else float(longitude)),
             )
             if best_rank is None or rank > best_rank:
                 best_sample = candidate
                 best_rank = rank
         return best_sample
+
+    @classmethod
+    def _decode_navigation_rows(
+        cls,
+        navigation_rows_raw: Sequence[tuple[int | None, int | None, float | None, float | None] | None],
+    ) -> list[ImportedNavigationSample]:
+        if not navigation_rows_raw:
+            return []
+        best_samples: list[ImportedNavigationSample | None] = []
+        best_score: tuple[int, ...] | None = None
+        for mode in cls._gps_decode_modes():
+            decoded_rows: list[ImportedNavigationSample | None] = []
+            for trace_index, raw_sample in enumerate(navigation_rows_raw):
+                if raw_sample is None:
+                    decoded_rows.append(None)
+                    continue
+                gps_status, gps_timestamp, latitude_raw, longitude_raw = raw_sample
+                decoded_geo = cls._decode_geo_by_mode(latitude_raw, longitude_raw, mode)
+                if decoded_geo is None:
+                    decoded_rows.append(None)
+                    continue
+                latitude, longitude = decoded_geo
+                decoded_rows.append(
+                    ImportedNavigationSample(
+                        trace_index=trace_index,
+                        latitude=float(latitude),
+                        longitude=float(longitude),
+                        gps_status=gps_status,
+                        gps_timestamp=gps_timestamp,
+                    )
+                )
+            score = cls._score_navigation_candidate(mode, decoded_rows, navigation_rows_raw)
+            if best_score is None or score > best_score:
+                best_score = score
+                best_samples = decoded_rows
+        return cls._finalize_navigation_samples(best_samples)
 
     @staticmethod
     def _finalize_navigation_samples(
@@ -409,7 +449,156 @@ class GPRDataImporter:
             return False
         if abs(lat) > 90.0 or abs(lon) > 180.0:
             return False
+        return abs(lat) > 1e-9 and abs(lon) > 1e-9
+
+    @classmethod
+    def _decode_geo_by_mode(
+        cls,
+        latitude: float | None,
+        longitude: float | None,
+        mode: str,
+    ) -> tuple[float, float] | None:
+        decoders = {
+            "decimal": (latitude, longitude),
+            "decimal_swapped": (longitude, latitude),
+            "scaled_100": (cls._divide_100(latitude), cls._divide_100(longitude)),
+            "scaled_100_swapped": (cls._divide_100(longitude), cls._divide_100(latitude)),
+            "nmea": (cls._nmea_to_decimal_degrees(latitude), cls._nmea_to_decimal_degrees(longitude)),
+            "nmea_swapped": (cls._nmea_to_decimal_degrees(longitude), cls._nmea_to_decimal_degrees(latitude)),
+        }
+        lat_value, lon_value = decoders.get(str(mode), (None, None))
+        if cls._is_valid_geo(lat_value, lon_value):
+            return float(lat_value), float(lon_value)
+        return None
+
+    @staticmethod
+    def _gps_decode_modes() -> tuple[str, ...]:
+        return (
+            "decimal",
+            "decimal_swapped",
+            "scaled_100",
+            "scaled_100_swapped",
+            "nmea",
+            "nmea_swapped",
+        )
+
+    @classmethod
+    def _score_navigation_candidate(
+        cls,
+        mode: str,
+        decoded_rows: Sequence[ImportedNavigationSample | None],
+        navigation_rows_raw: Sequence[tuple[int | None, int | None, float | None, float | None] | None],
+    ) -> tuple[int, ...]:
+        valid_samples = [sample for sample in decoded_rows if sample is not None]
+        valid_count = len(valid_samples)
+        if valid_count == 0:
+            return (-1, -1, -1, -1, -1, -1, -1)
+
+        latitudes = np.array([float(sample.latitude) for sample in valid_samples], dtype=float)
+        longitudes = np.array([float(sample.longitude) for sample in valid_samples], dtype=float)
+        if valid_count >= 2:
+            center_lat = float(np.mean(latitudes))
+            meters_per_deg_lat = 111320.0
+            meters_per_deg_lon = max(111320.0 * float(np.cos(np.deg2rad(center_lat))), 1.0)
+            steps_m = np.hypot(np.diff(longitudes) * meters_per_deg_lon, np.diff(latitudes) * meters_per_deg_lat)
+            step_max_m = float(np.max(steps_m))
+            step_p95_m = float(np.percentile(steps_m, 95))
+            huge_jump_count = int(np.sum(steps_m > 1000.0))
+            large_jump_count = int(np.sum(steps_m > 100.0))
+        else:
+            step_max_m = 0.0
+            step_p95_m = 0.0
+            huge_jump_count = 0
+            large_jump_count = 0
+
+        nmea_hint_count = cls._nmea_hint_count(mode, navigation_rows_raw)
+        mode_preference = {
+            "decimal": 5,
+            "decimal_swapped": 4,
+            "nmea": 3,
+            "nmea_swapped": 2,
+            "scaled_100": 1,
+            "scaled_100_swapped": 0,
+        }.get(mode, 0)
+        return (
+            int(valid_count),
+            -int(huge_jump_count),
+            -int(large_jump_count),
+            int(nmea_hint_count),
+            -int(round(min(step_p95_m, 1_000_000.0) * 1000.0)),
+            -int(round(min(step_max_m, 1_000_000.0) * 1000.0)),
+            int(mode_preference),
+        )
+
+    @classmethod
+    def _nmea_hint_count(
+        cls,
+        mode: str,
+        navigation_rows_raw: Sequence[tuple[int | None, int | None, float | None, float | None] | None],
+    ) -> int:
+        if mode not in {"nmea", "nmea_swapped"}:
+            return 0
+        count = 0
+        for raw_sample in navigation_rows_raw:
+            if raw_sample is None:
+                continue
+            _, _, latitude_raw, longitude_raw = raw_sample
+            if mode == "nmea":
+                lat_value, lon_value = latitude_raw, longitude_raw
+            else:
+                lat_value, lon_value = longitude_raw, latitude_raw
+            if cls._looks_like_nmea_component(lat_value, max_degrees=90.0) and cls._looks_like_nmea_component(
+                lon_value,
+                max_degrees=180.0,
+            ):
+                count += 1
+        return count
+
+    @staticmethod
+    def _looks_like_nmea_component(value: float | None, *, max_degrees: float) -> bool:
+        if value is None:
+            return False
+        raw = float(value)
+        if not math.isfinite(raw) or abs(raw) <= 1e-9:
+            return False
+        magnitude = abs(raw)
+        degrees = math.floor(magnitude / 100.0)
+        minutes = magnitude - degrees * 100.0
+        return degrees <= float(max_degrees) and 0.0 <= minutes < 60.0
+
+    @staticmethod
+    def _has_geo_hint(latitude: float | None, longitude: float | None) -> bool:
+        if latitude is None or longitude is None:
+            return False
+        lat = float(latitude)
+        lon = float(longitude)
+        if not math.isfinite(lat) or not math.isfinite(lon):
+            return False
         return abs(lat) > 1e-9 or abs(lon) > 1e-9
+
+    @staticmethod
+    def _divide_100(value: float | None) -> float | None:
+        if value is None:
+            return None
+        raw = float(value)
+        if not math.isfinite(raw):
+            return None
+        return raw / 100.0
+
+    @staticmethod
+    def _nmea_to_decimal_degrees(value: float | None) -> float | None:
+        if value is None:
+            return None
+        raw = float(value)
+        if not math.isfinite(raw) or abs(raw) <= 1e-9:
+            return raw
+        sign = -1.0 if raw < 0.0 else 1.0
+        magnitude = abs(raw)
+        degrees = math.floor(magnitude / 100.0)
+        minutes = magnitude - degrees * 100.0
+        if minutes >= 60.0:
+            return None
+        return sign * (degrees + minutes / 60.0)
 
     @staticmethod
     def _read_uint16(fh, pos: int) -> int | None:

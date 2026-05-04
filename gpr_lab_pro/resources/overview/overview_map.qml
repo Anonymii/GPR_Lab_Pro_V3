@@ -1,4 +1,5 @@
 import QtQuick
+import QtQml
 import QtQuick.Controls
 import QtLocation
 import QtPositioning
@@ -12,8 +13,18 @@ Rectangle {
     property real sceneMaxLon: 120.25
     property bool mapReadySent: false
 
+    function ensureMapType() {
+        if (!overviewBridge.offlineTileHost || map.supportedMapTypes.length === 0) {
+            return;
+        }
+        const targetType = map.supportedMapTypes[0]
+        if (map.activeMapType !== targetType) {
+            map.activeMapType = targetType
+        }
+    }
+
     function fitSceneBounds() {
-        if (!overviewBridge.offlineDirectory || sceneMinLat >= sceneMaxLat || sceneMinLon >= sceneMaxLon) {
+        if (!overviewBridge.offlineTileHost || sceneMinLat >= sceneMaxLat || sceneMinLon >= sceneMaxLon) {
             return;
         }
         map.visibleRegion = QtPositioning.rectangle(
@@ -27,8 +38,20 @@ Rectangle {
         id: mapPlugin
         name: "osm"
         PluginParameter {
-            name: "osm.mapping.offline.directory"
-            value: overviewBridge.offlineDirectory
+            name: "osm.mapping.custom.host"
+            value: overviewBridge.offlineTileHost
+        }
+        PluginParameter {
+            name: "osm.mapping.providersrepository.disabled"
+            value: true
+        }
+    }
+
+    Connections {
+        target: overviewBridge
+        function onOfflineTileHostChanged() {
+            root.ensureMapType()
+            Qt.callLater(root.fitSceneBounds)
         }
     }
 
@@ -36,7 +59,7 @@ Rectangle {
         id: map
         anchors.fill: parent
         plugin: mapPlugin
-        activeMapType: supportedMapTypes.length > 1 ? supportedMapTypes[1] : supportedMapTypes[0]
+        activeMapType: supportedMapTypes.length > 0 ? supportedMapTypes[0] : null
         center: QtPositioning.coordinate((root.sceneMinLat + root.sceneMaxLat) * 0.5, (root.sceneMinLon + root.sceneMaxLon) * 0.5)
         zoomLevel: Math.min(Math.max(14, overviewBridge.offlineMinZoom), overviewBridge.offlineMaxZoom)
         minimumZoomLevel: overviewBridge.offlineMinZoom
@@ -46,8 +69,13 @@ Rectangle {
             if (!root.mapReadySent) {
                 root.mapReadySent = true
                 overviewBridge.notifyMapReady()
+                root.ensureMapType()
                 Qt.callLater(root.fitSceneBounds)
             }
+        }
+
+        onSupportedMapTypesChanged: {
+            root.ensureMapType()
         }
 
         onCenterChanged: {

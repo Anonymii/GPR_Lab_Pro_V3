@@ -1,4 +1,5 @@
 import QtQuick
+import QtQml
 import QtQuick.Controls
 import QtLocation
 import QtPositioning
@@ -11,6 +12,16 @@ Rectangle {
     property real sceneMaxLat: 35.95
     property real sceneMaxLon: 120.25
     property bool mapReadySent: false
+
+    function ensureMapType() {
+        if (!overviewBridge.onlineTileHost || map.supportedMapTypes.length === 0) {
+            return;
+        }
+        const targetType = map.supportedMapTypes[0]
+        if (map.activeMapType !== targetType) {
+            map.activeMapType = targetType
+        }
+    }
 
     function fitSceneBounds() {
         if (!overviewBridge.onlineTileHost || sceneMinLat >= sceneMaxLat || sceneMinLon >= sceneMaxLon) {
@@ -30,9 +41,13 @@ Rectangle {
             name: "osm.mapping.custom.host"
             value: overviewBridge.onlineTileHost
         }
-        PluginParameter {
-            name: "osm.mapping.providersrepository.disabled"
-            value: true
+    }
+
+    Connections {
+        target: overviewBridge
+        function onOnlineTileHostChanged() {
+            root.ensureMapType()
+            Qt.callLater(root.fitSceneBounds)
         }
     }
 
@@ -50,8 +65,13 @@ Rectangle {
             if (!root.mapReadySent) {
                 root.mapReadySent = true
                 overviewBridge.notifyMapReady()
+                root.ensureMapType()
                 Qt.callLater(root.fitSceneBounds)
             }
+        }
+
+        onSupportedMapTypesChanged: {
+            root.ensureMapType()
         }
 
         onCenterChanged: {
