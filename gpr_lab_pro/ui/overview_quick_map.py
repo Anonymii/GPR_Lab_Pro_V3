@@ -820,12 +820,17 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         keep = np.concatenate(([True], np.diff(sample_u) > 1e-6))
         if int(np.count_nonzero(keep)) < 2:
             return None
+        half_widths_all = self._estimate_half_widths(screen_polygon, len(render_samples))
+        if half_widths_all.size != len(render_samples):
+            half_widths_all = np.full((len(render_samples),), 3.0, dtype=float)
+        left_all, right_all = self._strip_boundary_vertices(screen_polygon, centers, half_widths_all)
         sample_u = sample_u[keep]
         centers = centers[keep]
+        left_vertices = left_all[keep]
+        right_vertices = right_all[keep]
         point_count = centers.shape[0]
-        half_widths = self._estimate_half_widths(screen_polygon, len(render_samples))
-        half_widths = half_widths[keep] if half_widths.size == len(render_samples) else np.full((point_count,), 3.0, dtype=float)
-        normals = self._centerline_vertex_normals(centers)
+        if left_vertices.shape[0] != point_count or right_vertices.shape[0] != point_count:
+            return None
 
         output = QtGui.QImage(path.boundingRect().toAlignedRect().size(), QtGui.QImage.Format_ARGB32_Premultiplied)
         if output.isNull():
@@ -839,21 +844,19 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         column_budget = max(int(self._MAX_CHANNEL_SWEEP_CELLS // max(row_count - 1, 1)) + 1, 8)
         column_count = min(int(source_width), self._MAX_CHANNEL_SWEEP_COLUMNS, column_budget)
         columns = np.linspace(0.0, float(source_width - 1), max(column_count, 2), dtype=float)
-        x_coords = np.interp(columns, sample_u, centers[:, 0]) - float(origin.x())
-        y_coords = np.interp(columns, sample_u, centers[:, 1]) - float(origin.y())
-        normal_x = np.interp(columns, sample_u, normals[:, 0])
-        normal_y = np.interp(columns, sample_u, normals[:, 1])
-        normal_norm = np.hypot(normal_x, normal_y)
-        normal_norm = np.where(normal_norm > 1e-9, normal_norm, 1.0)
-        normal_x = normal_x / normal_norm
-        normal_y = normal_y / normal_norm
-        widths = np.interp(columns, sample_u, half_widths)
+        left_x = np.interp(columns, sample_u, left_vertices[:, 0]) - float(origin.x())
+        left_y = np.interp(columns, sample_u, left_vertices[:, 1]) - float(origin.y())
+        right_x = np.interp(columns, sample_u, right_vertices[:, 0]) - float(origin.x())
+        right_y = np.interp(columns, sample_u, right_vertices[:, 1]) - float(origin.y())
+        center_x = (left_x + right_x) * 0.5
+        center_y = (left_y + right_y) * 0.5
+        widths = np.hypot(left_x - right_x, left_y - right_y) * 0.5
 
         rows = np.linspace(0.0, float(source_height - 1), max(row_count, 2), dtype=float)
         if rows.size < 2:
             return None
         denominator = max(float(source_height - 1), 1.0)
-        row_offsets = 1.0 - 2.0 * (rows / denominator)
+        row_offsets = rows / denominator
         painter = QtGui.QPainter(output)
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
         source_bottom = float(source_height - 1)
@@ -864,10 +867,10 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
             row1 = float(rows[row_index + 1])
             offset0 = float(row_offsets[row_index])
             offset1 = float(row_offsets[row_index + 1])
-            left_x0 = x_coords + normal_x * widths * offset0
-            left_y0 = y_coords + normal_y * widths * offset0
-            left_x1 = x_coords + normal_x * widths * offset1
-            left_y1 = y_coords + normal_y * widths * offset1
+            left_x0 = left_x * (1.0 - offset0) + right_x * offset0
+            left_y0 = left_y * (1.0 - offset0) + right_y * offset0
+            left_x1 = left_x * (1.0 - offset1) + right_x * offset1
+            left_y1 = left_y * (1.0 - offset1) + right_y * offset1
             for col_index in range(columns.size - 1):
                 col0 = float(columns[col_index])
                 col1 = float(columns[col_index + 1])
@@ -888,8 +891,8 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
                     continue
                 center_step = float(
                     np.hypot(
-                        x_coords[col_index + 1] - x_coords[col_index],
-                        y_coords[col_index + 1] - y_coords[col_index],
+                        center_x[col_index + 1] - center_x[col_index],
+                        center_y[col_index + 1] - center_y[col_index],
                     )
                 )
                 local_width = max(float(widths[col_index]), float(widths[col_index + 1]), 1.0)
@@ -1779,8 +1782,18 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
     ) -> QtGui.QPainterPath:
         del render_navigation_samples, centerline_path
         if isinstance(screen_polygon, list) and screen_polygon:
-            return cls._smooth_polygon_path(screen_polygon)
+            return cls._polygon_path(screen_polygon)
         return QtGui.QPainterPath()
+
+    @staticmethod
+    def _polygon_path(points: list[QtCore.QPointF]) -> QtGui.QPainterPath:
+        path = QtGui.QPainterPath()
+        if not points:
+            return path
+        path.addPolygon(QtGui.QPolygonF(points))
+        path.closeSubpath()
+        path.setFillRule(QtCore.Qt.WindingFill)
+        return path
 
     @staticmethod
     def _smooth_polygon_path(points: list[QtCore.QPointF]) -> QtGui.QPainterPath:
