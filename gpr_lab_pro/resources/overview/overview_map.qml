@@ -13,14 +13,34 @@ Rectangle {
     property real sceneMaxLon: 120.25
     property bool mapReadySent: false
 
+    function supportedMapTypesSummary() {
+        const parts = []
+        for (let i = 0; i < map.supportedMapTypes.length; ++i) {
+            const item = map.supportedMapTypes[i]
+            parts.push(i + ":" + item.name + "/style=" + item.style)
+        }
+        return parts.join(", ")
+    }
+
     function ensureMapType() {
         if (!overviewBridge.offlineTileHost || map.supportedMapTypes.length === 0) {
             return;
         }
-        const targetType = map.supportedMapTypes[0]
+        const targetType = map.supportedMapTypes[map.supportedMapTypes.length - 1]
         if (map.activeMapType !== targetType) {
+            console.log("Offline map selecting custom map type:", targetType.name,
+                        "style=", targetType.style,
+                        "supported=", root.supportedMapTypesSummary())
             map.activeMapType = targetType
         }
+    }
+
+    function notifyCurrentMapState() {
+        overviewBridge.notifyMapState(map.center.latitude, map.center.longitude, map.zoomLevel)
+    }
+
+    function scheduleMapStateNotify() {
+        mapStateNotifyTimer.restart()
     }
 
     function fitSceneBounds() {
@@ -31,7 +51,7 @@ Rectangle {
             QtPositioning.coordinate(sceneMaxLat, sceneMinLon),
             QtPositioning.coordinate(sceneMinLat, sceneMaxLon)
         )
-        overviewBridge.notifyMapState(map.center.latitude, map.center.longitude, map.zoomLevel)
+        root.scheduleMapStateNotify()
     }
 
     Plugin {
@@ -50,22 +70,38 @@ Rectangle {
     Connections {
         target: overviewBridge
         function onOfflineTileHostChanged() {
+            console.log("Offline map host changed:", overviewBridge.offlineTileHost)
             root.ensureMapType()
             Qt.callLater(root.fitSceneBounds)
         }
+    }
+
+    Timer {
+        id: mapStateNotifyTimer
+        interval: 0
+        repeat: false
+        onTriggered: root.notifyCurrentMapState()
     }
 
     Map {
         id: map
         anchors.fill: parent
         plugin: mapPlugin
-        activeMapType: supportedMapTypes.length > 0 ? supportedMapTypes[0] : null
+        activeMapType: supportedMapTypes.length > 0 ? supportedMapTypes[supportedMapTypes.length - 1] : null
         center: QtPositioning.coordinate((root.sceneMinLat + root.sceneMaxLat) * 0.5, (root.sceneMinLon + root.sceneMaxLon) * 0.5)
         zoomLevel: Math.min(Math.max(14, overviewBridge.offlineMinZoom), overviewBridge.offlineMaxZoom)
         minimumZoomLevel: overviewBridge.offlineMinZoom
         maximumZoomLevel: overviewBridge.offlineMaxZoom
 
         Component.onCompleted: {
+            console.log("Offline map completed. host=", overviewBridge.offlineTileHost,
+                        " supportedMapTypes=", supportedMapTypes.length,
+                        " summary=", root.supportedMapTypesSummary(),
+                        " minZoom=", overviewBridge.offlineMinZoom,
+                        " maxZoom=", overviewBridge.offlineMaxZoom)
+            if (supportedMapTypes.length === 0) {
+                console.warn("Offline map has no supported map types")
+            }
             if (!root.mapReadySent) {
                 root.mapReadySent = true
                 overviewBridge.notifyMapReady()
@@ -75,15 +111,27 @@ Rectangle {
         }
 
         onSupportedMapTypesChanged: {
+            console.log("Offline map supportedMapTypes changed:", supportedMapTypes.length,
+                        " summary=", root.supportedMapTypesSummary())
+            if (supportedMapTypes.length === 0) {
+                console.warn("Offline map supportedMapTypes became empty")
+            }
             root.ensureMapType()
         }
 
+        onActiveMapTypeChanged: {
+            if (activeMapType) {
+                console.log("Offline map activeMapType changed:", activeMapType.name,
+                            "style=", activeMapType.style)
+            }
+        }
+
         onCenterChanged: {
-            overviewBridge.notifyMapState(center.latitude, center.longitude, zoomLevel)
+            root.scheduleMapStateNotify()
         }
 
         onZoomLevelChanged: {
-            overviewBridge.notifyMapState(center.latitude, center.longitude, zoomLevel)
+            root.scheduleMapStateNotify()
         }
 
         PinchHandler {

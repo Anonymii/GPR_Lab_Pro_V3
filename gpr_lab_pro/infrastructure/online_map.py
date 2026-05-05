@@ -37,7 +37,7 @@ class OfflineTileCoverage:
 class OnlineMapConfigStore:
     FILE_NAME = "online_map.local.json"
     OFFLINE_TILES_DIR = "offline_tiles"
-    _OFFLINE_TILE_RE = re.compile(r"osm_100-l-3-(\d+)-(\d+)-(\d+)\.png$", re.IGNORECASE)
+    _OFFLINE_TILE_RE = re.compile(r"osm_100-l-(\d+)-(\d+)-(\d+)-(\d+)\.png$", re.IGNORECASE)
 
     @classmethod
     def runtime_root(cls) -> Path:
@@ -92,11 +92,14 @@ class OnlineMapConfigStore:
 
     @classmethod
     def resolve_offline_tile_path(cls, zoom: int, tile_x: int, tile_y: int) -> Path | None:
-        file_name = f"osm_100-l-3-{int(zoom)}-{int(tile_x)}-{int(tile_y)}.png"
         for root in cls.offline_tiles_roots():
-            candidate = root / file_name
-            if candidate.exists():
-                return candidate
+            for map_id in (3, 8, 1):
+                candidate = root / f"osm_100-l-{map_id}-{int(zoom)}-{int(tile_x)}-{int(tile_y)}.png"
+                if candidate.exists():
+                    return candidate
+            matches = sorted(root.glob(f"osm_100-l-*-{int(zoom)}-{int(tile_x)}-{int(tile_y)}.png"))
+            if matches:
+                return matches[0]
         return None
 
     @classmethod
@@ -104,11 +107,16 @@ class OnlineMapConfigStore:
     def offline_tiles_coverage(cls) -> OfflineTileCoverage | None:
         by_zoom: dict[int, dict[str, list[int]]] = {}
         for root in cls.offline_tiles_roots():
-            for tile_path in root.glob("osm_100-l-3-*-*-*.png"):
+            for tile_path in root.glob("osm_100-l-*-*-*.png"):
                 match = cls._OFFLINE_TILE_RE.match(tile_path.name)
                 if not match:
                     continue
-                zoom, tile_x, tile_y = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+                _map_id, zoom, tile_x, tile_y = (
+                    int(match.group(1)),
+                    int(match.group(2)),
+                    int(match.group(3)),
+                    int(match.group(4)),
+                )
                 bucket = by_zoom.setdefault(zoom, {"x": [], "y": []})
                 bucket["x"].append(tile_x)
                 bucket["y"].append(tile_y)

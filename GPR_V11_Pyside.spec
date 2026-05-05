@@ -43,7 +43,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[str(project_root / "pyi_rth_gpr_runtime.py")],
     excludes=[],
     noarchive=False,
 )

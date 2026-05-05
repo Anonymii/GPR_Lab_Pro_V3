@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import http.server
+import logging
+import math
 import re
 import socketserver
 import threading
@@ -14,6 +16,118 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtQml, QtQuickWidgets, QtWidgets
 
 from gpr_lab_pro.infrastructure.online_map import OfflineTileCoverage, OnlineMapConfigStore
+
+logger = logging.getLogger("gpr.map")
+
+
+def _is_mainland_china_coordinate(latitude: float, longitude: float) -> bool:
+    return 72.004 <= longitude <= 137.8347 and 0.8293 <= latitude <= 55.8271
+
+
+def _transform_latitude_offset(x: float, y: float) -> float:
+    ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * math.sqrt(abs(x))
+    ret += (20.0 * math.sin(6.0 * x * math.pi) + 20.0 * math.sin(2.0 * x * math.pi)) * 2.0 / 3.0
+    ret += (20.0 * math.sin(y * math.pi) + 40.0 * math.sin(y / 3.0 * math.pi)) * 2.0 / 3.0
+    ret += (160.0 * math.sin(y / 12.0 * math.pi) + 320.0 * math.sin(y * math.pi / 30.0)) * 2.0 / 3.0
+    return ret
+
+
+def _transform_longitude_offset(x: float, y: float) -> float:
+    ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * math.sqrt(abs(x))
+    ret += (20.0 * math.sin(6.0 * x * math.pi) + 20.0 * math.sin(2.0 * x * math.pi)) * 2.0 / 3.0
+    ret += (20.0 * math.sin(x * math.pi) + 40.0 * math.sin(x / 3.0 * math.pi)) * 2.0 / 3.0
+    ret += (150.0 * math.sin(x / 12.0 * math.pi) + 300.0 * math.sin(x / 30.0 * math.pi)) * 2.0 / 3.0
+    return ret
+
+
+def _wgs84_to_gcj02(latitude: float, longitude: float) -> tuple[float, float]:
+    if not _is_mainland_china_coordinate(latitude, longitude):
+        return latitude, longitude
+    semi_major_axis = 6378245.0
+    eccentricity_squared = 0.00669342162296594323
+    d_lat = _transform_latitude_offset(longitude - 105.0, latitude - 35.0)
+    d_lon = _transform_longitude_offset(longitude - 105.0, latitude - 35.0)
+    rad_lat = latitude / 180.0 * math.pi
+    magic = math.sin(rad_lat)
+    magic = 1 - eccentricity_squared * magic * magic
+    sqrt_magic = math.sqrt(magic)
+    d_lat = (d_lat * 180.0) / ((semi_major_axis * (1 - eccentricity_squared)) / (magic * sqrt_magic) * math.pi)
+    d_lon = (d_lon * 180.0) / (semi_major_axis / sqrt_magic * math.cos(rad_lat) * math.pi)
+    return latitude + d_lat, longitude + d_lon
+
+
+def _transform_sample_coordinate(sample: dict[str, object]) -> dict[str, object]:
+    transformed = dict(sample)
+    latitude = transformed.get("latitude")
+    longitude = transformed.get("longitude")
+    if latitude is None or longitude is None:
+        return transformed
+    try:
+        gcj_lat, gcj_lon = _wgs84_to_gcj02(float(latitude), float(longitude))
+    except (TypeError, ValueError):
+        return transformed
+    transformed["latitude"] = gcj_lat
+    transformed["longitude"] = gcj_lon
+    return transformed
+
+
+def _transform_files_to_gcj02(files: list[dict[str, object]]) -> list[dict[str, object]]:
+    transformed_files: list[dict[str, object]] = []
+    for file_item in files:
+        transformed_file = dict(file_item)
+        navigation_samples = file_item.get("navigation_samples", [])
+        if isinstance(navigation_samples, list):
+            transformed_file["navigation_samples"] = [
+                _transform_sample_coordinate(sample) if isinstance(sample, dict) else sample for sample in navigation_samples
+            ]
+        regions = file_item.get("regions", [])
+        if isinstance(regions, list):
+            transformed_regions: list[object] = []
+            for region in regions:
+                if not isinstance(region, dict):
+                    transformed_regions.append(region)
+                    continue
+                transformed_region = dict(region)
+                region_samples = region.get("navigation_samples", [])
+                if isinstance(region_samples, list):
+                    transformed_region["navigation_samples"] = [
+                        _transform_sample_coordinate(sample) if isinstance(sample, dict) else sample for sample in region_samples
+                    ]
+                transformed_regions.append(transformed_region)
+            transformed_file["regions"] = transformed_regions
+        transformed_files.append(transformed_file)
+    return transformed_files
+
+
+def _attach_quick_widget_diagnostics(
+    quick_widget: QtQuickWidgets.QQuickWidget,
+    *,
+    widget_name: str,
+    qml_path: Path,
+) -> None:
+    logger.info("%s: loading QML from %s", widget_name, qml_path)
+
+    def _on_status_changed(status) -> None:
+        try:
+            status_value = getattr(status, "value", status)
+            status_name = getattr(status, "name", None) or {
+                QtQuickWidgets.QQuickWidget.Null.value: "Null",
+                QtQuickWidgets.QQuickWidget.Ready.value: "Ready",
+                QtQuickWidgets.QQuickWidget.Loading.value: "Loading",
+                QtQuickWidgets.QQuickWidget.Error.value: "Error",
+            }.get(status_value, str(status_value))
+            logger.info("%s: QQuickWidget status changed to %s", widget_name, status_name)
+            if status_value == QtQuickWidgets.QQuickWidget.Error.value:
+                errors = [str(item.toString()) for item in quick_widget.errors()]
+                if errors:
+                    for error_text in errors:
+                        logger.error("%s: QML error: %s", widget_name, error_text)
+                else:
+                    logger.error("%s: QQuickWidget entered Error state without detailed errors", widget_name)
+        except Exception:
+            logger.exception("%s: failed to process QQuickWidget status change %r", widget_name, status)
+
+    quick_widget.statusChanged.connect(_on_status_changed)
 
 
 class _OfflineTileRequestHandler(http.server.BaseHTTPRequestHandler):
@@ -48,9 +162,12 @@ class OfflineTileServer(QtCore.QObject):
     _MEMORY_CACHE_LIMIT = 384
     _REQUEST_RE = re.compile(r"^(?P<z>\d+)/(?P<x>\d+)/(?P<y>\d+)(?:@[0-9]+x)?\.(?:png|jpg|jpeg|webp)$", re.IGNORECASE)
 
-    def __init__(self, root: Path, parent: QtCore.QObject | None = None) -> None:
+    def __init__(self, roots: Path | list[Path], parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
-        self._root = root
+        raw_roots = roots if isinstance(roots, list) else [roots]
+        self._roots = [Path(root) for root in raw_roots if root is not None]
+        self._root = self._roots[0] if self._roots else Path()
+        self._available_zooms = self._scan_available_zooms()
         self._httpd: _OfflineTileHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._base_url = ""
@@ -59,6 +176,7 @@ class OfflineTileServer(QtCore.QObject):
         self.miss_count = 0
         self.last_request_path = ""
         self._payload_cache: OrderedDict[str, bytes] = OrderedDict()
+        self._logged_missing_requests: set[str] = set()
 
     @property
     def base_url(self) -> str:
@@ -72,6 +190,7 @@ class OfflineTileServer(QtCore.QObject):
         self._base_url = f"http://127.0.0.1:{port}/tiles/"
         self._thread = threading.Thread(target=self._httpd.serve_forever, name="OfflineTileServer", daemon=True)
         self._thread.start()
+        logger.info("OfflineTileServer started: roots=%s base_url=%s", [str(root) for root in self._roots], self._base_url)
         return self._base_url
 
     def stop(self) -> None:
@@ -81,6 +200,14 @@ class OfflineTileServer(QtCore.QObject):
                 self._httpd.server_close()
             except OSError:
                 pass
+        if self._base_url:
+            logger.info(
+                "OfflineTileServer stopped: requests=%s hits=%s misses=%s last_request=%s",
+                self.request_count,
+                self.hit_count,
+                self.miss_count,
+                self.last_request_path,
+            )
         self._httpd = None
         self._thread = None
         self._base_url = ""
@@ -95,32 +222,103 @@ class OfflineTileServer(QtCore.QObject):
             self.hit_count += 1
             self.last_request_path = str(request_path)
             return cached
-        tile_path = self.resolve_request_path(request_path)
-        if tile_path is None or not tile_path.exists():
-            return None
-        try:
-            payload = tile_path.read_bytes()
-        except OSError:
-            return None
-        if not payload:
+        payload = self.resolve_request_payload(request_path)
+        if payload is None:
+            self._log_missing_request(request_path)
             return None
         self._remember_payload(normalized, payload)
         return payload
+
+    def resolve_request_payload(self, request_path: str) -> bytes | None:
+        tile_path = self.resolve_request_path(request_path)
+        if tile_path is not None and tile_path.exists():
+            try:
+                payload = tile_path.read_bytes()
+            except OSError:
+                logger.exception("OfflineTileServer failed reading tile for %s", request_path)
+                return None
+            return payload or None
+        return self._render_overzoom_payload(request_path)
+
+    def _render_overzoom_payload(self, request_path: str) -> bytes | None:
+        key = self._parse_request_key(request_path)
+        if key is None:
+            return None
+        zoom, tile_x, tile_y = key
+        source_zoom = self._best_source_zoom(zoom)
+        if source_zoom is None or source_zoom >= zoom:
+            return None
+        scale = 2 ** (zoom - source_zoom)
+        parent_x = tile_x // scale
+        parent_y = tile_y // scale
+        parent_path = self._find_tile_path(source_zoom, parent_x, parent_y)
+        if parent_path is None:
+            return None
+        image = QtGui.QImage(str(parent_path))
+        if image.isNull():
+            logger.warning("OfflineTileServer failed loading parent tile for overzoom: %s", parent_path)
+            return None
+        tile_width = max(image.width(), 1)
+        tile_height = max(image.height(), 1)
+        crop_x = int((tile_x % scale) * tile_width / scale)
+        crop_y = int((tile_y % scale) * tile_height / scale)
+        crop_w = max(int(tile_width / scale), 1)
+        crop_h = max(int(tile_height / scale), 1)
+        cropped = image.copy(crop_x, crop_y, crop_w, crop_h)
+        if cropped.isNull():
+            return None
+        rendered = cropped.scaled(tile_width, tile_height, QtCore.Qt.IgnoreAspectRatio, QtCore.Qt.SmoothTransformation)
+        buffer = QtCore.QBuffer()
+        buffer.open(QtCore.QIODevice.WriteOnly)
+        if not rendered.save(buffer, "PNG"):
+            return None
+        self.hit_count += 1
+        logger.debug(
+            "OfflineTileServer overzoom tile: request=%s source=%s/%s/%s parent=%s",
+            request_path,
+            source_zoom,
+            parent_x,
+            parent_y,
+            parent_path,
+        )
+        return bytes(buffer.data())
+
+    def _best_source_zoom(self, requested_zoom: int) -> int | None:
+        candidates = [zoom for zoom in self._available_zooms if zoom < int(requested_zoom)]
+        if not candidates:
+            return None
+        return max(candidates)
+
+    def _scan_available_zooms(self) -> set[int]:
+        zooms: set[int] = set()
+        pattern = re.compile(r"^osm_100-l-\d+-(\d+)-\d+-\d+\.png$", re.IGNORECASE)
+        for root in self._roots:
+            for path in root.glob("osm_100-l-*-*-*.png"):
+                match = pattern.match(path.name)
+                if match is not None:
+                    zooms.add(int(match.group(1)))
+        return zooms
 
     def resolve_request_path(self, request_path: str) -> Path | None:
         self.request_count += 1
         self.last_request_path = str(request_path)
         key = self._parse_request_key(request_path)
         if key is None:
-            self.miss_count += 1
             return None
         zoom, tile_x, tile_y = key
-        tile_name = f"osm_100-l-3-{zoom}-{tile_x}-{tile_y}.png"
-        candidate = self._root / tile_name
-        if candidate.exists():
-            self.hit_count += 1
-            return candidate
-        self.miss_count += 1
+        return self._find_tile_path(zoom, tile_x, tile_y)
+
+    def _find_tile_path(self, zoom: int, tile_x: int, tile_y: int) -> Path | None:
+        for root in self._roots:
+            for map_id in (3, 8, 1):
+                candidate = root / f"osm_100-l-{map_id}-{zoom}-{tile_x}-{tile_y}.png"
+                if candidate.exists():
+                    self.hit_count += 1
+                    return candidate
+            matches = sorted(root.glob(f"osm_100-l-*-{zoom}-{tile_x}-{tile_y}.png"))
+            if matches:
+                self.hit_count += 1
+                return matches[0]
         return None
 
     @classmethod
@@ -142,6 +340,16 @@ class OfflineTileServer(QtCore.QObject):
         self._payload_cache.move_to_end(key)
         while len(self._payload_cache) > self._MEMORY_CACHE_LIMIT:
             self._payload_cache.popitem(last=False)
+
+    def _log_missing_request(self, request_path: str) -> None:
+        normalized = request_path.split("?", 1)[0].strip("/")
+        if normalized in self._logged_missing_requests:
+            return
+        self.miss_count += 1
+        if len(self._logged_missing_requests) >= 20:
+            return
+        self._logged_missing_requests.add(normalized)
+        logger.warning("OfflineTileServer missing tile request: %s roots=%s", normalized, [str(root) for root in self._roots])
 
 
 class _OnlineTileRequestHandler(http.server.BaseHTTPRequestHandler):
@@ -199,6 +407,7 @@ class OnlineTileServer(QtCore.QObject):
         self.last_error = ""
         self._last_cleanup = 0.0
         self._payload_cache: OrderedDict[tuple[int, int, int], bytes] = OrderedDict()
+        self._logged_failed_requests: set[tuple[int, int, int]] = set()
 
     @property
     def base_url(self) -> str:
@@ -219,6 +428,7 @@ class OnlineTileServer(QtCore.QObject):
         self._base_url = f"http://127.0.0.1:{port}/tiles/"
         self._thread = threading.Thread(target=self._httpd.serve_forever, name="OnlineTileServer", daemon=True)
         self._thread.start()
+        logger.info("OnlineTileServer started: base_url=%s provider=%s cache_root=%s", self._base_url, getattr(self._config, "provider", ""), self._cache_root)
         return self._base_url
 
     def stop(self) -> None:
@@ -228,6 +438,16 @@ class OnlineTileServer(QtCore.QObject):
                 self._httpd.server_close()
             except OSError:
                 pass
+        if self._base_url:
+            logger.info(
+                "OnlineTileServer stopped: requests=%s hits=%s misses=%s fetched=%s last_request=%s last_error=%s",
+                self.request_count,
+                self.hit_count,
+                self.miss_count,
+                self.fetch_count,
+                self.last_request_path,
+                self.last_error,
+            )
         self._httpd = None
         self._thread = None
         self._base_url = ""
@@ -258,6 +478,9 @@ class OnlineTileServer(QtCore.QObject):
         payload = self._fetch_remote_tile(key)
         if not payload:
             self.miss_count += 1
+            if key not in self._logged_failed_requests and len(self._logged_failed_requests) < 20:
+                self._logged_failed_requests.add(key)
+                logger.warning("OnlineTileServer failed request %s: %s", key, self.last_error)
             return None
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -312,6 +535,7 @@ class OnlineTileServer(QtCore.QObject):
                 continue
             if payload:
                 self.last_error = ""
+                logger.info("OnlineTileServer fetched remote tile %s via %s", key, url)
                 return payload
             errors.append(f"{url}: empty payload")
         self.last_error = " | ".join(errors[-3:]) if errors else "unknown fetch error"
@@ -2085,7 +2309,7 @@ class OverviewQuickMapWidget(QtWidgets.QWidget):
         self._bridge.mapTapped.connect(self._on_map_tapped)
         offline_roots = OnlineMapConfigStore.offline_tiles_roots()
         self._offline_root = offline_roots[0] if offline_roots else None
-        self._offline_tile_server = OfflineTileServer(self._offline_root, self) if self._offline_root is not None else None
+        self._offline_tile_server = OfflineTileServer(offline_roots, self) if offline_roots else None
         offline_dir = str(self._offline_root) if self._offline_root is not None else ""
         self._bridge.set_offline_directory(offline_dir)
         if self._offline_tile_server is not None:
@@ -2098,6 +2322,7 @@ class OverviewQuickMapWidget(QtWidgets.QWidget):
         self._quick.setClearColor(QtCore.Qt.transparent)
         self._quick.rootContext().setContextProperty("overviewBridge", self._bridge)
         qml_path = Path(__file__).resolve().parents[1] / "resources" / "overview" / "overview_map.qml"
+        _attach_quick_widget_diagnostics(self._quick, widget_name="OfflineOverviewMap", qml_path=qml_path)
         self._quick.setSource(QtCore.QUrl.fromLocalFile(str(qml_path)))
         layout = QtWidgets.QStackedLayout(self)
         layout.setStackingMode(QtWidgets.QStackedLayout.StackAll)
@@ -2138,6 +2363,7 @@ class OverviewQuickMapWidget(QtWidgets.QWidget):
     ) -> None:
         del map_image, cache_root_path
         self._files = list(files)
+        logger.info("OfflineOverviewMap: set_scene files=%s active_region=%s active_file=%s", len(self._files), active_region_id, active_file_id)
         self._active_region_id = active_region_id
         self._active_file_id = active_file_id
         self._active_trace = int(active_trace)
@@ -2154,10 +2380,12 @@ class OverviewQuickMapWidget(QtWidgets.QWidget):
         self._overlay.raise_()
         bounds = self._scene_geo_bounds()
         if bounds is None:
+            logger.info("OfflineOverviewMap: scene bounds unavailable")
             return
         signature = tuple(round(value, 8) for value in bounds)
         if signature != self._last_bounds_signature:
             self._last_bounds_signature = signature
+            logger.info("OfflineOverviewMap: scene bounds updated to %s", bounds)
             root = self._quick.rootObject()
             if root is not None:
                 root.setProperty("sceneMinLat", bounds[0])
@@ -2182,8 +2410,9 @@ class OverviewQuickMapWidget(QtWidgets.QWidget):
         return (min(lats), min(lons), max(lats), max(lons))
 
     def _apply_offline_coverage(self, coverage: OfflineTileCoverage) -> None:
+        native_max_zoom = int(coverage.max_zoom)
         self._bridge.set_offline_min_zoom(int(coverage.min_zoom))
-        self._bridge.set_offline_max_zoom(int(coverage.max_zoom))
+        self._bridge.set_offline_max_zoom(min(native_max_zoom + 2, 17))
 
     def _shutdown_tile_server(self) -> None:
         if self._offline_tile_server is not None:
@@ -2200,6 +2429,14 @@ class OverviewQuickMapWidget(QtWidgets.QWidget):
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
         self._overlay.raise_()
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        logger.info("OfflineOverviewMap: widget shown size=%sx%s", self.width(), self.height())
+
+    def hideEvent(self, event: QtGui.QHideEvent) -> None:
+        super().hideEvent(event)
+        logger.info("OfflineOverviewMap: widget hidden")
 
 
 class OverviewOnlineQuickMapWidget(QtWidgets.QWidget):
@@ -2231,6 +2468,7 @@ class OverviewOnlineQuickMapWidget(QtWidgets.QWidget):
         self._quick.setClearColor(QtCore.Qt.transparent)
         self._quick.rootContext().setContextProperty("overviewBridge", self._bridge)
         qml_path = Path(__file__).resolve().parents[1] / "resources" / "overview" / "overview_online_map.qml"
+        _attach_quick_widget_diagnostics(self._quick, widget_name="OnlineOverviewMap", qml_path=qml_path)
         self._quick.setSource(QtCore.QUrl.fromLocalFile(str(qml_path)))
         layout = QtWidgets.QStackedLayout(self)
         layout.setStackingMode(QtWidgets.QStackedLayout.StackAll)
@@ -2274,7 +2512,15 @@ class OverviewOnlineQuickMapWidget(QtWidgets.QWidget):
         if cache_root_path != self._cache_root_path:
             self._cache_root_path = cache_root_path
             self._online_tile_server.set_cache_root(cache_root_path)
-        self._files = list(files)
+        raw_files = list(files)
+        self._files = _transform_files_to_gcj02(raw_files)
+        logger.info(
+            "OnlineOverviewMap: set_scene files=%s active_region=%s active_file=%s cache_root=%s coordinate_mode=gcj02",
+            len(self._files),
+            active_region_id,
+            active_file_id,
+            self._cache_root_path,
+        )
         self._active_region_id = active_region_id
         self._active_file_id = active_file_id
         self._active_trace = int(active_trace)
@@ -2291,10 +2537,12 @@ class OverviewOnlineQuickMapWidget(QtWidgets.QWidget):
         self._overlay.raise_()
         bounds = self._scene_geo_bounds()
         if bounds is None:
+            logger.info("OnlineOverviewMap: scene bounds unavailable")
             return
         signature = tuple(round(value, 8) for value in bounds)
         if signature != self._last_bounds_signature:
             self._last_bounds_signature = signature
+            logger.info("OnlineOverviewMap: scene bounds updated to %s", bounds)
             root = self._quick.rootObject()
             if root is not None:
                 root.setProperty("sceneMinLat", bounds[0])
@@ -2330,6 +2578,14 @@ class OverviewOnlineQuickMapWidget(QtWidgets.QWidget):
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
         self._overlay.raise_()
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        logger.info("OnlineOverviewMap: widget shown size=%sx%s", self.width(), self.height())
+
+    def hideEvent(self, event: QtGui.QHideEvent) -> None:
+        super().hideEvent(event)
+        logger.info("OnlineOverviewMap: widget hidden")
 
 
 class OverviewMapHostWidget(QtWidgets.QWidget):
