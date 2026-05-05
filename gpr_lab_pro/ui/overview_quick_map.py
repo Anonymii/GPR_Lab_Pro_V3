@@ -858,10 +858,12 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         denominator = max(float(source_height - 1), 1.0)
         row_offsets = rows / denominator
         painter = QtGui.QPainter(output)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
         source_bottom = float(source_height - 1)
         source_right = float(source_width - 1)
         drawn_cells = 0
+        overlap_source = 0.75
+        overlap_target = 0.55
         for row_index in range(rows.size - 1):
             row0 = float(rows[row_index])
             row1 = float(rows[row_index + 1])
@@ -899,21 +901,23 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
                 row_step = abs(float(offset1 - offset0)) * local_width
                 if not self._quad_is_stable(target_quad, center_step=center_step, row_step=row_step, local_width=local_width):
                     continue
-                quad_path = self._quad_path(target_quad)
+                draw_quad = self._expanded_quad(target_quad, overlap_target)
+                quad_path = self._quad_path(draw_quad)
                 source_quad = QtGui.QPolygonF(
                     [
-                        QtCore.QPointF(float(np.clip(col0, 0.0, source_right)), float(np.clip(row0, 0.0, source_bottom))),
-                        QtCore.QPointF(float(np.clip(col1, 0.0, source_right)), float(np.clip(row0, 0.0, source_bottom))),
-                        QtCore.QPointF(float(np.clip(col1, 0.0, source_right)), float(np.clip(row1, 0.0, source_bottom))),
-                        QtCore.QPointF(float(np.clip(col0, 0.0, source_right)), float(np.clip(row1, 0.0, source_bottom))),
+                        QtCore.QPointF(float(np.clip(col0 - overlap_source, 0.0, source_right)), float(np.clip(row0 - overlap_source, 0.0, source_bottom))),
+                        QtCore.QPointF(float(np.clip(col1 + overlap_source, 0.0, source_right)), float(np.clip(row0 - overlap_source, 0.0, source_bottom))),
+                        QtCore.QPointF(float(np.clip(col1 + overlap_source, 0.0, source_right)), float(np.clip(row1 + overlap_source, 0.0, source_bottom))),
+                        QtCore.QPointF(float(np.clip(col0 - overlap_source, 0.0, source_right)), float(np.clip(row1 + overlap_source, 0.0, source_bottom))),
                     ]
                 )
-                transform = QtGui.QTransform.quadToQuad(source_quad, target_quad)
-                if transform.isIdentity() and source_quad != target_quad:
+                transform = QtGui.QTransform.quadToQuad(source_quad, draw_quad)
+                if transform.isIdentity() and source_quad != draw_quad:
                     continue
                 painter.save()
                 painter.setClipPath(local_path)
                 painter.setClipPath(quad_path, QtCore.Qt.IntersectClip)
+                painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
                 painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
                 painter.setTransform(transform, False)
                 painter.drawImage(QtCore.QPointF(0.0, 0.0), source)
@@ -1117,6 +1121,25 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         path.addPolygon(polygon)
         path.closeSubpath()
         return path
+
+    @staticmethod
+    def _expanded_quad(polygon: QtGui.QPolygonF, amount: float) -> QtGui.QPolygonF:
+        if polygon.size() < 4 or amount <= 0.0:
+            return polygon
+        points = np.array([[float(polygon.at(idx).x()), float(polygon.at(idx).y())] for idx in range(4)], dtype=float)
+        if not np.all(np.isfinite(points)):
+            return polygon
+        center = np.mean(points, axis=0)
+        expanded: list[QtCore.QPointF] = []
+        for point in points:
+            vector = point - center
+            norm = float(np.hypot(vector[0], vector[1]))
+            if norm <= 1e-6:
+                expanded.append(QtCore.QPointF(float(point[0]), float(point[1])))
+            else:
+                shifted = point + (vector / norm) * float(amount)
+                expanded.append(QtCore.QPointF(float(shifted[0]), float(shifted[1])))
+        return QtGui.QPolygonF(expanded)
 
     @staticmethod
     def _quad_is_stable(
