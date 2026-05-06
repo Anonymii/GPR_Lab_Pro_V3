@@ -61,6 +61,10 @@ Rectangle {
             name: "osm.mapping.custom.host"
             value: overviewBridge.onlineTileHost
         }
+        PluginParameter {
+            name: "osm.mapping.cache.directory"
+            value: overviewBridge.onlineTileCacheDirectory
+        }
     }
 
     Connections {

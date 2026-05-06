@@ -20,6 +20,12 @@ from gpr_lab_pro.infrastructure.online_map import OfflineTileCoverage, OnlineMap
 logger = logging.getLogger("gpr.map")
 
 
+def _qt_location_cache_directory(name: str) -> str:
+    cache_dir = OnlineMapConfigStore.runtime_root() / "cache" / name
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return str(cache_dir).replace("\\", "/")
+
+
 def _is_mainland_china_coordinate(latitude: float, longitude: float) -> bool:
     return 72.004 <= longitude <= 137.8347 and 0.8293 <= latitude <= 55.8271
 
@@ -571,12 +577,14 @@ class OverviewOnlineBridge(QtCore.QObject):
     mapStateChanged = QtCore.Signal(float, float, float)
     mapTapped = QtCore.Signal(float, float)
     onlineTileHostChanged = QtCore.Signal()
+    onlineTileCacheDirectoryChanged = QtCore.Signal()
     onlineMinZoomChanged = QtCore.Signal()
     onlineMaxZoomChanged = QtCore.Signal()
 
     def __init__(self, parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
         self._online_tile_host = ""
+        self._online_tile_cache_directory = ""
         self._online_min_zoom = 3
         self._online_max_zoom = 19
 
@@ -590,6 +598,17 @@ class OverviewOnlineBridge(QtCore.QObject):
             return
         self._online_tile_host = normalized
         self.onlineTileHostChanged.emit()
+
+    @QtCore.Property(str, notify=onlineTileCacheDirectoryChanged)
+    def onlineTileCacheDirectory(self) -> str:
+        return self._online_tile_cache_directory
+
+    def set_online_tile_cache_directory(self, value: str) -> None:
+        normalized = str(value or "").replace("\\", "/")
+        if normalized == self._online_tile_cache_directory:
+            return
+        self._online_tile_cache_directory = normalized
+        self.onlineTileCacheDirectoryChanged.emit()
 
     @QtCore.Property(int, notify=onlineMinZoomChanged)
     def onlineMinZoom(self) -> int:
@@ -632,6 +651,7 @@ class OverviewQuickBridge(QtCore.QObject):
     mapTapped = QtCore.Signal(float, float)
     offlineDirectoryChanged = QtCore.Signal()
     offlineTileHostChanged = QtCore.Signal()
+    offlineTileCacheDirectoryChanged = QtCore.Signal()
     offlineMinZoomChanged = QtCore.Signal()
     offlineMaxZoomChanged = QtCore.Signal()
     sceneBoundsChanged = QtCore.Signal(float, float, float, float)
@@ -640,6 +660,7 @@ class OverviewQuickBridge(QtCore.QObject):
         super().__init__(parent)
         self._offline_directory = ""
         self._offline_tile_host = ""
+        self._offline_tile_cache_directory = ""
         self._offline_min_zoom = 9
         self._offline_max_zoom = 15
 
@@ -664,6 +685,17 @@ class OverviewQuickBridge(QtCore.QObject):
             return
         self._offline_tile_host = normalized
         self.offlineTileHostChanged.emit()
+
+    @QtCore.Property(str, notify=offlineTileCacheDirectoryChanged)
+    def offlineTileCacheDirectory(self) -> str:
+        return self._offline_tile_cache_directory
+
+    def set_offline_tile_cache_directory(self, value: str) -> None:
+        normalized = str(value or "").replace("\\", "/")
+        if normalized == self._offline_tile_cache_directory:
+            return
+        self._offline_tile_cache_directory = normalized
+        self.offlineTileCacheDirectoryChanged.emit()
 
     @QtCore.Property(int, notify=offlineMinZoomChanged)
     def offlineMinZoom(self) -> int:
@@ -2307,6 +2339,7 @@ class OverviewQuickMapWidget(QtWidgets.QWidget):
         self._overlay.point_selected.connect(self.point_selected)
         self._bridge.mapStateChanged.connect(self._on_map_state_changed)
         self._bridge.mapTapped.connect(self._on_map_tapped)
+        self._bridge.set_offline_tile_cache_directory(_qt_location_cache_directory("qtlocation_offline_tiles_only_v1"))
         offline_roots = OnlineMapConfigStore.offline_tiles_roots()
         self._offline_root = offline_roots[0] if offline_roots else None
         self._offline_tile_server = OfflineTileServer(offline_roots, self) if offline_roots else None
@@ -2456,6 +2489,7 @@ class OverviewOnlineQuickMapWidget(QtWidgets.QWidget):
         self._bridge = OverviewOnlineBridge(self)
         self._bridge.set_online_min_zoom(3)
         self._bridge.set_online_max_zoom(19)
+        self._bridge.set_online_tile_cache_directory(_qt_location_cache_directory("qtlocation_online_proxy_only_v1"))
         self._overlay = OverviewOverlayWidget(self)
         self._overlay.region_activated.connect(self.region_activated)
         self._overlay.point_selected.connect(self.point_selected)

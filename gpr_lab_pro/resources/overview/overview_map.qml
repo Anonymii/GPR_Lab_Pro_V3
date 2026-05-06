@@ -62,6 +62,10 @@ Rectangle {
             value: overviewBridge.offlineTileHost
         }
         PluginParameter {
+            name: "osm.mapping.cache.directory"
+            value: overviewBridge.offlineTileCacheDirectory
+        }
+        PluginParameter {
             name: "osm.mapping.providersrepository.disabled"
             value: true
         }
