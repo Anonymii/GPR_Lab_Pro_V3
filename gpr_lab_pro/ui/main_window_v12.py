@@ -3021,7 +3021,7 @@ class _OverviewPreviewTask(QtCore.QRunnable):
 class MainWindow(QtWidgets.QMainWindow):
     _OVERVIEW_FILE_TRACK_MAX_POINTS = 2500
     _OVERVIEW_REGION_MAX_POINTS = 2000
-    _OVERVIEW_PREVIEW_VERSION = 2
+    _OVERVIEW_PREVIEW_VERSION = 3
 
     def __init__(self, app_controller: GPRApplication):
         super().__init__()
@@ -3416,7 +3416,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.overview_map.region_activated.connect(self._on_overview_region_activated)
         self.overview_map.point_selected.connect(self._on_overview_point_selected)
         overview_layout.addWidget(self.overview_map, stretch=1)
-        self.view_tabs.addTab(overview_panel, "Overview")
+        self._overview_tab_index = self.view_tabs.addTab(overview_panel, "Overview")
 
         explore_panel = QtWidgets.QFrame()
         explore_panel.setObjectName("viewCard")
@@ -3623,7 +3623,8 @@ class MainWindow(QtWidgets.QMainWindow):
         bottom_row.addWidget(bottom_right_panel, stretch=28)
         explore_layout.addLayout(bottom_row, stretch=2)
 
-        self.view_tabs.addTab(explore_panel, "Explore")
+        self._explore_tab_index = self.view_tabs.addTab(explore_panel, "Explore")
+        self.view_tabs.currentChanged.connect(self._on_view_tab_changed)
         self.main_splitter.addWidget(self.view_tabs)
         self._apply_soft_shadow(explore_panel)
         self._apply_soft_shadow(overview_panel)
@@ -3980,6 +3981,26 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _change_online_map(self) -> None:
         self._configure_online_map()
+
+    def _on_view_tab_changed(self, index: int) -> None:
+        if index != getattr(self, "_overview_tab_index", -1):
+            return
+        self._sync_overview_depth_from_explore_selection()
+
+    def _sync_overview_depth_from_explore_selection(self) -> None:
+        region = self.app_controller.project_controller.get_active_region()
+        if region is None or region.sample_count() <= 0:
+            return
+        selected_sample = int(self.app_controller.selection_state.sample_index)
+        applied = self.app_controller.set_overview_depth_sample_index(selected_sample)
+        self._overview_depth_pending_value = None
+        self._overview_depth_refresh_timer.stop()
+        self.overview_depth_slider.blockSignals(True)
+        self.overview_depth_slider.setRange(0, max(region.sample_count() - 1, 0))
+        self.overview_depth_slider.setValue(applied)
+        self.overview_depth_slider.blockSignals(False)
+        self._refresh_overview_controls()
+        self._refresh_overview_scene()
 
     def _on_overview_depth_changed(self, value: int) -> None:
         applied = self.app_controller.set_overview_depth_sample_index(value)

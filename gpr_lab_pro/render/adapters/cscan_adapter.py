@@ -5,6 +5,16 @@ import numpy as np
 from gpr_lab_pro.domain.models.display import DisplayState, SelectionState
 
 
+def _sample_attribute(values: np.ndarray, attribute: str) -> np.ndarray:
+    if attribute == "Envelope":
+        return np.abs(values)
+    if attribute == "Phase":
+        return np.angle(values)
+    if attribute == "Abs":
+        return np.abs(np.real(values))
+    return np.real(values)
+
+
 def build_cscan(
     volume: np.ndarray,
     display_state: DisplayState,
@@ -17,16 +27,8 @@ def build_cscan(
     lo = max(0, depth_idx - thick)
     hi = min(volume.shape[0], depth_idx + thick + 1)
     slab = volume[lo:hi, :, :]
-    cscan = np.mean(slab, axis=0).T
     attr = display_state.cscan_attr
-    if attr == "Envelope":
-        cscan = np.abs(cscan)
-    elif attr == "Phase":
-        cscan = np.angle(cscan)
-    elif attr == "Abs":
-        cscan = np.abs(np.real(cscan))
-    else:
-        cscan = np.real(cscan)
+    cscan = np.mean(_sample_attribute(slab, attr), axis=0).T
 
     if attr in {"Envelope", "Abs"}:
         vmax = float(np.nanpercentile(np.abs(cscan), 99.0))
