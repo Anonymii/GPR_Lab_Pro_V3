@@ -461,10 +461,22 @@ class GPRDataImporter:
         decoders = {
             "decimal": (latitude, longitude),
             "decimal_swapped": (longitude, latitude),
-            "scaled_100": (cls._divide_100(latitude), cls._divide_100(longitude)),
-            "scaled_100_swapped": (cls._divide_100(longitude), cls._divide_100(latitude)),
-            "nmea": (cls._nmea_to_decimal_degrees(latitude), cls._nmea_to_decimal_degrees(longitude)),
-            "nmea_swapped": (cls._nmea_to_decimal_degrees(longitude), cls._nmea_to_decimal_degrees(latitude)),
+            "degree_minute": (
+                cls._degree_minute_to_decimal_degrees(latitude),
+                cls._degree_minute_to_decimal_degrees(longitude),
+            ),
+            "degree_minute_swapped": (
+                cls._degree_minute_to_decimal_degrees(longitude),
+                cls._degree_minute_to_decimal_degrees(latitude),
+            ),
+            "degree_minute_second": (
+                cls._packed_dms_to_decimal_degrees(latitude),
+                cls._packed_dms_to_decimal_degrees(longitude),
+            ),
+            "degree_minute_second_swapped": (
+                cls._packed_dms_to_decimal_degrees(longitude),
+                cls._packed_dms_to_decimal_degrees(latitude),
+            ),
         }
         lat_value, lon_value = decoders.get(str(mode), (None, None))
         if cls._is_valid_geo(lat_value, lon_value):
@@ -476,10 +488,10 @@ class GPRDataImporter:
         return (
             "decimal",
             "decimal_swapped",
-            "scaled_100",
-            "scaled_100_swapped",
-            "nmea",
-            "nmea_swapped",
+            "degree_minute",
+            "degree_minute_swapped",
+            "degree_minute_second",
+            "degree_minute_second_swapped",
         )
 
     @classmethod
@@ -511,51 +523,59 @@ class GPRDataImporter:
             huge_jump_count = 0
             large_jump_count = 0
 
-        nmea_hint_count = cls._nmea_hint_count(mode, navigation_rows_raw)
+        format_hint_count = cls._gps_format_hint_count(mode, navigation_rows_raw)
         mode_preference = {
             "decimal": 5,
             "decimal_swapped": 4,
-            "nmea": 3,
-            "nmea_swapped": 2,
-            "scaled_100": 1,
-            "scaled_100_swapped": 0,
+            "degree_minute": 3,
+            "degree_minute_swapped": 2,
+            "degree_minute_second": 1,
+            "degree_minute_second_swapped": 0,
         }.get(mode, 0)
         return (
             int(valid_count),
             -int(huge_jump_count),
             -int(large_jump_count),
-            int(nmea_hint_count),
+            int(mode_preference),
+            int(format_hint_count),
             -int(round(min(step_p95_m, 1_000_000.0) * 1000.0)),
             -int(round(min(step_max_m, 1_000_000.0) * 1000.0)),
-            int(mode_preference),
         )
 
     @classmethod
-    def _nmea_hint_count(
+    def _gps_format_hint_count(
         cls,
         mode: str,
         navigation_rows_raw: Sequence[tuple[int | None, int | None, float | None, float | None] | None],
     ) -> int:
-        if mode not in {"nmea", "nmea_swapped"}:
+        if mode not in {
+            "degree_minute",
+            "degree_minute_swapped",
+            "degree_minute_second",
+            "degree_minute_second_swapped",
+        }:
             return 0
         count = 0
         for raw_sample in navigation_rows_raw:
             if raw_sample is None:
                 continue
             _, _, latitude_raw, longitude_raw = raw_sample
-            if mode == "nmea":
+            if mode in {"degree_minute", "degree_minute_second"}:
                 lat_value, lon_value = latitude_raw, longitude_raw
             else:
                 lat_value, lon_value = longitude_raw, latitude_raw
-            if cls._looks_like_nmea_component(lat_value, max_degrees=90.0) and cls._looks_like_nmea_component(
-                lon_value,
-                max_degrees=180.0,
-            ):
+            if mode in {"degree_minute", "degree_minute_swapped"}:
+                lat_ok = cls._looks_like_degree_minute_component(lat_value, max_degrees=90.0)
+                lon_ok = cls._looks_like_degree_minute_component(lon_value, max_degrees=180.0)
+            else:
+                lat_ok = cls._looks_like_packed_dms_component(lat_value, max_degrees=90.0)
+                lon_ok = cls._looks_like_packed_dms_component(lon_value, max_degrees=180.0)
+            if lat_ok and lon_ok:
                 count += 1
         return count
 
     @staticmethod
-    def _looks_like_nmea_component(value: float | None, *, max_degrees: float) -> bool:
+    def _looks_like_degree_minute_component(value: float | None, *, max_degrees: float) -> bool:
         if value is None:
             return False
         raw = float(value)
@@ -565,6 +585,22 @@ class GPRDataImporter:
         degrees = math.floor(magnitude / 100.0)
         minutes = magnitude - degrees * 100.0
         return degrees <= float(max_degrees) and 0.0 <= minutes < 60.0
+
+    @staticmethod
+    def _looks_like_packed_dms_component(value: float | None, *, max_degrees: float) -> bool:
+        if value is None:
+            return False
+        raw = float(value)
+        if not math.isfinite(raw) or abs(raw) <= 1e-9:
+            return False
+        magnitude = abs(raw)
+        if magnitude < 10000.0:
+            return False
+        degrees = math.floor(magnitude / 10000.0)
+        minute_second = magnitude - degrees * 10000.0
+        minutes = math.floor(minute_second / 100.0)
+        seconds = minute_second - minutes * 100.0
+        return degrees <= float(max_degrees) and 0.0 <= minutes < 60.0 and 0.0 <= seconds < 60.0
 
     @staticmethod
     def _has_geo_hint(latitude: float | None, longitude: float | None) -> bool:
@@ -577,16 +613,7 @@ class GPRDataImporter:
         return abs(lat) > 1e-9 or abs(lon) > 1e-9
 
     @staticmethod
-    def _divide_100(value: float | None) -> float | None:
-        if value is None:
-            return None
-        raw = float(value)
-        if not math.isfinite(raw):
-            return None
-        return raw / 100.0
-
-    @staticmethod
-    def _nmea_to_decimal_degrees(value: float | None) -> float | None:
+    def _degree_minute_to_decimal_degrees(value: float | None) -> float | None:
         if value is None:
             return None
         raw = float(value)
@@ -599,6 +626,25 @@ class GPRDataImporter:
         if minutes >= 60.0:
             return None
         return sign * (degrees + minutes / 60.0)
+
+    @staticmethod
+    def _packed_dms_to_decimal_degrees(value: float | None) -> float | None:
+        if value is None:
+            return None
+        raw = float(value)
+        if not math.isfinite(raw) or abs(raw) <= 1e-9:
+            return raw
+        sign = -1.0 if raw < 0.0 else 1.0
+        magnitude = abs(raw)
+        if magnitude < 10000.0:
+            return None
+        degrees = math.floor(magnitude / 10000.0)
+        minute_second = magnitude - degrees * 10000.0
+        minutes = math.floor(minute_second / 100.0)
+        seconds = minute_second - minutes * 100.0
+        if minutes >= 60.0 or seconds >= 60.0:
+            return None
+        return sign * (degrees + minutes / 60.0 + seconds / 3600.0)
 
     @staticmethod
     def _read_uint16(fh, pos: int) -> int | None:

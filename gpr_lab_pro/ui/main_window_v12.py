@@ -4072,7 +4072,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         project_root = self.app_controller.project_state.root_path or ""
         start_dir = str(Path(project_root) / "data") if project_root else ""
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "选择 DAT 数据文件", start_dir, "DAT Files (*.dat)")
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "选择雷达数据文件",
+            start_dir,
+            "Radar Data (*.dat *.3dra);;DAT Files (*.dat);;3D Radar Archives (*.3dra)",
+        )
         if not path:
             return
         self.app_controller.import_data(path, None)
