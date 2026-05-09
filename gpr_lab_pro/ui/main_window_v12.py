@@ -308,7 +308,13 @@ class OperationDialog(QtWidgets.QDialog):
 
 
 class DisplaySettingsDialog(QtWidgets.QDialog):
-    def __init__(self, app_controller: GPRApplication, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(
+        self,
+        app_controller: GPRApplication,
+        parent: QtWidgets.QWidget | None = None,
+        *,
+        initial_task_index: int = 0,
+    ) -> None:
         super().__init__(parent)
         self.app_controller = app_controller
         self.setWindowTitle("显示处理设置")
@@ -346,9 +352,7 @@ class DisplaySettingsDialog(QtWidgets.QDialog):
         self.axes_check.setChecked(state.show_axes)
         self.summary_label = QtWidgets.QLabel()
         self.summary_label.setWordWrap(True)
-        self.summary_label.setStyleSheet(
-            "color: #66727f; background: #f5f7fa; border: 1px solid #d4dbe3; border-radius: 10px; padding: 8px 10px;"
-        )
+        self.summary_label.setStyleSheet("color: #66727f; padding: 4px 2px;")
 
         tasks_group = QtWidgets.QGroupBox("Tasks")
         tasks_layout = QtWidgets.QVBoxLayout(tasks_group)
@@ -357,8 +361,8 @@ class DisplaySettingsDialog(QtWidgets.QDialog):
 
         self.display_task_list = QtWidgets.QListWidget()
         self.display_task_list.setMinimumWidth(250)
-        self.display_task_list.addItems(["Rendering", "Range Gain"])
-        self.display_task_list.setCurrentRow(0)
+        self.display_task_list.addItems(["Rendering", "Range Gain", "Overview Layers", "Overlay Data"])
+        self.display_task_list.setCurrentRow(int(np.clip(initial_task_index, 0, self.display_task_list.count() - 1)))
         self.display_task_list.currentRowChanged.connect(self._on_display_task_changed)
         tasks_body.addWidget(self.display_task_list, stretch=2)
 
@@ -375,6 +379,8 @@ class DisplaySettingsDialog(QtWidgets.QDialog):
         self.display_stack = QtWidgets.QStackedWidget()
         self.display_stack.addWidget(self._build_rendering_panel())
         self.display_stack.addWidget(self._build_gain_panel())
+        self.display_stack.addWidget(self._build_layers_panel())
+        self.display_stack.addWidget(self._build_overlay_panel())
         tasks_body.addWidget(self.display_stack, stretch=4)
 
         layout.addWidget(tasks_group, stretch=1)
@@ -398,7 +404,7 @@ class DisplaySettingsDialog(QtWidgets.QDialog):
             self.axes_check.toggled,
         ):
             signal.connect(self._update_summary)
-        self._on_display_task_changed(0)
+        self._on_display_task_changed(self.display_task_list.currentRow())
         self._update_summary()
 
     def _time_window(self) -> tuple[float, float]:
@@ -438,6 +444,45 @@ class DisplaySettingsDialog(QtWidgets.QDialog):
         form.addRow("C-scan 层厚", self.slice_slider)
         form.addRow("起始时间(ns)", self.start_time_edit)
         form.addRow("终止时间(ns)", self.end_time_edit)
+        return panel
+
+    def _build_layers_panel(self) -> QtWidgets.QWidget:
+        panel = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(panel)
+        layout.setContentsMargins(4, 4, 4, 4)
+        for text in ("雷达区域", "地图影像", "标注/Caption", "界面点云", "处理结果"):
+            check = QtWidgets.QCheckBox(text)
+            check.setChecked(True)
+            check.setEnabled(False)
+            layout.addWidget(check)
+        hint = QtWidgets.QLabel("图层显隐、顺序、透明度和按任务结果过滤接口已预留。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #6f7c89;")
+        layout.addWidget(hint)
+        layout.addStretch(1)
+        return panel
+
+    def _build_overlay_panel(self) -> QtWidgets.QWidget:
+        panel = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(panel)
+        form.setLabelAlignment(QtCore.Qt.AlignRight)
+        overlay_combo = QtWidgets.QComboBox()
+        overlay_combo.addItems(["None", "Interface Depth", "Epsilon", "Confidence", "Task Output"])
+        overlay_combo.setEnabled(False)
+        color_combo = QtWidgets.QComboBox()
+        color_combo.addItems(["Fixed Range", "Threshold", "Diverging", "Transparent"])
+        color_combo.setEnabled(False)
+        alpha_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        alpha_slider.setRange(0, 100)
+        alpha_slider.setValue(70)
+        alpha_slider.setEnabled(False)
+        form.addRow("叠加数据", overlay_combo)
+        form.addRow("色表模式", color_combo)
+        form.addRow("透明度", alpha_slider)
+        hint = QtWidgets.QLabel("叠加矩阵、阈值色表、透明度和数据属性接口已预留。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #6f7c89;")
+        form.addRow("", hint)
         return panel
 
     def _on_display_task_changed(self, row: int) -> None:
@@ -3959,10 +4004,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "project_group",
                 [
                     ("add_3dr", QtWidgets.QStyle.SP_DialogOpenButton, self._load_data),
-                    ("add_geo_image", QtWidgets.QStyle.SP_FileDialogDetailedView, lambda: self._show_feature_placeholder("添加地理影像", "地图影像与 world file 导入接口已预留。")),
+                    ("add_geo_image", QtWidgets.QStyle.SP_FileDialogDetailedView, self._create_project_map),
                     ("add_region", QtWidgets.QStyle.SP_FileDialogNewFolder, self._add_region_from_ribbon),
-                    ("add_stitching", QtWidgets.QStyle.SP_ArrowRight, lambda: self._show_feature_placeholder("添加拼接", "拼接向导接口已预留：矩形/曲线、区域勾选、分辨率与左右宽度。")),
-                    ("add_annotation_group", QtWidgets.QStyle.SP_DialogYesButton, lambda: self._show_feature_placeholder("添加标注分组", "标注分组、点/线标注和 caption 图层将在工程树模型中补齐。")),
+                    ("add_stitching", QtWidgets.QStyle.SP_ArrowRight, self._create_stitching),
+                    ("add_annotation_group", QtWidgets.QStyle.SP_DialogYesButton, self._create_annotation_group),
                     ("add_interface", QtWidgets.QStyle.SP_DialogApplyButton, self._create_interface),
                 ],
             )
@@ -3990,9 +4035,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._build_ribbon_group(
                 "view_group",
                 [
-                    ("overview_layers", QtWidgets.QStyle.SP_FileDialogInfoView, lambda: self._show_feature_placeholder("总览图层", "文件、区域、地图、标注、标注标题、任务结果与界面叠加图层面板已预留。")),
-                    ("overlay_selection", QtWidgets.QStyle.SP_ArrowDown, lambda: self._show_feature_placeholder("叠加数据选择", "界面深度、epsilon、confidence 和任务输出矩阵的叠加选择接口已预留。")),
-                    ("overlay_colors", QtWidgets.QStyle.SP_DialogResetButton, lambda: self._show_feature_placeholder("叠加色表", "固定范围色表、阈值色表和透明度滑条接口已预留。")),
+                    ("overview_layers", QtWidgets.QStyle.SP_FileDialogInfoView, lambda: self._open_display_settings(initial_task_index=2)),
+                    ("overlay_selection", QtWidgets.QStyle.SP_ArrowDown, lambda: self._open_display_settings(initial_task_index=3)),
+                    ("overlay_colors", QtWidgets.QStyle.SP_DialogResetButton, lambda: self._open_display_settings(initial_task_index=3)),
                     ("toggle_migration", QtWidgets.QStyle.SP_BrowserReload, lambda: self._show_feature_placeholder("迁移显示切换", "迁移/未迁移显示快速切换入口已预留。")),
                 ],
             )
@@ -4278,6 +4323,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pipeline_counts_label.setObjectName("panelSubtitle")
         layout.addWidget(self.pipeline_counts_label)
 
+        layout.addWidget(self._build_region_processing_compat_panel())
+
         body = QtWidgets.QHBoxLayout()
         body.setSpacing(12)
         layout.addLayout(body, stretch=1)
@@ -4337,6 +4384,32 @@ class MainWindow(QtWidgets.QMainWindow):
         buttons.addWidget(self.btn_apply_draft)
         layout.addLayout(buttons)
         return panel
+
+    def _build_region_processing_compat_panel(self) -> QtWidgets.QGroupBox:
+        group = QtWidgets.QGroupBox("Examiner 兼容处理接口")
+        group.setObjectName("examinerCompatibilityGroup")
+        layout = QtWidgets.QGridLayout(group)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setHorizontalSpacing(12)
+        layout.setVerticalSpacing(4)
+        items = (
+            ("数据裁剪/重采样", True),
+            ("背景扣除", True),
+            ("增益/滤波", True),
+            ("迁移处理", False),
+            ("速度/介电常数", False),
+            ("曲面校正", False),
+        )
+        for index, (text, available) in enumerate(items):
+            check = QtWidgets.QCheckBox(text)
+            check.setChecked(available)
+            check.setEnabled(False)
+            layout.addWidget(check, index // 3, index % 3)
+        hint = QtWidgets.QLabel("已实现项会映射到当前处理链；复杂项先保留参数和接口入口。")
+        hint.setStyleSheet("color: #6f7c89;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint, 2, 0, 1, 3)
+        return group
 
     def _build_parameter_panel(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QGroupBox("Properties / 参数设置")
@@ -4424,8 +4497,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.action_save_project = self.file_menu.addAction("保存工程", self._save_project)
             self.file_menu.addSeparator()
             self.action_import_data = self.file_menu.addAction("导入数据", self._load_data)
+            self.file_menu.addAction("添加地理影像", self._create_project_map)
+            self.file_menu.addAction("添加标注分组", self._create_annotation_group)
+            self.file_menu.addAction("添加拼接", self._create_stitching)
             self.action_load_template = self.file_menu.addAction("加载模板", self._load_template)
             self.action_save_processed = self.file_menu.addAction("保存处理结果", self._save_processed)
+            self.file_menu.addAction("导出导航数据...", lambda: self._show_feature_placeholder("导出导航数据", "导航数据 TSV 导入/导出接口已预留。"))
             self.file_menu.addAction("数据源信息", self._show_data_source_information)
         else:
             self.action_save_project = None
@@ -4695,8 +4772,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pipeline_dialog.raise_()
         self.pipeline_dialog.activateWindow()
 
-    def _open_display_settings(self) -> None:
-        dialog = DisplaySettingsDialog(self.app_controller, self)
+    def _open_display_settings(self, *, initial_task_index: int = 0) -> None:
+        dialog = DisplaySettingsDialog(self.app_controller, self, initial_task_index=initial_task_index)
         dialog.setObjectName("displayDialog")
         self._apply_soft_shadow(dialog, blur_radius=28, y_offset=8, alpha=30)
         if dialog.exec() != QtWidgets.QDialog.Accepted:
@@ -5018,7 +5095,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.project_tree.blockSignals(True)
         self.project_tree.clear()
         project_state = self.app_controller.project_state
-        if not project_state.files:
+        if not project_state.files and not project_state.maps and not project_state.annotation_groups and not project_state.stitchings:
             self.project_tree.blockSignals(False)
             return
         target_item: QtWidgets.QTreeWidgetItem | None = None
@@ -5054,6 +5131,52 @@ class MainWindow(QtWidgets.QMainWindow):
                     region_node.addChild(interface_node)
                     if region.region_id == current_region_id and interface.interface_id == active_interface_id:
                         target_item = interface_node
+        if project_state.maps:
+            maps_node = QtWidgets.QTreeWidgetItem(["地图影像"])
+            maps_node.setData(0, QtCore.Qt.UserRole, ("category", "maps"))
+            maps_node.setIcon(0, self._standard_icon(QtWidgets.QStyle.SP_DriveNetIcon))
+            maps_node.setExpanded(True)
+            self.project_tree.addTopLevelItem(maps_node)
+            for map_item in project_state.maps:
+                map_node = QtWidgets.QTreeWidgetItem([map_item.name or "地图"])
+                map_node.setData(0, QtCore.Qt.UserRole, ("map", map_item.map_id))
+                map_node.setIcon(0, self._standard_icon(QtWidgets.QStyle.SP_FileDialogDetailedView))
+                if not map_item.visible:
+                    map_node.setForeground(0, QtGui.QBrush(QtGui.QColor("#8a8f99")))
+                maps_node.addChild(map_node)
+        if project_state.annotation_groups:
+            annotations_node = QtWidgets.QTreeWidgetItem(["标注"])
+            annotations_node.setData(0, QtCore.Qt.UserRole, ("category", "annotations"))
+            annotations_node.setIcon(0, self._standard_icon(QtWidgets.QStyle.SP_DialogYesButton))
+            annotations_node.setExpanded(True)
+            self.project_tree.addTopLevelItem(annotations_node)
+            for group in project_state.annotation_groups:
+                group_node = QtWidgets.QTreeWidgetItem([group.name or "标注分组"])
+                group_node.setData(0, QtCore.Qt.UserRole, ("annotation_group", group.group_id))
+                group_node.setIcon(0, self._color_chip_icon(group.color, size=10))
+                if not group.visible:
+                    group_node.setForeground(0, QtGui.QBrush(QtGui.QColor("#8a8f99")))
+                annotations_node.addChild(group_node)
+                for annotation in group.annotations:
+                    annotation_node = QtWidgets.QTreeWidgetItem([annotation.name or "标注"])
+                    annotation_node.setData(0, QtCore.Qt.UserRole, ("annotation", group.group_id, annotation.annotation_id))
+                    annotation_node.setIcon(0, self._standard_icon(QtWidgets.QStyle.SP_FileDialogInfoView))
+                    if not annotation.visible:
+                        annotation_node.setForeground(0, QtGui.QBrush(QtGui.QColor("#8a8f99")))
+                    group_node.addChild(annotation_node)
+        if project_state.stitchings:
+            stitchings_node = QtWidgets.QTreeWidgetItem(["拼接"])
+            stitchings_node.setData(0, QtCore.Qt.UserRole, ("category", "stitchings"))
+            stitchings_node.setIcon(0, self._standard_icon(QtWidgets.QStyle.SP_ArrowRight))
+            stitchings_node.setExpanded(True)
+            self.project_tree.addTopLevelItem(stitchings_node)
+            for stitching in project_state.stitchings:
+                stitching_node = QtWidgets.QTreeWidgetItem([stitching.name or "拼接"])
+                stitching_node.setData(0, QtCore.Qt.UserRole, ("stitching", stitching.stitching_id))
+                stitching_node.setIcon(0, self._standard_icon(QtWidgets.QStyle.SP_DirLinkIcon))
+                if not stitching.visible:
+                    stitching_node.setForeground(0, QtGui.QBrush(QtGui.QColor("#8a8f99")))
+                stitchings_node.addChild(stitching_node)
         self.project_tree.expandAll()
         if target_item is not None:
             self.project_tree.setCurrentItem(target_item)
@@ -5739,6 +5862,9 @@ class MainWindow(QtWidgets.QMainWindow):
             region_id = str(payload[1])
             interface_id = str(payload[2])
             self._select_interface(region_id, interface_id)
+            return
+        if kind in {"map", "annotation_group", "annotation", "stitching"}:
+            self.statusBar().showMessage("已选择工程对象，可通过右键菜单编辑。", 2500)
 
     def _on_project_tree_item_clicked(self, item: QtWidgets.QTreeWidgetItem, _column: int) -> None:
         self._activate_tree_item(item)
@@ -5750,17 +5876,57 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._is_busy:
             return
         item = self.project_tree.itemAt(pos)
+        menu = QtWidgets.QMenu(self)
         if item is None:
+            add_file_action = menu.addAction("添加雷达文件")
+            add_map_action = menu.addAction("添加地理影像")
+            add_group_action = menu.addAction("添加标注分组")
+            add_stitching_action = menu.addAction("添加拼接")
+            chosen = menu.exec(self.project_tree.viewport().mapToGlobal(pos))
+            if chosen is add_file_action:
+                self._load_data()
+            elif chosen is add_map_action:
+                self._create_project_map()
+            elif chosen is add_group_action:
+                self._create_annotation_group()
+            elif chosen is add_stitching_action:
+                self._create_stitching()
             return
         self.project_tree.setCurrentItem(item)
         payload = item.data(0, QtCore.Qt.UserRole)
         if not isinstance(payload, tuple) or len(payload) < 2:
             return
         kind = payload[0]
-        menu = QtWidgets.QMenu(self)
+        if kind == "category":
+            category = str(payload[1])
+            if category == "maps":
+                add_action = menu.addAction("添加地理影像")
+                chosen = menu.exec(self.project_tree.viewport().mapToGlobal(pos))
+                if chosen is add_action:
+                    self._create_project_map()
+                return
+            if category == "annotations":
+                add_action = menu.addAction("添加标注分组")
+                chosen = menu.exec(self.project_tree.viewport().mapToGlobal(pos))
+                if chosen is add_action:
+                    self._create_annotation_group()
+                return
+            if category == "stitchings":
+                add_action = menu.addAction("添加拼接")
+                chosen = menu.exec(self.project_tree.viewport().mapToGlobal(pos))
+                if chosen is add_action:
+                    self._create_stitching()
+                return
         if kind == "file":
             object_id = payload[1]
             create_action = menu.addAction("新建区域")
+            add_map_action = menu.addAction("添加地理影像")
+            add_group_action = menu.addAction("添加标注分组")
+            add_stitching_action = menu.addAction("添加拼接")
+            menu.addSeparator()
+            geo_action = menu.addAction("地理定位...")
+            info_action = menu.addAction("数据源信息")
+            menu.addSeparator()
             remove_action = menu.addAction("从工程中移除数据")
             chosen = menu.exec(self.project_tree.viewport().mapToGlobal(pos))
             if chosen is create_action:
@@ -5770,6 +5936,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 if active_file is not None and active_region is not None and active_file.file_id == str(object_id):
                     base_region_id = active_region.region_id
                 self._create_region(str(object_id), base_region_id=base_region_id)
+            elif chosen is add_map_action:
+                self._create_project_map()
+            elif chosen is add_group_action:
+                self._create_annotation_group()
+            elif chosen is add_stitching_action:
+                self._create_stitching()
+            elif chosen is geo_action:
+                self._show_feature_placeholder("地理定位", "内部 GPS、外部 NMEA、批量用户输入、设备 offset 与坐标系选择接口已预留。")
+            elif chosen is info_action:
+                self._show_data_source_information()
             elif chosen is remove_action:
                 self._delete_project_file(str(object_id))
             return
@@ -5777,8 +5953,12 @@ class MainWindow(QtWidgets.QMainWindow):
             object_id = payload[1]
             create_action = menu.addAction("新建区域")
             create_interface_action = menu.addAction("新建界面")
+            processing_action = menu.addAction("区域处理设置...")
+            process_action = menu.addAction("处理选中区域")
+            display_action = menu.addAction("显示处理设置...")
             rename_action = menu.addAction("重命名")
             bounds_action = menu.addAction("编辑范围")
+            export_action = menu.addAction("导出区域数据...")
             delete_action = menu.addAction("删除区域")
             chosen = menu.exec(self.project_tree.viewport().mapToGlobal(pos))
             region_id = str(object_id)
@@ -5789,12 +5969,102 @@ class MainWindow(QtWidgets.QMainWindow):
             elif chosen is create_interface_action:
                 self.app_controller.select_project_region(region_id)
                 self._create_interface()
+            elif chosen is processing_action:
+                self.app_controller.select_project_region(region_id)
+                self._open_pipeline_settings()
+            elif chosen is process_action:
+                self.app_controller.select_project_region(region_id)
+                self._start_processing()
+            elif chosen is display_action:
+                self.app_controller.select_project_region(region_id)
+                self._open_display_settings()
             elif chosen is rename_action:
                 self._rename_region(region_id)
             elif chosen is bounds_action:
                 self._edit_region_bounds(region_id)
+            elif chosen is export_action:
+                self._show_feature_placeholder("导出区域数据", "区域级体数据、切片、导航与处理参数导出接口已预留。")
             elif chosen is delete_action:
                 self._delete_region(region_id)
+            return
+        if kind == "map":
+            map_id = str(payload[1])
+            map_item = self.app_controller.project_controller.get_map(map_id)
+            toggle_text = "隐藏地图影像" if map_item is not None and map_item.visible else "显示地图影像"
+            rename_action = menu.addAction("重命名")
+            toggle_action = menu.addAction(toggle_text)
+            register_action = menu.addAction("编辑地图配准...")
+            remove_action = menu.addAction("从工程中移除")
+            chosen = menu.exec(self.project_tree.viewport().mapToGlobal(pos))
+            if chosen is rename_action:
+                self._rename_project_map(map_id)
+            elif chosen is toggle_action and map_item is not None:
+                self._toggle_project_map_visible(map_id, not map_item.visible)
+            elif chosen is register_action:
+                self._show_feature_placeholder("编辑地图配准", "world file、控制点配准、透明度与坐标系参数接口已预留。")
+            elif chosen is remove_action:
+                self._delete_project_map(map_id)
+            return
+        if kind == "annotation_group":
+            group_id = str(payload[1])
+            group = self.app_controller.project_controller.get_annotation_group(group_id)
+            toggle_text = "隐藏分组" if group is not None and group.visible else "显示分组"
+            create_action = menu.addAction("新建标注点")
+            rename_action = menu.addAction("重命名")
+            toggle_action = menu.addAction(toggle_text)
+            export_action = menu.addAction("导出标注...")
+            delete_action = menu.addAction("删除分组")
+            chosen = menu.exec(self.project_tree.viewport().mapToGlobal(pos))
+            if chosen is create_action:
+                self._create_annotation(group_id)
+            elif chosen is rename_action:
+                self._rename_annotation_group(group_id)
+            elif chosen is toggle_action and group is not None:
+                self._toggle_annotation_group_visible(group_id, not group.visible)
+            elif chosen is export_action:
+                self._show_feature_placeholder("导出标注", "标注点/线、caption 与坐标属性导出接口已预留。")
+            elif chosen is delete_action:
+                self._delete_annotation_group(group_id)
+            return
+        if kind == "annotation" and len(payload) >= 3:
+            group_id = str(payload[1])
+            annotation_id = str(payload[2])
+            annotation = self.app_controller.project_controller.get_annotation(group_id, annotation_id)
+            toggle_text = "隐藏标注" if annotation is not None and annotation.visible else "显示标注"
+            rename_action = menu.addAction("重命名")
+            toggle_action = menu.addAction(toggle_text)
+            locate_action = menu.addAction("导航到标注")
+            delete_action = menu.addAction("删除标注")
+            chosen = menu.exec(self.project_tree.viewport().mapToGlobal(pos))
+            if chosen is rename_action:
+                self._rename_annotation(group_id, annotation_id)
+            elif chosen is toggle_action and annotation is not None:
+                self._toggle_annotation_visible(group_id, annotation_id, not annotation.visible)
+            elif chosen is locate_action:
+                self._show_feature_placeholder("导航到标注", "标注坐标联动 Crosshair 与地图定位接口已预留。")
+            elif chosen is delete_action:
+                self._delete_annotation(group_id, annotation_id)
+            return
+        if kind == "stitching":
+            stitching_id = str(payload[1])
+            stitching = self.app_controller.project_controller.get_stitching(stitching_id)
+            toggle_text = "隐藏拼接" if stitching is not None and stitching.visible else "显示拼接"
+            process_action = menu.addAction("处理拼接")
+            edit_action = menu.addAction("编辑拼接设置...")
+            rename_action = menu.addAction("重命名")
+            toggle_action = menu.addAction(toggle_text)
+            delete_action = menu.addAction("删除拼接")
+            chosen = menu.exec(self.project_tree.viewport().mapToGlobal(pos))
+            if chosen is process_action:
+                self._show_feature_placeholder("处理拼接", "矩形/曲线拼接执行、进度与结果缓存接口已预留。")
+            elif chosen is edit_action:
+                self._show_feature_placeholder("编辑拼接设置", "区域勾选、基准区域、分辨率、左右宽度与输出范围接口已预留。")
+            elif chosen is rename_action:
+                self._rename_stitching(stitching_id)
+            elif chosen is toggle_action and stitching is not None:
+                self._toggle_stitching_visible(stitching_id, not stitching.visible)
+            elif chosen is delete_action:
+                self._delete_stitching(stitching_id)
             return
         if kind == "interface" and len(payload) >= 3:
             region_id = str(payload[1])
@@ -5885,6 +6155,253 @@ class MainWindow(QtWidgets.QMainWindow):
             self.app_controller.delete_project_file(file_id)
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, "工程", str(exc))
+
+    def _ensure_project_object_editable(self, title: str) -> bool:
+        if self.app_controller.project_state.is_open:
+            return True
+        QtWidgets.QMessageBox.warning(self, title, "请先新建或打开工程。")
+        return False
+
+    def _refresh_project_objects(self) -> None:
+        self._refresh_project_tree()
+        self._refresh_overview_scene()
+        self._refresh_file_menu()
+
+    def _create_project_map(self) -> None:
+        if not self._ensure_project_object_editable("添加地理影像"):
+            return
+        name, ok = QtWidgets.QInputDialog.getText(self, "添加地理影像", "地图名称")
+        if not ok:
+            return
+        try:
+            self.app_controller.project_controller.create_map(name=name.strip() or None)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "地图影像", str(exc))
+            return
+        self._refresh_project_objects()
+        self.statusBar().showMessage("地图影像节点已添加，配准与影像文件接口已预留。", 3000)
+
+    def _rename_project_map(self, map_id: str) -> None:
+        map_item = self.app_controller.project_controller.get_map(map_id)
+        if map_item is None:
+            return
+        name, ok = QtWidgets.QInputDialog.getText(self, "重命名地图影像", "地图名称", text=map_item.name)
+        if not ok:
+            return
+        try:
+            self.app_controller.project_controller.rename_map(map_id, name)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "地图影像", str(exc))
+            return
+        self._refresh_project_objects()
+
+    def _toggle_project_map_visible(self, map_id: str, visible: bool) -> None:
+        try:
+            self.app_controller.project_controller.set_map_visible(map_id, visible)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "地图影像", str(exc))
+            return
+        self._refresh_project_objects()
+
+    def _delete_project_map(self, map_id: str) -> None:
+        map_item = self.app_controller.project_controller.get_map(map_id)
+        if map_item is None:
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "移除地图影像",
+            f"将“{map_item.name}”从当前工程中移除？",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+        try:
+            self.app_controller.project_controller.delete_map(map_id)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "地图影像", str(exc))
+            return
+        self._refresh_project_objects()
+
+    def _create_annotation_group(self) -> None:
+        if not self._ensure_project_object_editable("添加标注分组"):
+            return
+        name, ok = QtWidgets.QInputDialog.getText(self, "添加标注分组", "分组名称")
+        if not ok:
+            return
+        try:
+            self.app_controller.project_controller.create_annotation_group(name=name.strip() or None)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "标注分组", str(exc))
+            return
+        self._refresh_project_objects()
+
+    def _rename_annotation_group(self, group_id: str) -> None:
+        group = self.app_controller.project_controller.get_annotation_group(group_id)
+        if group is None:
+            return
+        name, ok = QtWidgets.QInputDialog.getText(self, "重命名标注分组", "分组名称", text=group.name)
+        if not ok:
+            return
+        try:
+            self.app_controller.project_controller.rename_annotation_group(group_id, name)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "标注分组", str(exc))
+            return
+        self._refresh_project_objects()
+
+    def _toggle_annotation_group_visible(self, group_id: str, visible: bool) -> None:
+        try:
+            self.app_controller.project_controller.set_annotation_group_visible(group_id, visible)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "标注分组", str(exc))
+            return
+        self._refresh_project_objects()
+
+    def _delete_annotation_group(self, group_id: str) -> None:
+        group = self.app_controller.project_controller.get_annotation_group(group_id)
+        if group is None:
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "删除标注分组",
+            f"删除分组“{group.name}”及其下所有标注？",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+        try:
+            self.app_controller.project_controller.delete_annotation_group(group_id)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "标注分组", str(exc))
+            return
+        self._refresh_project_objects()
+
+    def _create_annotation(self, group_id: str) -> None:
+        group = self.app_controller.project_controller.get_annotation_group(group_id)
+        if group is None:
+            return
+        name, ok = QtWidgets.QInputDialog.getText(self, "新建标注点", "标注名称")
+        if not ok:
+            return
+        selection = self.app_controller.selection_state
+        try:
+            self.app_controller.project_controller.create_annotation(
+                group_id,
+                name=name.strip() or None,
+                x=float(selection.trace_index),
+                y=float(selection.line_index),
+                z=float(selection.sample_index),
+            )
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "标注", str(exc))
+            return
+        self._refresh_project_objects()
+
+    def _rename_annotation(self, group_id: str, annotation_id: str) -> None:
+        annotation = self.app_controller.project_controller.get_annotation(group_id, annotation_id)
+        if annotation is None:
+            return
+        name, ok = QtWidgets.QInputDialog.getText(self, "重命名标注", "标注名称", text=annotation.name)
+        if not ok:
+            return
+        try:
+            self.app_controller.project_controller.rename_annotation(group_id, annotation_id, name)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "标注", str(exc))
+            return
+        self._refresh_project_objects()
+
+    def _toggle_annotation_visible(self, group_id: str, annotation_id: str, visible: bool) -> None:
+        try:
+            self.app_controller.project_controller.set_annotation_visible(group_id, annotation_id, visible)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "标注", str(exc))
+            return
+        self._refresh_project_objects()
+
+    def _delete_annotation(self, group_id: str, annotation_id: str) -> None:
+        annotation = self.app_controller.project_controller.get_annotation(group_id, annotation_id)
+        if annotation is None:
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "删除标注",
+            f"删除标注“{annotation.name}”？",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+        try:
+            self.app_controller.project_controller.delete_annotation(group_id, annotation_id)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "标注", str(exc))
+            return
+        self._refresh_project_objects()
+
+    def _create_stitching(self) -> None:
+        if not self._ensure_project_object_editable("添加拼接"):
+            return
+        name, ok = QtWidgets.QInputDialog.getText(self, "添加拼接", "拼接名称")
+        if not ok:
+            return
+        active_region = self.app_controller.project_controller.get_active_region()
+        source_region_ids = [active_region.region_id] if active_region is not None else []
+        try:
+            self.app_controller.project_controller.create_stitching(
+                name=name.strip() or None,
+                source_region_ids=source_region_ids,
+                base_region_id=active_region.region_id if active_region is not None else "",
+            )
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "拼接", str(exc))
+            return
+        self._refresh_project_objects()
+        self.statusBar().showMessage("拼接任务已添加，拼接向导与处理接口已预留。", 3000)
+
+    def _rename_stitching(self, stitching_id: str) -> None:
+        stitching = self.app_controller.project_controller.get_stitching(stitching_id)
+        if stitching is None:
+            return
+        name, ok = QtWidgets.QInputDialog.getText(self, "重命名拼接", "拼接名称", text=stitching.name)
+        if not ok:
+            return
+        try:
+            self.app_controller.project_controller.rename_stitching(stitching_id, name)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "拼接", str(exc))
+            return
+        self._refresh_project_objects()
+
+    def _toggle_stitching_visible(self, stitching_id: str, visible: bool) -> None:
+        try:
+            self.app_controller.project_controller.set_stitching_visible(stitching_id, visible)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "拼接", str(exc))
+            return
+        self._refresh_project_objects()
+
+    def _delete_stitching(self, stitching_id: str) -> None:
+        stitching = self.app_controller.project_controller.get_stitching(stitching_id)
+        if stitching is None:
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "删除拼接",
+            f"删除拼接任务“{stitching.name}”？",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+        try:
+            self.app_controller.project_controller.delete_stitching(stitching_id)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "拼接", str(exc))
+            return
+        self._refresh_project_objects()
 
     def _edit_region_bounds(self, region_id: str, *, allow_cancel: bool = False) -> None:
         region = self.app_controller.project_controller.get_region(region_id)

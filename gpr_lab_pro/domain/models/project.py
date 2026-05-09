@@ -42,6 +42,56 @@ class OverviewState:
 
 
 @dataclass
+class ProjectMapState:
+    map_id: str
+    name: str
+    image_path: str = ""
+    world_file_path: str = ""
+    coordinate_system: str = ""
+    opacity: float = 1.0
+    visible: bool = True
+    kind: str = "geo_image"
+
+
+@dataclass
+class AnnotationState:
+    annotation_id: str
+    name: str
+    kind: str = "point"
+    x: float = 0.0
+    y: float = 0.0
+    z: float | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    note: str = ""
+    visible: bool = True
+
+
+@dataclass
+class AnnotationGroupState:
+    group_id: str
+    name: str
+    color: str = "#ffb703"
+    visible: bool = True
+    annotations: list[AnnotationState] = field(default_factory=list)
+
+
+@dataclass
+class StitchingState:
+    stitching_id: str
+    name: str
+    stitching_type: str = "rectangular"
+    source_region_ids: list[str] = field(default_factory=list)
+    base_region_id: str = ""
+    resolution_x: float = 0.0
+    resolution_y: float = 0.0
+    left_width_m: float = 0.0
+    right_width_m: float = 0.0
+    status: str = "placeholder"
+    visible: bool = True
+
+
+@dataclass
 class ProjectRegionState:
     region_id: str
     dataset_id: str
@@ -89,6 +139,9 @@ class ProjectState:
     last_opened_file: str = ""
     project_file: str = ""
     files: list[ProjectFileState] = field(default_factory=list)
+    maps: list[ProjectMapState] = field(default_factory=list)
+    annotation_groups: list[AnnotationGroupState] = field(default_factory=list)
+    stitchings: list[StitchingState] = field(default_factory=list)
     active_file_id: str = ""
     active_region_id: str = ""
     overview_state: OverviewState = field(default_factory=OverviewState)

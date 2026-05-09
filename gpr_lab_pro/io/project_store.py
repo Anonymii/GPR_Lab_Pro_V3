@@ -9,13 +9,17 @@ from gpr_lab_pro.domain.enums import DataDomain, StepKind
 from gpr_lab_pro.domain.models.display import DisplayState, SelectionState
 from gpr_lab_pro.domain.models.pipeline import PipelineStep
 from gpr_lab_pro.domain.models.project import (
+    AnnotationGroupState,
+    AnnotationState,
     InterfaceTrace,
     NavigationSample,
     NavigationTrack,
     OverviewState,
     ProjectFileState,
+    ProjectMapState,
     ProjectRegionState,
     ProjectState,
+    StitchingState,
 )
 from gpr_lab_pro.domain.models.results import ResultSnapshot
 from gpr_lab_pro.io.importer import DataImportParameters, ISDFTParameters
@@ -52,6 +56,12 @@ class ProjectStore:
                         "active_region_id": project.active_region_id,
                         "overview_state": self._serialize_overview_state(project.overview_state, project_root),
                         "files": [self._serialize_file(item, project_root, result_relpaths) for item in project.files],
+                        "maps": [self._serialize_map(item, project_root) for item in project.maps],
+                        "annotation_groups": [
+                            self._serialize_annotation_group(item)
+                            for item in project.annotation_groups
+                        ],
+                        "stitchings": [self._serialize_stitching(item) for item in project.stitchings],
                     },
                     "dataset": {
                         "source_path": self._to_project_relative(dataset_source_path, project_root),
@@ -83,6 +93,12 @@ class ProjectStore:
         display_payload = payload.get("display", {})
         selection_payload = payload.get("selection", {})
         files = [self._deserialize_file(item, project_root) for item in project_payload.get("files", [])]
+        maps = [self._deserialize_map(item, project_root) for item in project_payload.get("maps", [])]
+        annotation_groups = [
+            self._deserialize_annotation_group(item)
+            for item in project_payload.get("annotation_groups", [])
+        ]
+        stitchings = [self._deserialize_stitching(item) for item in project_payload.get("stitchings", [])]
         region_results: dict[str, list[ResultSnapshot]] = {}
         for file_item in files:
             for region in file_item.regions:
@@ -105,6 +121,9 @@ class ProjectStore:
                 last_opened_file=project_payload.get("last_opened_file", ""),
                 project_file=str(source_path),
                 files=files,
+                maps=maps,
+                annotation_groups=annotation_groups,
+                stitchings=stitchings,
                 active_file_id=active_file_id,
                 active_region_id=active_region_id,
                 overview_state=self._deserialize_overview_state(project_payload.get("overview_state", {}), project_root),
@@ -202,6 +221,58 @@ class ProjectStore:
             "map_opacity": float(item.map_opacity),
         }
 
+    def _serialize_map(self, item: ProjectMapState, project_root: Path) -> dict[str, object]:
+        return {
+            "map_id": item.map_id,
+            "name": item.name,
+            "image_path": self._to_project_relative(item.image_path, project_root),
+            "world_file_path": self._to_project_relative(item.world_file_path, project_root),
+            "coordinate_system": item.coordinate_system,
+            "opacity": float(item.opacity),
+            "visible": bool(item.visible),
+            "kind": item.kind,
+        }
+
+    @staticmethod
+    def _serialize_annotation_group(item: AnnotationGroupState) -> dict[str, object]:
+        return {
+            "group_id": item.group_id,
+            "name": item.name,
+            "color": item.color,
+            "visible": bool(item.visible),
+            "annotations": [
+                {
+                    "annotation_id": annotation.annotation_id,
+                    "name": annotation.name,
+                    "kind": annotation.kind,
+                    "x": float(annotation.x),
+                    "y": float(annotation.y),
+                    "z": None if annotation.z is None else float(annotation.z),
+                    "latitude": None if annotation.latitude is None else float(annotation.latitude),
+                    "longitude": None if annotation.longitude is None else float(annotation.longitude),
+                    "note": annotation.note,
+                    "visible": bool(annotation.visible),
+                }
+                for annotation in item.annotations
+            ],
+        }
+
+    @staticmethod
+    def _serialize_stitching(item: StitchingState) -> dict[str, object]:
+        return {
+            "stitching_id": item.stitching_id,
+            "name": item.name,
+            "stitching_type": item.stitching_type,
+            "source_region_ids": list(item.source_region_ids),
+            "base_region_id": item.base_region_id,
+            "resolution_x": float(item.resolution_x),
+            "resolution_y": float(item.resolution_y),
+            "left_width_m": float(item.left_width_m),
+            "right_width_m": float(item.right_width_m),
+            "status": item.status,
+            "visible": bool(item.visible),
+        }
+
     @staticmethod
     def _deserialize_step(payload: dict[str, object]) -> PipelineStep:
         return PipelineStep(
@@ -287,6 +358,69 @@ class ProjectStore:
             depth_sample_index=int(payload.get("depth_sample_index", 0)),
             map_image_path=self._resolve_project_path(payload.get("map_image_path", ""), project_root),
             map_opacity=float(payload.get("map_opacity", 1.0) or 1.0),
+        )
+
+    def _deserialize_map(self, payload: dict[str, object], project_root: Path) -> ProjectMapState:
+        if not isinstance(payload, dict):
+            return ProjectMapState(map_id="", name="")
+        return ProjectMapState(
+            map_id=str(payload.get("map_id", "")),
+            name=str(payload.get("name", "地图")),
+            image_path=self._resolve_project_path(payload.get("image_path", ""), project_root),
+            world_file_path=self._resolve_project_path(payload.get("world_file_path", ""), project_root),
+            coordinate_system=str(payload.get("coordinate_system", "")),
+            opacity=float(payload.get("opacity", 1.0) or 1.0),
+            visible=bool(payload.get("visible", True)),
+            kind=str(payload.get("kind", "geo_image") or "geo_image"),
+        )
+
+    def _deserialize_annotation_group(self, payload: dict[str, object]) -> AnnotationGroupState:
+        if not isinstance(payload, dict):
+            return AnnotationGroupState(group_id="", name="标注分组")
+        return AnnotationGroupState(
+            group_id=str(payload.get("group_id", "")),
+            name=str(payload.get("name", "标注分组")),
+            color=str(payload.get("color", "#ffb703") or "#ffb703"),
+            visible=bool(payload.get("visible", True)),
+            annotations=[
+                self._deserialize_annotation(item)
+                for item in payload.get("annotations", [])
+                if isinstance(item, dict)
+            ],
+        )
+
+    @staticmethod
+    def _deserialize_annotation(payload: dict[str, object]) -> AnnotationState:
+        return AnnotationState(
+            annotation_id=str(payload.get("annotation_id", "")),
+            name=str(payload.get("name", "标注")),
+            kind=str(payload.get("kind", "point") or "point"),
+            x=float(payload.get("x", 0.0) or 0.0),
+            y=float(payload.get("y", 0.0) or 0.0),
+            z=(None if payload.get("z") is None else float(payload.get("z"))),
+            latitude=(None if payload.get("latitude") is None else float(payload.get("latitude"))),
+            longitude=(None if payload.get("longitude") is None else float(payload.get("longitude"))),
+            note=str(payload.get("note", "")),
+            visible=bool(payload.get("visible", True)),
+        )
+
+    @staticmethod
+    def _deserialize_stitching(payload: dict[str, object]) -> StitchingState:
+        if not isinstance(payload, dict):
+            return StitchingState(stitching_id="", name="拼接")
+        source_region_ids = payload.get("source_region_ids", [])
+        return StitchingState(
+            stitching_id=str(payload.get("stitching_id", "")),
+            name=str(payload.get("name", "拼接")),
+            stitching_type=str(payload.get("stitching_type", "rectangular") or "rectangular"),
+            source_region_ids=[str(item) for item in source_region_ids] if isinstance(source_region_ids, list) else [],
+            base_region_id=str(payload.get("base_region_id", "")),
+            resolution_x=float(payload.get("resolution_x", 0.0) or 0.0),
+            resolution_y=float(payload.get("resolution_y", 0.0) or 0.0),
+            left_width_m=float(payload.get("left_width_m", 0.0) or 0.0),
+            right_width_m=float(payload.get("right_width_m", 0.0) or 0.0),
+            status=str(payload.get("status", "placeholder") or "placeholder"),
+            visible=bool(payload.get("visible", True)),
         )
 
     @staticmethod

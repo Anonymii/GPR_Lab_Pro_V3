@@ -11,11 +11,15 @@ from gpr_lab_pro.app.context import ApplicationContext
 from gpr_lab_pro.domain.models.dataset import DatasetRecord
 from gpr_lab_pro.domain.models.display import DisplayState, SelectionState
 from gpr_lab_pro.domain.models.project import (
+    AnnotationGroupState,
+    AnnotationState,
     InterfaceTrace,
     NavigationSample,
     NavigationTrack,
     ProjectFileState,
+    ProjectMapState,
     ProjectRegionState,
+    StitchingState,
 )
 from gpr_lab_pro.infrastructure.online_map import OnlineMapConfigStore
 
@@ -52,6 +56,9 @@ class ProjectController:
         self.state.last_opened_file = ""
         self.state.project_file = str(project_root / f"{self.state.name}.gpr.json")
         self.state.files = []
+        self.state.maps = []
+        self.state.annotation_groups = []
+        self.state.stitchings = []
         self.state.active_file_id = ""
         self.state.active_region_id = ""
 
@@ -68,8 +75,12 @@ class ProjectController:
         self.state.last_opened_file = project_state.last_opened_file
         self.state.project_file = project_state.project_file or str(project_file)
         self.state.files = deepcopy(project_state.files)
+        self.state.maps = deepcopy(project_state.maps)
+        self.state.annotation_groups = deepcopy(project_state.annotation_groups)
+        self.state.stitchings = deepcopy(project_state.stitchings)
         self.state.active_file_id = project_state.active_file_id
         self.state.active_region_id = project_state.active_region_id
+        self.state.overview_state = deepcopy(project_state.overview_state)
         self.context.signals.project_changed.emit(self.state)
         return loaded
 
@@ -184,6 +195,223 @@ class ProjectController:
     def clear_overview_map_image_path(self) -> None:
         self.state.overview_state.map_image_path = ""
         self.context.signals.overview_changed.emit(self.state.overview_state)
+
+    def create_map(
+        self,
+        *,
+        name: str | None = None,
+        image_path: str = "",
+        world_file_path: str = "",
+        coordinate_system: str = "",
+    ) -> ProjectMapState:
+        map_item = ProjectMapState(
+            map_id=uuid.uuid4().hex,
+            name=self._next_project_item_name([item.name for item in self.state.maps], "地图", preferred=name),
+            image_path=image_path.strip(),
+            world_file_path=world_file_path.strip(),
+            coordinate_system=coordinate_system.strip(),
+            visible=True,
+        )
+        self.state.maps.append(map_item)
+        if map_item.image_path and not self.state.overview_state.map_image_path:
+            self.state.overview_state.map_image_path = map_item.image_path
+        self.context.signals.project_changed.emit(self.state)
+        return map_item
+
+    def get_map(self, map_id: str) -> ProjectMapState | None:
+        return next((item for item in self.state.maps if item.map_id == map_id), None)
+
+    def rename_map(self, map_id: str, new_name: str) -> ProjectMapState:
+        map_item = self.get_map(map_id)
+        if map_item is None:
+            raise ValueError("未找到地图影像。")
+        name = new_name.strip()
+        if not name:
+            raise ValueError("地图名称不能为空。")
+        if any(item.map_id != map_id and item.name == name for item in self.state.maps):
+            raise ValueError("已存在同名地图影像。")
+        map_item.name = name
+        self.context.signals.project_changed.emit(self.state)
+        return map_item
+
+    def set_map_visible(self, map_id: str, visible: bool) -> ProjectMapState:
+        map_item = self.get_map(map_id)
+        if map_item is None:
+            raise ValueError("未找到地图影像。")
+        map_item.visible = bool(visible)
+        self.context.signals.project_changed.emit(self.state)
+        return map_item
+
+    def delete_map(self, map_id: str) -> None:
+        remaining = [item for item in self.state.maps if item.map_id != map_id]
+        if len(remaining) == len(self.state.maps):
+            raise ValueError("未找到地图影像。")
+        self.state.maps = remaining
+        self.context.signals.project_changed.emit(self.state)
+
+    def create_annotation_group(self, *, name: str | None = None) -> AnnotationGroupState:
+        group = AnnotationGroupState(
+            group_id=uuid.uuid4().hex,
+            name=self._next_project_item_name(
+                [item.name for item in self.state.annotation_groups],
+                "标注分组",
+                preferred=name,
+            ),
+            color=self._INTERFACE_COLORS[len(self.state.annotation_groups) % len(self._INTERFACE_COLORS)],
+            visible=True,
+        )
+        self.state.annotation_groups.append(group)
+        self.context.signals.project_changed.emit(self.state)
+        return group
+
+    def get_annotation_group(self, group_id: str) -> AnnotationGroupState | None:
+        return next((item for item in self.state.annotation_groups if item.group_id == group_id), None)
+
+    def rename_annotation_group(self, group_id: str, new_name: str) -> AnnotationGroupState:
+        group = self.get_annotation_group(group_id)
+        if group is None:
+            raise ValueError("未找到标注分组。")
+        name = new_name.strip()
+        if not name:
+            raise ValueError("分组名称不能为空。")
+        if any(item.group_id != group_id and item.name == name for item in self.state.annotation_groups):
+            raise ValueError("已存在同名标注分组。")
+        group.name = name
+        self.context.signals.project_changed.emit(self.state)
+        return group
+
+    def set_annotation_group_visible(self, group_id: str, visible: bool) -> AnnotationGroupState:
+        group = self.get_annotation_group(group_id)
+        if group is None:
+            raise ValueError("未找到标注分组。")
+        group.visible = bool(visible)
+        self.context.signals.project_changed.emit(self.state)
+        return group
+
+    def delete_annotation_group(self, group_id: str) -> None:
+        remaining = [item for item in self.state.annotation_groups if item.group_id != group_id]
+        if len(remaining) == len(self.state.annotation_groups):
+            raise ValueError("未找到标注分组。")
+        self.state.annotation_groups = remaining
+        self.context.signals.project_changed.emit(self.state)
+
+    def create_annotation(
+        self,
+        group_id: str,
+        *,
+        name: str | None = None,
+        kind: str = "point",
+        x: float = 0.0,
+        y: float = 0.0,
+        z: float | None = None,
+        note: str = "",
+    ) -> AnnotationState:
+        group = self.get_annotation_group(group_id)
+        if group is None:
+            raise ValueError("未找到标注分组。")
+        annotation = AnnotationState(
+            annotation_id=uuid.uuid4().hex,
+            name=self._next_project_item_name([item.name for item in group.annotations], "标注", preferred=name),
+            kind=kind,
+            x=float(x),
+            y=float(y),
+            z=z,
+            note=note.strip(),
+            visible=True,
+        )
+        group.annotations.append(annotation)
+        self.context.signals.project_changed.emit(self.state)
+        return annotation
+
+    def get_annotation(self, group_id: str, annotation_id: str) -> AnnotationState | None:
+        group = self.get_annotation_group(group_id)
+        if group is None:
+            return None
+        return next((item for item in group.annotations if item.annotation_id == annotation_id), None)
+
+    def rename_annotation(self, group_id: str, annotation_id: str, new_name: str) -> AnnotationState:
+        group = self.get_annotation_group(group_id)
+        annotation = self.get_annotation(group_id, annotation_id)
+        if group is None or annotation is None:
+            raise ValueError("未找到标注。")
+        name = new_name.strip()
+        if not name:
+            raise ValueError("标注名称不能为空。")
+        if any(item.annotation_id != annotation_id and item.name == name for item in group.annotations):
+            raise ValueError("当前分组下已存在同名标注。")
+        annotation.name = name
+        self.context.signals.project_changed.emit(self.state)
+        return annotation
+
+    def set_annotation_visible(self, group_id: str, annotation_id: str, visible: bool) -> AnnotationState:
+        annotation = self.get_annotation(group_id, annotation_id)
+        if annotation is None:
+            raise ValueError("未找到标注。")
+        annotation.visible = bool(visible)
+        self.context.signals.project_changed.emit(self.state)
+        return annotation
+
+    def delete_annotation(self, group_id: str, annotation_id: str) -> None:
+        group = self.get_annotation_group(group_id)
+        if group is None:
+            raise ValueError("未找到标注分组。")
+        remaining = [item for item in group.annotations if item.annotation_id != annotation_id]
+        if len(remaining) == len(group.annotations):
+            raise ValueError("未找到标注。")
+        group.annotations = remaining
+        self.context.signals.project_changed.emit(self.state)
+
+    def create_stitching(
+        self,
+        *,
+        name: str | None = None,
+        source_region_ids: list[str] | None = None,
+        stitching_type: str = "rectangular",
+        base_region_id: str = "",
+    ) -> StitchingState:
+        stitching = StitchingState(
+            stitching_id=uuid.uuid4().hex,
+            name=self._next_project_item_name([item.name for item in self.state.stitchings], "拼接", preferred=name),
+            stitching_type=stitching_type,
+            source_region_ids=list(source_region_ids or []),
+            base_region_id=base_region_id,
+            status="placeholder",
+            visible=True,
+        )
+        self.state.stitchings.append(stitching)
+        self.context.signals.project_changed.emit(self.state)
+        return stitching
+
+    def get_stitching(self, stitching_id: str) -> StitchingState | None:
+        return next((item for item in self.state.stitchings if item.stitching_id == stitching_id), None)
+
+    def rename_stitching(self, stitching_id: str, new_name: str) -> StitchingState:
+        stitching = self.get_stitching(stitching_id)
+        if stitching is None:
+            raise ValueError("未找到拼接任务。")
+        name = new_name.strip()
+        if not name:
+            raise ValueError("拼接名称不能为空。")
+        if any(item.stitching_id != stitching_id and item.name == name for item in self.state.stitchings):
+            raise ValueError("已存在同名拼接任务。")
+        stitching.name = name
+        self.context.signals.project_changed.emit(self.state)
+        return stitching
+
+    def set_stitching_visible(self, stitching_id: str, visible: bool) -> StitchingState:
+        stitching = self.get_stitching(stitching_id)
+        if stitching is None:
+            raise ValueError("未找到拼接任务。")
+        stitching.visible = bool(visible)
+        self.context.signals.project_changed.emit(self.state)
+        return stitching
+
+    def delete_stitching(self, stitching_id: str) -> None:
+        remaining = [item for item in self.state.stitchings if item.stitching_id != stitching_id]
+        if len(remaining) == len(self.state.stitchings):
+            raise ValueError("未找到拼接任务。")
+        self.state.stitchings = remaining
+        self.context.signals.project_changed.emit(self.state)
 
     def delete_file(self, file_id: str) -> str | None:
         index = next((idx for idx, item in enumerate(self.state.files) if item.file_id == file_id), -1)
@@ -761,6 +989,20 @@ class ProjectController:
         index = 1
         while True:
             candidate = f"Region{index}"
+            if candidate not in used:
+                return candidate
+            index += 1
+
+    @staticmethod
+    def _next_project_item_name(used_names: list[str], prefix: str, *, preferred: str | None = None) -> str:
+        if preferred:
+            clean = preferred.strip()
+            if clean and clean not in used_names:
+                return clean
+        used = set(used_names)
+        index = 1
+        while True:
+            candidate = f"{prefix}{index}"
             if candidate not in used:
                 return candidate
             index += 1
