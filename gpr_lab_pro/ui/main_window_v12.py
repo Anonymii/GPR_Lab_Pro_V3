@@ -2405,6 +2405,7 @@ class RasterViewportWidget(QtWidgets.QWidget):
     measure_preview_changed = QtCore.Signal(object, float, float)
     measure_completed = QtCore.Signal(object, float, float)
     measure_cleared = QtCore.Signal(object)
+    extra_horizontal_line_moved = QtCore.Signal(object, object, float)
     overlay_drag_started = QtCore.Signal(object)
     overlay_dragged = QtCore.Signal(object, float, float)
     overlay_drag_finished = QtCore.Signal(object)
@@ -2442,6 +2443,7 @@ class RasterViewportWidget(QtWidgets.QWidget):
         self._viewport_limit_y = (0.0, 1.0)
         self._vline: tuple[float, QtGui.QColor] | None = None
         self._hline: tuple[float, QtGui.QColor] | None = None
+        self._extra_hlines: dict[str, tuple[float, QtGui.QColor, float]] = {}
         self._overlays: list[dict[str, object]] = []
         self._active_drag_path: list[tuple[float, float]] = []
         self._measurement_points: list[tuple[float, float]] = []
@@ -2459,6 +2461,7 @@ class RasterViewportWidget(QtWidgets.QWidget):
         self._image = None
         self._vline = None
         self._hline = None
+        self._extra_hlines = {}
         self._overlays = []
         self.update()
 
@@ -2522,6 +2525,14 @@ class RasterViewportWidget(QtWidgets.QWidget):
     ) -> None:
         self._vline = self._make_line(vertical_line)
         self._hline = self._make_line(horizontal_line)
+        self.update()
+
+    def set_extra_horizontal_lines(self, lines: list[tuple[str, float, str, float]] | None) -> None:
+        self._extra_hlines = {
+            str(key): (float(value), QtGui.QColor(str(color)), float(width))
+            for key, value, color, width in (lines or [])
+            if np.isfinite(float(value))
+        }
         self.update()
 
     def set_viewport(self, *, xlim: tuple[float, float] | None = None, ylim: tuple[float, float] | None = None) -> None:
@@ -2604,6 +2615,12 @@ class RasterViewportWidget(QtWidgets.QWidget):
             self.point_selected.emit(self.view_key, data_x, data_y)
             event.accept()
             return
+        extra_hline_key = self._hit_test_extra_hline(event.position(), plot_rect)
+        if extra_hline_key is not None:
+            self._drag_state = {"mode": "extra_hline", "key": extra_hline_key}
+            self.setCursor(QtCore.Qt.SizeVerCursor)
+            event.accept()
+            return
         overlay_point = self._hit_test_overlay_point(event.position(), plot_rect)
         if overlay_point is not None:
             self._drag_state = {"mode": "overlay_point_drag", "anchor_x": float(overlay_point[0])}
@@ -2663,6 +2680,11 @@ class RasterViewportWidget(QtWidgets.QWidget):
         if mode == "overlay_point_drag":
             _data_x, data_y = self._data_from_point(event.position(), plot_rect)
             self.overlay_point_dragged.emit(self.view_key, float(self._drag_state.get("anchor_x", 0.0)), float(data_y))
+            event.accept()
+            return
+        if mode == "extra_hline":
+            _data_x, data_y = self._data_from_point(event.position(), plot_rect)
+            self.extra_horizontal_line_moved.emit(self.view_key, self._drag_state.get("key", ""), float(data_y))
             event.accept()
             return
         if mode != "pan":
@@ -2840,6 +2862,13 @@ class RasterViewportWidget(QtWidgets.QWidget):
     def _draw_crosshair(self, painter: QtGui.QPainter, plot_rect: QtCore.QRectF) -> None:
         painter.save()
         painter.setClipRect(plot_rect)
+        for y, color, width in self._extra_hlines.values():
+            if self._viewport_y[0] <= y <= self._viewport_y[1]:
+                py = plot_rect.top() + (y - self._viewport_y[0]) / max(self._viewport_y[1] - self._viewport_y[0], 1e-9) * plot_rect.height()
+                pen = QtGui.QPen(color, width)
+                pen.setCosmetic(True)
+                painter.setPen(pen)
+                painter.drawLine(QtCore.QPointF(plot_rect.left(), py), QtCore.QPointF(plot_rect.right(), py))
         if self._vline is not None:
             x, color = self._vline
             if self._viewport_x[0] <= x <= self._viewport_x[1]:
@@ -3016,6 +3045,15 @@ class RasterViewportWidget(QtWidgets.QWidget):
             return "guide_h"
         return None
 
+    def _hit_test_extra_hline(self, point: QtCore.QPointF, plot_rect: QtCore.QRectF) -> str | None:
+        tolerance = 7.0
+        for key, (y, _color, _width) in self._extra_hlines.items():
+            if self._viewport_y[0] <= y <= self._viewport_y[1]:
+                py = plot_rect.top() + (y - self._viewport_y[0]) / max(self._viewport_y[1] - self._viewport_y[0], 1e-9) * plot_rect.height()
+                if abs(point.y() - py) <= tolerance:
+                    return key
+        return None
+
     def _update_hover_cursor(self, point: QtCore.QPointF, plot_rect: QtCore.QRectF) -> None:
         if not plot_rect.contains(point):
             self.unsetCursor()
@@ -3025,6 +3063,9 @@ class RasterViewportWidget(QtWidgets.QWidget):
             return
         if self._interaction_mode == "measure":
             self.setCursor(QtCore.Qt.CrossCursor)
+            return
+        if self._hit_test_extra_hline(point, plot_rect) is not None:
+            self.setCursor(QtCore.Qt.SizeVerCursor)
             return
         if self._hit_test_overlay_point(point, plot_rect) is not None:
             self.setCursor(QtCore.Qt.OpenHandCursor)
@@ -3611,6 +3652,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._has_custom_viewport = False
         self._ordered_steps = []
         self._selected_step_index = -1
+        self._pipeline_scope = "current_region"
+        self._general_epsilon = 5.0
+        self._general_time_ground_ns = 0.0
         self.pipeline_dialog: QtWidgets.QDialog | None = None
         self._settings_html_cache: str | None = None
         self._active_interface_by_region: dict[str, str] = {}
@@ -3628,6 +3672,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._measurement_length_label: QtWidgets.QLabel | None = None
         self._measurement_area_label: QtWidgets.QLabel | None = None
         self._show_explore_crosshair = True
+        self._show_time_ground_marker = False
         self._headers_dialog: QtWidgets.QDialog | None = None
         self._headers_table: QtWidgets.QTreeWidget | None = None
         self._online_map_config = OnlineMapConfigStore.load()
@@ -3767,6 +3812,15 @@ class MainWindow(QtWidgets.QMainWindow):
             QPushButton#panelAction {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #fbfcfd, stop:1 #e5eaf0);
+            }
+            QPushButton#pipelineToolbarButton {
+                min-width: 0px;
+                min-height: 30px;
+                max-height: 32px;
+                padding: 0px 8px;
+                border-radius: 8px;
+                font-size: 9pt;
+                font-weight: 600;
             }
             QFrame#toolbarCard, QFrame#viewCard, QFrame#sideCard {
                 background: #f8fafb;
@@ -4382,6 +4436,8 @@ class MainWindow(QtWidgets.QMainWindow):
             widget.view_changed.connect(self._on_view_changed)
             widget.point_selected.connect(self._on_view_selected)
             widget.guide_moved.connect(self._on_view_selected)
+            if hasattr(widget, "extra_horizontal_line_moved"):
+                widget.extra_horizontal_line_moved.connect(self._on_extra_horizontal_line_moved)
             widget.context_menu_requested.connect(self._show_scan_view_menu)
             if isinstance(widget, RasterViewportWidget):
                 widget.measure_point_added.connect(self._on_measure_point_added)
@@ -4655,7 +4711,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._add_tool_strip_button(layout, "explore_tool_trace_interface", "界面追踪", self._tool_icon("trace_interface"), callback=self._show_interface_tracing_panel)
         self.btn_explore_crosshair = self._add_tool_strip_button(layout, "explore_tool_crosshair", "显示十字线", self._tool_icon("crosshair"), callback=self._toggle_explore_crosshair, checkable=True, checked=True)
         self._add_tool_strip_button(layout, "explore_tool_hyperbola", "显示双曲线", self._tool_icon("hyperbola"), callback=lambda: self._set_explore_tool_mode("hyperbola"), checkable=True)
-        self._add_tool_strip_button(layout, "explore_tool_time_ground", "显示地面时间标记", self._tool_icon("time_ground"), callback=lambda: self._set_explore_tool_mode("time_ground"), checkable=True)
+        self.btn_explore_time_ground = self._add_tool_strip_button(layout, "explore_tool_time_ground", "显示地面时间标记", self._tool_icon("time_ground"), callback=self._toggle_time_ground_marker, checkable=True)
         self.btn_explore_headers = self._add_tool_strip_button(layout, "explore_tool_headers", "显示头信息", self._tool_icon("headers"), callback=self._toggle_headers_panel, checkable=True)
         self._add_tool_strip_button(layout, "explore_tool_dual_axis", "双深度轴", self._tool_icon("dual_axis"), callback=lambda: self._set_explore_tool_mode("dual_axis"), checkable=True)
         layout.addStretch(1)
@@ -4839,6 +4895,46 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.display_data is not None:
             self._refresh_display(self.display_data)
         self.statusBar().showMessage(self._t("crosshair_shown") if self._show_explore_crosshair else self._t("crosshair_hidden"), 2500)
+
+    def _toggle_time_ground_marker(self, checked: bool = True) -> None:
+        self._show_time_ground_marker = bool(checked)
+        self._refresh_time_ground_marker()
+        if hasattr(self, "btn_explore_time_ground"):
+            self.btn_explore_time_ground.blockSignals(True)
+            self.btn_explore_time_ground.setChecked(self._show_time_ground_marker)
+            self.btn_explore_time_ground.blockSignals(False)
+        message = (
+            "地面时间标记已显示，可拖动黄色线同步常规参数。"
+            if self._show_time_ground_marker
+            else "地面时间标记已隐藏。"
+        )
+        self.statusBar().showMessage(message, 3000)
+
+    def _refresh_time_ground_marker(self) -> None:
+        if not hasattr(self, "bscan_view"):
+            return
+        if self._show_time_ground_marker and self.display_data is not None:
+            self.bscan_view.set_extra_horizontal_lines(
+                [("time_ground", self._general_time_ground_ns, "#f4a300", 2.0)]
+            )
+        else:
+            self.bscan_view.set_extra_horizontal_lines([])
+
+    def _on_extra_horizontal_line_moved(self, view_key: object, line_key: object, data_y: float) -> None:
+        if str(view_key) != "bscan" or str(line_key) != "time_ground":
+            return
+        value = float(data_y)
+        if self.display_data is not None and self.display_data.ascan_time_ns.size:
+            min_time = float(np.nanmin(self.display_data.ascan_time_ns))
+            max_time = float(np.nanmax(self.display_data.ascan_time_ns))
+            value = float(np.clip(value, min_time, max_time))
+        self._general_time_ground_ns = value
+        if hasattr(self, "general_time_ground_spin"):
+            self.general_time_ground_spin.blockSignals(True)
+            self.general_time_ground_spin.setValue(value)
+            self.general_time_ground_spin.blockSignals(False)
+        self._refresh_time_ground_marker()
+        self.statusBar().showMessage(f"地面时间：{value:.3f} ns", 1500)
 
     def _toggle_headers_panel(self, checked: bool = False) -> None:
         if checked:
@@ -5268,6 +5364,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for key, buttons in self._tool_strip_buttons.items():
             for button in buttons:
                 button.setToolTip(self._t(key))
+        if hasattr(self, "btn_load_template"):
+            self.btn_load_template.setText(self._t("load_template"))
         if hasattr(self, "project_title_label"):
             self.project_title_label.setText(self._t("project_explorer"))
         if hasattr(self, "view_tabs"):
@@ -5339,21 +5437,27 @@ class MainWindow(QtWidgets.QMainWindow):
         panel.setMinimumWidth(760)
         layout = QtWidgets.QVBoxLayout(panel)
         layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(12)
+        layout.setSpacing(8)
+
+        self.pipeline_header_widget = QtWidgets.QWidget(panel)
+        header_layout = QtWidgets.QVBoxLayout(self.pipeline_header_widget)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(8)
 
         title_label = QtWidgets.QLabel("处理流程设置")
         title_label.setObjectName("panelTitle")
-        layout.addWidget(title_label)
+        header_layout.addWidget(title_label)
 
         self.pipeline_state_label = QtWidgets.QLabel("当前草稿已应用")
         self.pipeline_state_label.setObjectName("panelSubtitle")
-        layout.addWidget(self.pipeline_state_label)
+        header_layout.addWidget(self.pipeline_state_label)
 
         self.pipeline_counts_label = QtWidgets.QLabel("频域 0 步 | 时频转换 0 步 | 时域 0 步")
         self.pipeline_counts_label.setObjectName("panelSubtitle")
-        layout.addWidget(self.pipeline_counts_label)
-
-        layout.addWidget(self._build_region_processing_compat_panel())
+        header_layout.addWidget(self.pipeline_counts_label)
+        header_layout.addWidget(self._build_region_processing_compat_panel())
+        layout.addWidget(self.pipeline_header_widget)
+        self.pipeline_header_widget.hide()
 
         body = QtWidgets.QHBoxLayout()
         body.setSpacing(12)
@@ -5366,15 +5470,38 @@ class MainWindow(QtWidgets.QMainWindow):
         body.addWidget(left_panel, stretch=3)
 
         toolbar = QtWidgets.QHBoxLayout()
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setSpacing(12)
         self.btn_add_frequency = QtWidgets.QPushButton("添加频域步骤")
         self.btn_add_frequency.clicked.connect(lambda: self._add_operation(StepKind.FREQUENCY))
         self.btn_set_transform = QtWidgets.QPushButton("设置时频转换")
         self.btn_set_transform.clicked.connect(lambda: self._add_operation(StepKind.TRANSFORM))
         self.btn_add_time = QtWidgets.QPushButton("添加时域步骤")
         self.btn_add_time.clicked.connect(lambda: self._add_operation(StepKind.TIME))
+        self.btn_load_template = QtWidgets.QPushButton(self._t("load_template"))
+        self.btn_load_template.clicked.connect(self._load_template)
+        toolbar_widths = (
+            (self.btn_add_frequency, 85),
+            (self.btn_set_transform, 85),
+            (self.btn_add_time, 85),
+            (self.btn_load_template, 65),
+        )
+        for button, width in toolbar_widths:
+            button.setObjectName("pipelineToolbarButton")
+            button.setMinimumSize(width, 32)
+            button.setMaximumSize(width, 32)
+            button.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+            button.setStyleSheet(
+                f"QPushButton#pipelineToolbarButton {{ "
+                f"min-width: {width}px; max-width: {width}px; "
+                "min-height: 32px; max-height: 32px; padding: 0px 6px; "
+                "font-size: 9pt; font-weight: 600; border-radius: 8px; "
+                "}}"
+            )
         toolbar.addWidget(self.btn_add_frequency)
         toolbar.addWidget(self.btn_set_transform)
         toolbar.addWidget(self.btn_add_time)
+        toolbar.addWidget(self.btn_load_template)
         toolbar.addStretch(1)
         left_layout.addLayout(toolbar)
 
@@ -5392,12 +5519,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pipeline_step_list.customContextMenuRequested.connect(self._show_pipeline_context_menu)
         left_layout.addWidget(self.pipeline_step_list, stretch=1)
 
-        self.pipeline_scope_label = QtWidgets.QLabel(
-            "当前版本先作用于当前 DAT 的处理草稿。跨文件或跨区域复用请使用“另存为模板”。"
-        )
+        self.pipeline_scope_label = QtWidgets.QLabel("当前应用范围：当前区域。")
         self.pipeline_scope_label.setWordWrap(True)
         self.pipeline_scope_label.setStyleSheet("color: #6f7c89;")
-        left_layout.addWidget(self.pipeline_scope_label)
+        self.pipeline_scope_label.hide()
+        left_layout.addWidget(self._build_general_parameters_panel())
 
         body.addWidget(self._build_parameter_panel(), stretch=2)
 
@@ -5453,7 +5579,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.parameter_state_label.setStyleSheet("color: #6f7c89; background: #f5f7fa; border: 1px solid #d4dbe3; border-radius: 10px; padding: 6px 8px;")
         layout.addWidget(self.parameter_state_label)
 
-        form = QtWidgets.QFormLayout()
+        scope_row = QtWidgets.QHBoxLayout()
+        scope_row.setContentsMargins(0, 2, 0, 2)
+        scope_row.setSpacing(12)
+        self.pipeline_scope_current_region_check = QtWidgets.QCheckBox("应用到当前区域")
+        self.pipeline_scope_current_region_check.setChecked(True)
+        self.pipeline_scope_current_region_check.toggled.connect(self._on_pipeline_scope_current_region_toggled)
+        self.pipeline_scope_all_regions_check = QtWidgets.QCheckBox("应用到全部文件和区域")
+        self.pipeline_scope_all_regions_check.toggled.connect(self._on_pipeline_scope_all_regions_toggled)
+        scope_row.addWidget(self.pipeline_scope_current_region_check)
+        scope_row.addWidget(self.pipeline_scope_all_regions_check)
+        scope_row.addStretch(1)
+        layout.addLayout(scope_row)
+
+        self.step_details_widget = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(self.step_details_widget)
+        form.setContentsMargins(0, 0, 0, 0)
         form.setLabelAlignment(QtCore.Qt.AlignRight)
         self.step_name_label = QtWidgets.QLabel("---")
         self.step_module_label = QtWidgets.QLabel("---")
@@ -5465,8 +5606,9 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow("模块", self.step_module_label)
         form.addRow("阶段", self.step_kind_label)
         form.addRow("顺序", self.step_order_label)
-        form.addRow("", self.step_enabled_check)
-        layout.addLayout(form)
+        self.step_details_widget.hide()
+        layout.addWidget(self.step_details_widget)
+        layout.addWidget(self.step_enabled_check)
 
         self.step_params_table = QtWidgets.QTableWidget(0, 2)
         self.step_params_table.setHorizontalHeaderLabels(["参数", "值"])
@@ -5504,6 +5646,35 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addLayout(action_row)
         return panel
 
+    def _build_general_parameters_panel(self) -> QtWidgets.QGroupBox:
+        group = QtWidgets.QGroupBox("常规参数")
+        group.setStyleSheet("QGroupBox { font-weight: 600; color: #334351; }")
+        layout = QtWidgets.QFormLayout(group)
+        layout.setContentsMargins(12, 8, 12, 10)
+        layout.setHorizontalSpacing(12)
+        layout.setVerticalSpacing(8)
+
+        self.general_epsilon_spin = QtWidgets.QDoubleSpinBox()
+        self.general_epsilon_spin.setRange(1.0, 81.0)
+        self.general_epsilon_spin.setDecimals(2)
+        self.general_epsilon_spin.setSingleStep(0.1)
+        self.general_epsilon_spin.setValue(self._general_epsilon)
+        self.general_epsilon_spin.setToolTip("介电常数用于后续速度、深度轴、双曲线和迁移参数。")
+        self.general_epsilon_spin.valueChanged.connect(self._on_general_epsilon_changed)
+
+        self.general_time_ground_spin = QtWidgets.QDoubleSpinBox()
+        self.general_time_ground_spin.setRange(0.0, 10000.0)
+        self.general_time_ground_spin.setDecimals(3)
+        self.general_time_ground_spin.setSingleStep(0.1)
+        self.general_time_ground_spin.setSuffix(" ns")
+        self.general_time_ground_spin.setValue(self._general_time_ground_ns)
+        self.general_time_ground_spin.setToolTip("地面时间用于后续地面时间标记、深度零点和增益基准。")
+        self.general_time_ground_spin.valueChanged.connect(self._on_general_time_ground_changed)
+
+        layout.addRow("介电常数 Epsilon", self.general_epsilon_spin)
+        layout.addRow("地面时间 Time Ground", self.general_time_ground_spin)
+        return group
+
     def _connect_signals(self) -> None:
         signals = self.app_controller.signals
         signals.project_changed.connect(self._on_project_changed)
@@ -5521,18 +5692,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _refresh_file_menu(self) -> None:
         self.file_menu.clear()
+        self.action_load_template = None
         self.action_new_project = self.file_menu.addAction(self._t("new_project"), self._new_project)
         self.action_open_project = self.file_menu.addAction(self._t("open_project"), self._open_project)
         if self.app_controller.project_state.is_open:
             self.action_save_project = self.file_menu.addAction(self._t("save_project"), self._save_project)
             self.file_menu.addSeparator()
             self.action_save_processed = self.file_menu.addAction(self._t("save_processed_result"), self._save_processed)
-            self.action_load_template = self.file_menu.addAction(self._t("load_template"), self._load_template)
             self.action_import_data = None
         else:
             self.action_save_project = None
             self.action_import_data = None
-            self.action_load_template = None
             self.action_save_processed = None
         self.file_menu.addSeparator()
         language_menu = self.file_menu.addMenu(self._t("language"))
@@ -6072,6 +6242,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.app_controller.set_pipeline_step_params(self._selected_step_index, params)
         self._refresh_settings_info()
+        scope_text = "全部文件和区域" if self._pipeline_scope == "all_regions" else "当前区域"
+        self.statusBar().showMessage(f"参数已更新，应用范围：{scope_text}。", 3000)
 
     def _reset_selected_step_params(self) -> None:
         step = self._current_selected_step()
@@ -6086,6 +6258,50 @@ class MainWindow(QtWidgets.QMainWindow):
                 item = QtWidgets.QTableWidgetItem()
                 self.step_params_table.setItem(idx, 1, item)
             item.setText(str(param_spec.default))
+
+    def _on_pipeline_scope_current_region_toggled(self, checked: bool) -> None:
+        if checked:
+            self._pipeline_scope = "current_region"
+            if hasattr(self, "pipeline_scope_all_regions_check"):
+                self.pipeline_scope_all_regions_check.blockSignals(True)
+                self.pipeline_scope_all_regions_check.setChecked(False)
+                self.pipeline_scope_all_regions_check.blockSignals(False)
+            if hasattr(self, "pipeline_scope_label"):
+                self.pipeline_scope_label.setText("当前应用范围：当前区域。")
+            self.statusBar().showMessage("处理流程应用范围已设为当前区域。", 2500)
+            return
+        if hasattr(self, "pipeline_scope_all_regions_check") and self.pipeline_scope_all_regions_check.isChecked():
+            return
+        self.pipeline_scope_current_region_check.blockSignals(True)
+        self.pipeline_scope_current_region_check.setChecked(True)
+        self.pipeline_scope_current_region_check.blockSignals(False)
+
+    def _on_pipeline_scope_all_regions_toggled(self, checked: bool) -> None:
+        if checked:
+            self._pipeline_scope = "all_regions"
+            if hasattr(self, "pipeline_scope_current_region_check"):
+                self.pipeline_scope_current_region_check.blockSignals(True)
+                self.pipeline_scope_current_region_check.setChecked(False)
+                self.pipeline_scope_current_region_check.blockSignals(False)
+            if hasattr(self, "pipeline_scope_label"):
+                self.pipeline_scope_label.setText("当前应用范围：全部文件和区域（批量应用接口已预留）。")
+            self.statusBar().showMessage("已记录全部文件和区域应用意图，批量应用接口已预留。", 3500)
+            return
+        if hasattr(self, "pipeline_scope_current_region_check") and self.pipeline_scope_current_region_check.isChecked():
+            return
+        self.pipeline_scope_current_region_check.blockSignals(True)
+        self.pipeline_scope_current_region_check.setChecked(True)
+        self.pipeline_scope_current_region_check.blockSignals(False)
+        self._pipeline_scope = "current_region"
+
+    def _on_general_epsilon_changed(self, value: float) -> None:
+        self._general_epsilon = float(value)
+        self.statusBar().showMessage("介电常数已更新，深度轴/迁移/双曲线接口已预留。", 2500)
+
+    def _on_general_time_ground_changed(self, value: float) -> None:
+        self._general_time_ground_ns = float(value)
+        self._refresh_time_ground_marker()
+        self.statusBar().showMessage("地面时间已更新，地面标记和增益基准接口已预留。", 2500)
 
     def _on_project_changed(self, _project) -> None:
         self._last_interface_pick = None
@@ -7528,8 +7744,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.action_save_project.setEnabled(has_project and not self._is_busy)
         if self.action_import_data is not None:
             self.action_import_data.setEnabled(has_project and not self._is_busy)
-        if self.action_load_template is not None:
-            self.action_load_template.setEnabled(has_dataset and not self._is_busy)
         if self.action_save_processed is not None:
             self.action_save_processed.setEnabled(has_result and not self._is_busy)
         self.btn_pipeline_panel.setEnabled(has_dataset and not self._is_busy)
@@ -7543,7 +7757,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_add_frequency.setEnabled(has_dataset and not self._is_busy)
         self.btn_set_transform.setEnabled(has_dataset and not self._is_busy)
         self.btn_add_time.setEnabled(has_dataset and not self._is_busy)
+        if hasattr(self, "btn_load_template"):
+            self.btn_load_template.setEnabled(has_dataset and not self._is_busy)
         self.pipeline_step_list.setEnabled(has_dataset and not self._is_busy)
+        if hasattr(self, "pipeline_scope_current_region_check"):
+            self.pipeline_scope_current_region_check.setEnabled(has_dataset and not self._is_busy)
+        if hasattr(self, "pipeline_scope_all_regions_check"):
+            self.pipeline_scope_all_regions_check.setEnabled(has_dataset and not self._is_busy)
+        if hasattr(self, "general_epsilon_spin"):
+            self.general_epsilon_spin.setEnabled(has_dataset and not self._is_busy)
+        if hasattr(self, "general_time_ground_spin"):
+            self.general_time_ground_spin.setEnabled(has_dataset and not self._is_busy)
         self._refresh_overview_controls()
         self._refresh_step_details()
     def _refresh_display(self, display: DisplayData) -> None:
@@ -7583,6 +7807,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_selection.setText(self._selection_text(display))
         self._refresh_overview_scene()
         self._refresh_interface_overlays()
+        self._refresh_time_ground_marker()
         self._refresh_headers_panel()
 
     def _update_bscan_view(
@@ -7608,8 +7833,8 @@ class MainWindow(QtWidgets.QMainWindow):
             initial_viewport_x=initial_trace_window,
             initial_viewport_y=(visible_start_ns, visible_end_ns),
             viewport_limit_y=(visible_start_ns, visible_end_ns),
-            vertical_line=(trace_index, "#00c16a") if self._show_explore_crosshair else None,
-            horizontal_line=(time_ns, "#ff8a00") if self._show_explore_crosshair else None,
+            vertical_line=(trace_index, "#195fbf") if self._show_explore_crosshair else None,
+            horizontal_line=(time_ns, "#195fbf") if self._show_explore_crosshair else None,
         )
 
     def _update_crossline_view(
