@@ -2321,9 +2321,172 @@ class OverviewOverlayWidget(QtWidgets.QWidget):
         return None
 
 
+class _OverviewMeasurementOverlay(QtWidgets.QWidget):
+    measurement_changed = QtCore.Signal(float, float)
+
+    def __init__(self, parent: QtWidgets.QWidget, map_state_provider=None) -> None:
+        super().__init__(parent)
+        self._map_state_provider = map_state_provider
+        self._enabled = False
+        self._points: list[QtCore.QPointF] = []
+        self._preview: QtCore.QPointF | None = None
+        self._complete = False
+        self.setMouseTracking(True)
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.setAttribute(QtCore.Qt.WA_StyledBackground, False)
+        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+        self.hide()
+
+    def set_measurement_mode(self, enabled: bool) -> None:
+        self._enabled = bool(enabled)
+        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, not self._enabled)
+        if self._enabled:
+            self.setCursor(QtCore.Qt.CrossCursor)
+            self.show()
+            self.raise_()
+            self.setFocus(QtCore.Qt.MouseFocusReason)
+        else:
+            self.unsetCursor()
+            self._preview = None
+            self.hide()
+        self.update()
+
+    def clear_measurement(self) -> None:
+        self._points.clear()
+        self._preview = None
+        self._complete = False
+        self.measurement_changed.emit(0.0, 0.0)
+        self.update()
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if not self._enabled or event.button() != QtCore.Qt.LeftButton:
+            super().mousePressEvent(event)
+            return
+        point = self._event_position(event)
+        if self._complete:
+            self._points.clear()
+            self._complete = False
+        self._points.append(point)
+        self._preview = None
+        self._emit_measurement()
+        self.update()
+        self.setFocus(QtCore.Qt.MouseFocusReason)
+        event.accept()
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
+        if not self._enabled:
+            super().mouseMoveEvent(event)
+            return
+        if self._points and not self._complete:
+            self._preview = self._event_position(event)
+            self._emit_measurement()
+            self.update()
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:
+        if not self._enabled or event.button() != QtCore.Qt.LeftButton:
+            super().mouseDoubleClickEvent(event)
+            return
+        point = self._event_position(event)
+        if not self._points or self._distance_px(self._points[-1], point) > 1.0:
+            self._points.append(point)
+        self._preview = None
+        self._complete = True
+        self._emit_measurement()
+        self.update()
+        event.accept()
+
+    def leaveEvent(self, event: QtCore.QEvent) -> None:
+        if self._preview is not None:
+            self._preview = None
+            self._emit_measurement()
+            self.update()
+        super().leaveEvent(event)
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if self._enabled and event.key() == QtCore.Qt.Key_Escape:
+            self.clear_measurement()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def paintEvent(self, _event: QtGui.QPaintEvent) -> None:
+        points = self._draw_points()
+        if not points:
+            return
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        if len(points) >= 3:
+            polygon = QtGui.QPolygonF(points)
+            painter.setPen(QtGui.QPen(QtGui.QColor("#4169e1"), 2.0))
+            painter.setBrush(QtGui.QColor(72, 128, 255, 42))
+            painter.drawPolygon(polygon)
+        if len(points) >= 2:
+            painter.setPen(QtGui.QPen(QtGui.QColor("#4169e1"), 2.0, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin))
+            path = QtGui.QPainterPath(points[0])
+            for point in points[1:]:
+                path.lineTo(point)
+            painter.drawPath(path)
+        painter.setPen(QtGui.QPen(QtGui.QColor("#2454c7"), 1.5))
+        painter.setBrush(QtGui.QColor("#ffffff"))
+        for point in self._points:
+            painter.drawEllipse(point, 3.5, 3.5)
+
+    def _draw_points(self) -> list[QtCore.QPointF]:
+        points = list(self._points)
+        if self._preview is not None and points and not self._complete:
+            points.append(self._preview)
+        return points
+
+    def _emit_measurement(self) -> None:
+        points = self._draw_points()
+        length_px, area_px = self._screen_measurement_stats(points)
+        meters_per_pixel = self._meters_per_pixel()
+        self.measurement_changed.emit(length_px * meters_per_pixel, area_px * meters_per_pixel * meters_per_pixel)
+
+    def _meters_per_pixel(self) -> float:
+        if self._map_state_provider is None:
+            return 1.0
+        try:
+            latitude, zoom = self._map_state_provider()
+            latitude = float(latitude)
+            zoom = float(zoom)
+        except (TypeError, ValueError):
+            return 1.0
+        return max(float(math.cos(math.radians(latitude)) * 2.0 * math.pi * 6378137.0 / (256.0 * (2.0**zoom))), 1e-6)
+
+    @staticmethod
+    def _screen_measurement_stats(points: list[QtCore.QPointF]) -> tuple[float, float]:
+        if len(points) < 2:
+            return 0.0, 0.0
+        length = 0.0
+        for first, second in zip(points, points[1:]):
+            length += _OverviewMeasurementOverlay._distance_px(first, second)
+        area = 0.0
+        if len(points) >= 3:
+            xy = [(point.x(), point.y()) for point in points]
+            signed = 0.0
+            for index, (x1, y1) in enumerate(xy):
+                x2, y2 = xy[(index + 1) % len(xy)]
+                signed += x1 * y2 - y1 * x2
+            area = abs(signed) * 0.5
+        return float(length), float(area)
+
+    @staticmethod
+    def _distance_px(first: QtCore.QPointF, second: QtCore.QPointF) -> float:
+        return float(math.hypot(second.x() - first.x(), second.y() - first.y()))
+
+    @staticmethod
+    def _event_position(event: QtGui.QMouseEvent) -> QtCore.QPointF:
+        if hasattr(event, "position"):
+            return QtCore.QPointF(event.position())
+        return QtCore.QPointF(event.pos())
+
+
 class OverviewQuickMapWidget(QtWidgets.QWidget):
     region_activated = QtCore.Signal(str)
     point_selected = QtCore.Signal(str, int, int)
+    measurement_changed = QtCore.Signal(float, float)
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -2337,6 +2500,8 @@ class OverviewQuickMapWidget(QtWidgets.QWidget):
         self._overlay = OverviewOverlayWidget(self)
         self._overlay.region_activated.connect(self.region_activated)
         self._overlay.point_selected.connect(self.point_selected)
+        self._measurement_overlay = _OverviewMeasurementOverlay(self, self._measurement_map_state)
+        self._measurement_overlay.measurement_changed.connect(self.measurement_changed)
         self._bridge.mapStateChanged.connect(self._on_map_state_changed)
         self._bridge.mapTapped.connect(self._on_map_tapped)
         self._bridge.set_offline_tile_cache_directory(_qt_location_cache_directory("qtlocation_offline_tiles_only_v1"))
@@ -2362,6 +2527,7 @@ class OverviewQuickMapWidget(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._quick)
         layout.addWidget(self._overlay)
+        layout.addWidget(self._measurement_overlay)
         self._overlay.raise_()
         self._last_bounds_signature: tuple[object, ...] | None = None
         self.destroyed.connect(self._shutdown_tile_server)
@@ -2381,6 +2547,7 @@ class OverviewQuickMapWidget(QtWidgets.QWidget):
         self._active_interface_name = ""
         self._overlay.clear_scene()
         self._overlay.raise_()
+        self._measurement_overlay.raise_()
 
     def set_scene(
         self,
@@ -2411,6 +2578,7 @@ class OverviewQuickMapWidget(QtWidgets.QWidget):
             active_interface_name=self._active_interface_name,
         )
         self._overlay.raise_()
+        self._measurement_overlay.raise_()
         bounds = self._scene_geo_bounds()
         if bounds is None:
             logger.info("OfflineOverviewMap: scene bounds unavailable")
@@ -2456,12 +2624,29 @@ class OverviewQuickMapWidget(QtWidgets.QWidget):
             self._overlay.set_map_state(latitude, longitude, zoom)
 
     def _on_map_tapped(self, x: float, y: float) -> None:
+        if self._measurement_overlay.isVisible():
+            return
         if hasattr(self, "_overlay"):
             self._overlay.handle_tap(QtCore.QPointF(float(x), float(y)))
+
+    def set_measurement_mode(self, enabled: bool) -> None:
+        self._measurement_overlay.set_measurement_mode(enabled)
+        if enabled:
+            self._measurement_overlay.raise_()
+        else:
+            self._overlay.raise_()
+
+    def clear_measurement(self) -> None:
+        self._measurement_overlay.clear_measurement()
+
+    def _measurement_map_state(self) -> tuple[float, float]:
+        return float(getattr(self._overlay, "_center_lat", 0.0)), float(getattr(self._overlay, "_zoom", 1.0))
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
         self._overlay.raise_()
+        if self._measurement_overlay.isVisible():
+            self._measurement_overlay.raise_()
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:
         super().showEvent(event)
@@ -2475,6 +2660,7 @@ class OverviewQuickMapWidget(QtWidgets.QWidget):
 class OverviewOnlineQuickMapWidget(QtWidgets.QWidget):
     region_activated = QtCore.Signal(str)
     point_selected = QtCore.Signal(str, int, int)
+    measurement_changed = QtCore.Signal(float, float)
 
     def __init__(self, map_config, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -2493,6 +2679,8 @@ class OverviewOnlineQuickMapWidget(QtWidgets.QWidget):
         self._overlay = OverviewOverlayWidget(self)
         self._overlay.region_activated.connect(self.region_activated)
         self._overlay.point_selected.connect(self.point_selected)
+        self._measurement_overlay = _OverviewMeasurementOverlay(self, self._measurement_map_state)
+        self._measurement_overlay.measurement_changed.connect(self.measurement_changed)
         self._bridge.mapStateChanged.connect(self._on_map_state_changed)
         self._bridge.mapTapped.connect(self._on_map_tapped)
         self._online_tile_server = OnlineTileServer(self._map_config, self)
@@ -2509,6 +2697,7 @@ class OverviewOnlineQuickMapWidget(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._quick)
         layout.addWidget(self._overlay)
+        layout.addWidget(self._measurement_overlay)
         self._overlay.raise_()
         self._last_bounds_signature: tuple[object, ...] | None = None
         self.destroyed.connect(self._shutdown_tile_server)
@@ -2529,6 +2718,7 @@ class OverviewOnlineQuickMapWidget(QtWidgets.QWidget):
         self._active_interface_name = ""
         self._overlay.clear_scene()
         self._overlay.raise_()
+        self._measurement_overlay.raise_()
 
     def set_scene(
         self,
@@ -2569,6 +2759,7 @@ class OverviewOnlineQuickMapWidget(QtWidgets.QWidget):
             active_interface_name=self._active_interface_name,
         )
         self._overlay.raise_()
+        self._measurement_overlay.raise_()
         bounds = self._scene_geo_bounds()
         if bounds is None:
             logger.info("OnlineOverviewMap: scene bounds unavailable")
@@ -2607,11 +2798,28 @@ class OverviewOnlineQuickMapWidget(QtWidgets.QWidget):
         self._overlay.set_map_state(latitude, longitude, zoom)
 
     def _on_map_tapped(self, x: float, y: float) -> None:
+        if self._measurement_overlay.isVisible():
+            return
         self._overlay.handle_tap(QtCore.QPointF(float(x), float(y)))
+
+    def set_measurement_mode(self, enabled: bool) -> None:
+        self._measurement_overlay.set_measurement_mode(enabled)
+        if enabled:
+            self._measurement_overlay.raise_()
+        else:
+            self._overlay.raise_()
+
+    def clear_measurement(self) -> None:
+        self._measurement_overlay.clear_measurement()
+
+    def _measurement_map_state(self) -> tuple[float, float]:
+        return float(getattr(self._overlay, "_center_lat", 0.0)), float(getattr(self._overlay, "_zoom", 1.0))
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
         self._overlay.raise_()
+        if self._measurement_overlay.isVisible():
+            self._measurement_overlay.raise_()
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:
         super().showEvent(event)
@@ -2625,6 +2833,7 @@ class OverviewOnlineQuickMapWidget(QtWidgets.QWidget):
 class OverviewMapHostWidget(QtWidgets.QWidget):
     region_activated = QtCore.Signal(str)
     point_selected = QtCore.Signal(str, int, int)
+    measurement_changed = QtCore.Signal(float, float)
 
     def __init__(
         self,
@@ -2637,6 +2846,7 @@ class OverviewMapHostWidget(QtWidgets.QWidget):
         self._offline_widget = offline_widget
         self._online_widget = online_widget
         self._mode = "offline"
+        self._measurement_mode = False
         self._last_scene_kwargs: dict[str, object] | None = None
         self._stack = QtWidgets.QStackedLayout(self)
         self._stack.setContentsMargins(0, 0, 0, 0)
@@ -2649,6 +2859,9 @@ class OverviewMapHostWidget(QtWidgets.QWidget):
             self._online_widget.region_activated.connect(self.region_activated)
         if hasattr(self._online_widget, "point_selected"):
             self._online_widget.point_selected.connect(self.point_selected)
+        for widget in (self._offline_widget, self._online_widget):
+            if hasattr(widget, "measurement_changed"):
+                widget.measurement_changed.connect(self.measurement_changed)
 
     def set_online_map_config(self, config) -> None:
         if hasattr(self._online_widget, "set_online_map_config"):
@@ -2667,12 +2880,26 @@ class OverviewMapHostWidget(QtWidgets.QWidget):
         self._stack.setCurrentWidget(widget)
         if self._last_scene_kwargs is not None:
             widget.set_scene(**self._last_scene_kwargs)
+        self.set_measurement_mode(self._measurement_mode)
 
     def clear_scene(self) -> None:
         self._last_scene_kwargs = None
         self._offline_widget.clear_scene()
         if hasattr(self._online_widget, "clear_scene"):
             self._online_widget.clear_scene()
+
+    def set_measurement_mode(self, enabled: bool) -> None:
+        self._measurement_mode = bool(enabled)
+        target = self._online_widget if self._mode == "online" else self._offline_widget
+        for widget in (self._offline_widget, self._online_widget):
+            if hasattr(widget, "set_measurement_mode"):
+                widget.set_measurement_mode(self._measurement_mode and widget is target)
+
+    def clear_measurement(self) -> None:
+        for widget in (self._offline_widget, self._online_widget):
+            if hasattr(widget, "clear_measurement"):
+                widget.clear_measurement()
+        self.measurement_changed.emit(0.0, 0.0)
 
     def set_scene(self, files, **kwargs) -> None:
         payload = {"files": files, **kwargs}

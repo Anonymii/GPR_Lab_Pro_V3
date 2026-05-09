@@ -852,6 +852,7 @@ class _OfflineTileLoadTask(QtCore.QRunnable):
 class OverviewMapWidget(QtWidgets.QWidget):
     point_selected = QtCore.Signal(str, int, int)
     region_activated = QtCore.Signal(str)
+    measurement_changed = QtCore.Signal(float, float)
     _TILE_SIZE = 256
     _MAP_TILE_TEMPLATE_OSM = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
     _MAP_TILE_TEMPLATE_AMAP = "http://wprd03.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scl=1&style=7&x={x}&y={y}&z={z}"
@@ -884,6 +885,10 @@ class OverviewMapWidget(QtWidgets.QWidget):
         self._map_rebuild_hint: dict[str, object] | None = None
         self._interaction_preview_offset = QtCore.QPointF()
         self._interaction_preview_zoom: dict[str, object] | None = None
+        self._measurement_mode = False
+        self._measurement_points: list[QtCore.QPointF] = []
+        self._measurement_preview: QtCore.QPointF | None = None
+        self._measurement_complete = False
         self._tile_manager = QtNetwork.QNetworkAccessManager(self)
         self._tile_manager.finished.connect(self._on_tile_reply)
         self._tile_cache: OrderedDict[tuple[int, int, int], QtGui.QImage] = OrderedDict()
@@ -900,6 +905,7 @@ class OverviewMapWidget(QtWidgets.QWidget):
         self._scene_refresh_timer.setSingleShot(True)
         self._scene_refresh_timer.setInterval(16)
         self._scene_refresh_timer.timeout.connect(self._flush_scene_refresh)
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.setMinimumHeight(240)
 
     def set_online_map_config(self, config: OnlineMapConfig) -> None:
@@ -940,8 +946,22 @@ class OverviewMapWidget(QtWidgets.QWidget):
         self._map_rebuild_hint = None
         self._interaction_preview_offset = QtCore.QPointF()
         self._interaction_preview_zoom = None
+        self.clear_measurement()
         self._tile_last_error = ""
         self._invalidate_all_layers(immediate=True)
+
+    def set_measurement_mode(self, enabled: bool) -> None:
+        self._measurement_mode = bool(enabled)
+        self._map_drag_state = None
+        self.setCursor(QtCore.Qt.CrossCursor if self._measurement_mode else QtCore.Qt.ArrowCursor)
+        self.update()
+
+    def clear_measurement(self) -> None:
+        self._measurement_points = []
+        self._measurement_preview = None
+        self._measurement_complete = False
+        self.measurement_changed.emit(0.0, 0.0)
+        self.update()
 
     def set_scene(
         self,
@@ -1006,6 +1026,7 @@ class OverviewMapWidget(QtWidgets.QWidget):
         self._draw_layer_cache_with_preview(painter, self._map_layer_cache)
         self._draw_layer_cache_with_preview(painter, self._overlay_layer_cache)
         self._draw_runtime_overlays(painter)
+        self._draw_measurement(painter)
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         self._invalidate_all_layers(immediate=True)
@@ -1290,7 +1311,21 @@ class OverviewMapWidget(QtWidgets.QWidget):
             super().mousePressEvent(event)
             return
         canvas_rect = self._last_canvas_rect
-        if self._last_map_context is None or canvas_rect.isNull() or not canvas_rect.contains(event.position()):
+        if canvas_rect.isNull() or not canvas_rect.contains(event.position()):
+            super().mousePressEvent(event)
+            return
+        if self._measurement_mode:
+            if self._measurement_complete:
+                self._measurement_points = []
+                self._measurement_complete = False
+            self._measurement_points.append(QtCore.QPointF(event.position()))
+            self._measurement_preview = None
+            self.setFocus(QtCore.Qt.MouseFocusReason)
+            self._emit_measurement_stats()
+            self.update()
+            event.accept()
+            return
+        if self._last_map_context is None:
             super().mousePressEvent(event)
             return
         region = self._region_at(event.position())
@@ -1308,6 +1343,19 @@ class OverviewMapWidget(QtWidgets.QWidget):
         event.accept()
 
     def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:
+        if self._measurement_mode:
+            if not self._last_canvas_rect.isNull() and self._last_canvas_rect.contains(event.position()):
+                point = QtCore.QPointF(event.position())
+                if not self._measurement_points or self._screen_distance(self._measurement_points[-1], point) > 1.0:
+                    self._measurement_points.append(point)
+                self._measurement_preview = None
+                self._measurement_complete = True
+                self._emit_measurement_stats()
+                self.update()
+                event.accept()
+                return
+            super().mouseDoubleClickEvent(event)
+            return
         region = self._region_at(event.position())
         if region is None:
             super().mouseDoubleClickEvent(event)
@@ -1327,6 +1375,17 @@ class OverviewMapWidget(QtWidgets.QWidget):
         event.accept()
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
+        if self._measurement_mode:
+            if not self._last_canvas_rect.isNull() and self._last_canvas_rect.contains(event.position()):
+                self.setCursor(QtCore.Qt.CrossCursor)
+                if self._measurement_points and not self._measurement_complete:
+                    self._measurement_preview = QtCore.QPointF(event.position())
+                    self._emit_measurement_stats()
+                    self.update()
+                event.accept()
+                return
+            self._measurement_preview = None
+            self.update()
         if self._map_drag_state is not None and self._last_map_context is not None and not self._last_canvas_rect.isNull():
             start_pos = self._map_drag_state["start_pos"]
             delta = event.position() - start_pos
@@ -1373,6 +1432,9 @@ class OverviewMapWidget(QtWidgets.QWidget):
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event: QtGui.QWheelEvent) -> None:
+        if self._measurement_mode:
+            super().wheelEvent(event)
+            return
         if self._last_map_context is None or self._last_canvas_rect.isNull() or not self._last_canvas_rect.contains(event.position()):
             super().wheelEvent(event)
             return
@@ -1416,9 +1478,87 @@ class OverviewMapWidget(QtWidgets.QWidget):
         event.accept()
 
     def leaveEvent(self, event: QtCore.QEvent) -> None:
+        if self._measurement_mode:
+            self._measurement_preview = None
+            self.update()
+            super().leaveEvent(event)
+            return
         if self._map_drag_state is None:
             self.unsetCursor()
         super().leaveEvent(event)
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if self._measurement_mode and event.key() == QtCore.Qt.Key_Escape:
+            self.clear_measurement()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _draw_measurement(self, painter: QtGui.QPainter) -> None:
+        points = self._measurement_draw_points()
+        if not points:
+            return
+        painter.save()
+        if not self._last_canvas_rect.isNull():
+            painter.setClipRect(self._last_canvas_rect)
+        line_pen = QtGui.QPen(QtGui.QColor("#1f64d8"), 2.0)
+        line_pen.setCosmetic(True)
+        painter.setPen(line_pen)
+        if len(points) >= 2:
+            painter.drawPolyline(QtGui.QPolygonF(points))
+            if self._measurement_complete and len(points) >= 3:
+                fill = QtGui.QColor("#2f80ed")
+                fill.setAlpha(42)
+                painter.setBrush(fill)
+                painter.drawPolygon(QtGui.QPolygonF(points))
+        painter.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 1.0))
+        painter.setBrush(QtGui.QColor("#1f64d8"))
+        for point in self._measurement_points:
+            painter.drawEllipse(point, 3.5, 3.5)
+        painter.restore()
+
+    def _measurement_draw_points(self) -> list[QtCore.QPointF]:
+        points = list(self._measurement_points)
+        if self._measurement_preview is not None and points and not self._measurement_complete:
+            points.append(QtCore.QPointF(self._measurement_preview))
+        return points
+
+    def _emit_measurement_stats(self) -> None:
+        points = self._measurement_draw_points()
+        length_px, area_px = self._screen_measurement_stats(points)
+        meters_per_pixel = self._measurement_meters_per_pixel()
+        self.measurement_changed.emit(length_px * meters_per_pixel, area_px * meters_per_pixel * meters_per_pixel)
+
+    def _measurement_meters_per_pixel(self) -> float:
+        if self._last_map_context is not None:
+            latitude = float(self._last_map_context.get("center_lat", 0.0))
+            zoom = int(self._last_map_context.get("zoom", 1))
+            return float(np.cos(np.deg2rad(latitude)) * 2.0 * np.pi * 6378137.0 / (self._TILE_SIZE * (2**zoom)))
+        if self._last_canvas_rect.isNull():
+            return 1.0
+        min_x, min_y, max_x, max_y = self._world_bounds()
+        world_w = max(max_x - min_x, 1e-6)
+        world_h = max(max_y - min_y, 1e-6)
+        scale = min(self._last_canvas_rect.width() / world_w, self._last_canvas_rect.height() / world_h)
+        return 1.0 / max(scale, 1e-9)
+
+    @staticmethod
+    def _screen_measurement_stats(points: list[QtCore.QPointF]) -> tuple[float, float]:
+        if len(points) < 2:
+            return 0.0, 0.0
+        length = 0.0
+        for first, second in zip(points, points[1:]):
+            length += OverviewMapWidget._screen_distance(first, second)
+        area = 0.0
+        if len(points) >= 3:
+            x = np.asarray([point.x() for point in points], dtype=float)
+            y = np.asarray([point.y() for point in points], dtype=float)
+            area = float(abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))) / 2.0)
+        return length, area
+
+    @staticmethod
+    def _screen_distance(first: QtCore.QPointF, second: QtCore.QPointF) -> float:
+        return float(np.hypot(second.x() - first.x(), second.y() - first.y()))
 
     def _region_at(self, point: QtCore.QPointF) -> tuple[str, QtGui.QPainterPath, dict[str, object]] | None:
         for item in reversed(self._layout_rects):
@@ -2109,6 +2249,10 @@ class RasterViewportWidget(QtWidgets.QWidget):
     guide_moved = QtCore.Signal(object, float, float)
     erase_requested = QtCore.Signal(object, float, float)
     context_menu_requested = QtCore.Signal(object, object, float, float)
+    measure_point_added = QtCore.Signal(object, float, float)
+    measure_preview_changed = QtCore.Signal(object, float, float)
+    measure_completed = QtCore.Signal(object, float, float)
+    measure_cleared = QtCore.Signal(object)
     overlay_drag_started = QtCore.Signal(object)
     overlay_dragged = QtCore.Signal(object, float, float)
     overlay_drag_finished = QtCore.Signal(object)
@@ -2148,10 +2292,14 @@ class RasterViewportWidget(QtWidgets.QWidget):
         self._hline: tuple[float, QtGui.QColor] | None = None
         self._overlays: list[dict[str, object]] = []
         self._active_drag_path: list[tuple[float, float]] = []
+        self._measurement_points: list[tuple[float, float]] = []
+        self._measurement_preview: tuple[float, float] | None = None
+        self._measurement_complete = False
         self._show_axes = True
         self._drag_state: dict[str, object] | None = None
         self._guide_grab_mode: str | None = None
         self._interaction_mode = "default"
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.setMouseTracking(True)
         self.setMinimumSize(120, 120)
 
@@ -2197,6 +2345,18 @@ class RasterViewportWidget(QtWidgets.QWidget):
 
     def set_active_drag_path(self, points: list[tuple[float, float]] | None) -> None:
         self._active_drag_path = list(points or [])
+
+    def set_measurement_points(
+        self,
+        points: list[tuple[float, float]] | None,
+        *,
+        complete: bool = False,
+        preview_point: tuple[float, float] | None = None,
+    ) -> None:
+        self._measurement_points = list(points or [])
+        self._measurement_complete = bool(complete)
+        self._measurement_preview = preview_point
+        self.update()
 
     def set_interaction_mode(self, mode: str) -> None:
         self._interaction_mode = mode
@@ -2254,6 +2414,7 @@ class RasterViewportWidget(QtWidgets.QWidget):
         if self._image is not None and not self._image.isNull():
             self._draw_image_region(painter, plot_rect)
         self._draw_overlays(painter, plot_rect)
+        self._draw_measurement(painter, plot_rect)
         self._draw_crosshair(painter, plot_rect)
         self._draw_border(painter, plot_rect)
 
@@ -2278,6 +2439,12 @@ class RasterViewportWidget(QtWidgets.QWidget):
         plot_rect = self._plot_rect()
         if not plot_rect.contains(event.position()):
             super().mousePressEvent(event)
+            return
+        if self._interaction_mode == "measure":
+            data_x, data_y = self._data_from_point(event.position(), plot_rect)
+            self.measure_point_added.emit(self.view_key, data_x, data_y)
+            self.setFocus(QtCore.Qt.MouseFocusReason)
+            event.accept()
             return
         if self._interaction_mode == "paint":
             data_x, data_y = self._data_from_point(event.position(), plot_rect)
@@ -2314,6 +2481,12 @@ class RasterViewportWidget(QtWidgets.QWidget):
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
         plot_rect = self._plot_rect()
         if self._drag_state is None:
+            if self._interaction_mode == "measure" and plot_rect.contains(event.position()):
+                data_x, data_y = self._data_from_point(event.position(), plot_rect)
+                self.measure_preview_changed.emit(self.view_key, data_x, data_y)
+                self.setCursor(QtCore.Qt.CrossCursor)
+                event.accept()
+                return
             self._update_hover_cursor(event.position(), plot_rect)
             super().mouseMoveEvent(event)
             return
@@ -2390,8 +2563,19 @@ class RasterViewportWidget(QtWidgets.QWidget):
             super().mouseDoubleClickEvent(event)
             return
         data_x, data_y = self._data_from_point(event.position(), plot_rect)
+        if self._interaction_mode == "measure":
+            self.measure_completed.emit(self.view_key, data_x, data_y)
+            event.accept()
+            return
         self.point_selected.emit(self.view_key, data_x, data_y)
         event.accept()
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if self._interaction_mode == "measure" and event.key() == QtCore.Qt.Key_Escape:
+            self.measure_cleared.emit(self.view_key)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def wheelEvent(self, event: QtGui.QWheelEvent) -> None:
         if self._image is None:
@@ -2580,6 +2764,41 @@ class RasterViewportWidget(QtWidgets.QWidget):
                     painter.drawEllipse(QtCore.QPointF(px, py), 4.4, 4.4)
         painter.restore()
 
+    def _draw_measurement(self, painter: QtGui.QPainter, plot_rect: QtCore.QRectF) -> None:
+        if not self._measurement_points:
+            return
+        span_x = max(self._viewport_x[1] - self._viewport_x[0], 1e-9)
+        span_y = max(self._viewport_y[1] - self._viewport_y[0], 1e-9)
+        screen_points: list[QtCore.QPointF] = []
+        draw_points = list(self._measurement_points)
+        if self._measurement_preview is not None and draw_points and not self._measurement_complete:
+            draw_points.append(self._measurement_preview)
+        for data_x, data_y in draw_points:
+            if not (np.isfinite(data_x) and np.isfinite(data_y)):
+                continue
+            px = plot_rect.left() + (float(data_x) - self._viewport_x[0]) / span_x * plot_rect.width()
+            py = plot_rect.top() + (float(data_y) - self._viewport_y[0]) / span_y * plot_rect.height()
+            screen_points.append(QtCore.QPointF(px, py))
+        if not screen_points:
+            return
+        painter.save()
+        painter.setClipRect(plot_rect)
+        line_pen = QtGui.QPen(QtGui.QColor("#1e64d8"), 2.0)
+        line_pen.setCosmetic(True)
+        painter.setPen(line_pen)
+        if len(screen_points) >= 2:
+            painter.drawPolyline(QtGui.QPolygonF(screen_points))
+            if self._measurement_complete and len(screen_points) >= 3:
+                fill = QtGui.QColor("#2f80ed")
+                fill.setAlpha(38)
+                painter.setBrush(fill)
+                painter.drawPolygon(QtGui.QPolygonF(screen_points))
+        painter.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 1.0))
+        painter.setBrush(QtGui.QColor("#1e64d8"))
+        for point in screen_points:
+            painter.drawEllipse(point, 3.4, 3.4)
+        painter.restore()
+
     def _draw_border(self, painter: QtGui.QPainter, plot_rect: QtCore.QRectF) -> None:
         painter.save()
         painter.setPen(QtGui.QPen(QtGui.QColor("#c7d0da"), 1))
@@ -2650,6 +2869,9 @@ class RasterViewportWidget(QtWidgets.QWidget):
             self.unsetCursor()
             return
         if self._interaction_mode == "paint":
+            self.setCursor(QtCore.Qt.CrossCursor)
+            return
+        if self._interaction_mode == "measure":
             self.setCursor(QtCore.Qt.CrossCursor)
             return
         if self._hit_test_overlay_point(point, plot_rect) is not None:
@@ -3242,6 +3464,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._interface_pick_mode = False
         self._last_interface_pick: tuple[str, str, int, int, int] | None = None
         self._interface_drag_state: dict[str, object] | None = None
+        self._measurement_mode = False
+        self._measurement_surface = "explore"
+        self._measurement_active_view = "bscan"
+        self._measurement_preview: dict[str, tuple[float, float] | None] = {}
+        self._measurement_points: dict[str, list[tuple[float, float]]] = {}
+        self._measurement_complete: dict[str, bool] = {}
+        self._measurement_overview_stats = (0.0, 0.0)
+        self._measurement_dialog: QtWidgets.QDialog | None = None
+        self._measurement_length_label: QtWidgets.QLabel | None = None
+        self._measurement_area_label: QtWidgets.QLabel | None = None
         self._online_map_config = OnlineMapConfigStore.load()
         self._overview_map_mode = "offline"
         self._overview_region_preview_cache: dict[tuple[object, ...], QtGui.QImage] = {}
@@ -3279,6 +3511,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.resize(1680, 940)
         self._build_ui()
+        self._measure_clear_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Escape), self)
+        self._measure_clear_shortcut.setContext(QtCore.Qt.ApplicationShortcut)
+        self._measure_clear_shortcut.activated.connect(self._clear_measurement)
         self._apply_window_style()
         self._connect_signals()
         self._refresh_pipeline_draft()
@@ -3734,6 +3969,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.overview_map.setStyleSheet("background: #fafbfc; border: 1px solid #d0d7df; border-radius: 14px;")
         self.overview_map.region_activated.connect(self._on_overview_region_activated)
         self.overview_map.point_selected.connect(self._on_overview_point_selected)
+        self.overview_map.measurement_changed.connect(self._on_overview_measurement_changed)
         overview_body = QtWidgets.QHBoxLayout()
         overview_body.setContentsMargins(0, 0, 0, 0)
         overview_body.setSpacing(6)
@@ -3747,7 +3983,9 @@ class MainWindow(QtWidgets.QMainWindow):
         explore_layout = QtWidgets.QVBoxLayout(explore_panel)
         explore_layout.setContentsMargins(14, 14, 14, 14)
         explore_layout.setSpacing(8)
-        interface_row = QtWidgets.QHBoxLayout()
+        self.interface_editor_bar = QtWidgets.QWidget(explore_panel)
+        self.interface_editor_bar.hide()
+        interface_row = QtWidgets.QHBoxLayout(self.interface_editor_bar)
         interface_row.setContentsMargins(0, 0, 0, 0)
         interface_row.setSpacing(8)
         self.interface_combo = QtWidgets.QComboBox()
@@ -3828,7 +4066,21 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             button.setFixedHeight(26)
         interface_row.addStretch(1)
-        explore_layout.addLayout(interface_row)
+        for widget in (
+            self.interface_combo,
+            self.btn_interface_add,
+            self.btn_interface_rename,
+            self.btn_interface_duplicate,
+            self.btn_interface_delete,
+            self.btn_interface_visible,
+            self.btn_interface_pick,
+            self.btn_interface_clear_point,
+            self.btn_interface_clear_line,
+            self.btn_interface_clear_all,
+            self.btn_interface_fill,
+            self.btn_interface_smooth,
+        ):
+            widget.hide()
         explore_body = QtWidgets.QHBoxLayout()
         explore_body.setContentsMargins(0, 0, 0, 0)
         explore_body.setSpacing(6)
@@ -3890,22 +4142,23 @@ class MainWindow(QtWidgets.QMainWindow):
         bottom_right_panel = QtWidgets.QFrame()
         bottom_right_panel.setObjectName("sideCard")
         right_layout = QtWidgets.QVBoxLayout(bottom_right_panel)
-        right_layout.setContentsMargins(8, 8, 8, 8)
-        right_layout.setSpacing(4)
+        right_layout.setContentsMargins(12, 12, 12, 12)
+        right_layout.setSpacing(6)
         self.ax_s = None
 
         slider_group = QtWidgets.QGroupBox("联动切片")
+        slider_group.setMaximumHeight(176)
         slider_layout = QtWidgets.QFormLayout(slider_group)
-        slider_layout.setContentsMargins(8, 8, 8, 8)
+        slider_layout.setContentsMargins(12, 16, 12, 12)
         slider_layout.setLabelAlignment(QtCore.Qt.AlignLeft)
-        slider_layout.setHorizontalSpacing(5)
-        slider_layout.setVerticalSpacing(2)
+        slider_layout.setHorizontalSpacing(10)
+        slider_layout.setVerticalSpacing(10)
         self.trace_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.trace_slider.valueChanged.connect(self._on_trace_slider_changed)
         self.trace_value_edit = QtWidgets.QLineEdit("0")
         self.trace_value_edit.setReadOnly(True)
-        self.trace_value_edit.setMaximumWidth(86)
-        self.trace_value_edit.setFixedHeight(24)
+        self.trace_value_edit.setMaximumWidth(104)
+        self.trace_value_edit.setFixedHeight(28)
         trace_row = QtWidgets.QHBoxLayout()
         trace_row.setSpacing(4)
         trace_row.addWidget(self.trace_slider, stretch=1)
@@ -3914,8 +4167,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.line_slider.valueChanged.connect(self._on_line_slider_changed)
         self.line_value_edit = QtWidgets.QLineEdit("0")
         self.line_value_edit.setReadOnly(True)
-        self.line_value_edit.setMaximumWidth(86)
-        self.line_value_edit.setFixedHeight(24)
+        self.line_value_edit.setMaximumWidth(104)
+        self.line_value_edit.setFixedHeight(28)
         line_row = QtWidgets.QHBoxLayout()
         line_row.setSpacing(4)
         line_row.addWidget(self.line_slider, stretch=1)
@@ -3924,8 +4177,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sample_slider.valueChanged.connect(self._on_sample_slider_changed)
         self.sample_value_edit = QtWidgets.QLineEdit("0")
         self.sample_value_edit.setReadOnly(True)
-        self.sample_value_edit.setMaximumWidth(86)
-        self.sample_value_edit.setFixedHeight(24)
+        self.sample_value_edit.setMaximumWidth(104)
+        self.sample_value_edit.setFixedHeight(28)
         sample_row = QtWidgets.QHBoxLayout()
         sample_row.setSpacing(4)
         sample_row.addWidget(self.sample_slider, stretch=1)
@@ -3934,11 +4187,12 @@ class MainWindow(QtWidgets.QMainWindow):
         slider_layout.addRow("纵向切片 (Y)", line_row)
         slider_layout.addRow("水平切片 (Z)", sample_row)
         slider_group.setStyleSheet(
-            "QGroupBox { font-size: 10px; } "
-            "QLabel { font-size: 10px; } "
-            "QLineEdit { font-size: 10px; padding: 1px 4px; min-height: 18px; }"
+            "QGroupBox { font-size: 12px; font-weight: 700; } "
+            "QLabel { font-size: 12px; } "
+            "QLineEdit { font-size: 12px; padding: 2px 6px; min-height: 22px; }"
         )
-        right_layout.addWidget(slider_group, stretch=1)
+        right_layout.addWidget(slider_group)
+        right_layout.addStretch(1)
         bottom_row.addWidget(bottom_right_panel, stretch=28)
         explore_slices.addLayout(bottom_row, stretch=3)
 
@@ -3969,6 +4223,11 @@ class MainWindow(QtWidgets.QMainWindow):
             widget.point_selected.connect(self._on_view_selected)
             widget.guide_moved.connect(self._on_view_selected)
             widget.context_menu_requested.connect(self._show_scan_view_menu)
+            if isinstance(widget, RasterViewportWidget):
+                widget.measure_point_added.connect(self._on_measure_point_added)
+                widget.measure_preview_changed.connect(self._on_measure_preview_changed)
+                widget.measure_completed.connect(self._on_measure_completed)
+                widget.measure_cleared.connect(self._on_measure_cleared)
         self.bscan_view.erase_requested.connect(self._on_view_erase_requested)
         self.bscan_view.overlay_drag_started.connect(self._on_overlay_drag_started)
         self.bscan_view.overlay_dragged.connect(self._on_overlay_dragged)
@@ -4215,7 +4474,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._add_tool_strip_button(layout, "平移", self._tool_icon("pan"), callback=lambda: self._set_overview_tool_mode("pan"), checkable=True)
         self._add_tool_strip_button(layout, "移动", self._tool_icon("move"), callback=lambda: self._set_overview_tool_mode("move"), checkable=True)
         self._add_tool_strip_button(layout, "缩放", self._tool_icon("zoom"), callback=lambda: self._set_overview_tool_mode("zoom"), checkable=True)
-        self._add_tool_strip_button(layout, "测量", self._tool_icon("measure"), callback=lambda: self._set_overview_tool_mode("measure"), checkable=True)
+        self.btn_overview_measure = self._add_tool_strip_button(layout, "测量", self._tool_icon("measure"), callback=self._toggle_overview_measure_mode, checkable=True)
         self._add_tool_strip_button(layout, "修正轨迹", self._tool_icon("modify_track"), callback=lambda: self._set_overview_tool_mode("modify_track"))
         self._add_tool_strip_button(layout, "标注", self._tool_icon("annotate"), callback=lambda: self._set_overview_tool_mode("annotate"))
         self._add_tool_strip_button(layout, "显示十字线", self._tool_icon("crosshair"), callback=lambda: self._set_overview_tool_mode("crosshair"), checkable=True)
@@ -4232,7 +4491,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setSpacing(4)
         self._add_tool_strip_button(layout, "平移", self._tool_icon("pan"), callback=lambda: self._set_explore_tool_mode("pan"), checkable=True, checked=True)
         self._add_tool_strip_button(layout, "缩放", self._tool_icon("zoom"), callback=lambda: self._set_explore_tool_mode("zoom"), checkable=True)
-        self._add_tool_strip_button(layout, "测量", self._tool_icon("measure"), callback=lambda: self._set_explore_tool_mode("measure"), checkable=True)
+        self.btn_explore_measure = self._add_tool_strip_button(layout, "测量", self._tool_icon("measure"), callback=self._toggle_explore_measure_mode, checkable=True)
         self._add_tool_strip_button(layout, "界面追踪", self._tool_icon("trace_interface"), callback=self._show_interface_tracing_panel)
         self._add_tool_strip_button(layout, "显示十字线", self._tool_icon("crosshair"), callback=lambda: self._set_explore_tool_mode("crosshair"), checkable=True, checked=True)
         self._add_tool_strip_button(layout, "显示双曲线", self._tool_icon("hyperbola"), callback=lambda: self._set_explore_tool_mode("hyperbola"), checkable=True)
@@ -4413,12 +4672,14 @@ class MainWindow(QtWidgets.QMainWindow):
         return QtGui.QIcon(pixmap)
 
     def _set_overview_tool_mode(self, mode: str) -> None:
+        if mode != "measure" and self._measurement_mode:
+            self._set_measurement_mode(False, surface=self._measurement_surface)
         messages = {
             "select": "总览选择：点击区域可激活并联动到探索界面。",
             "pan": "总览平移：拖拽地图或滚轮缩放。",
             "move": "总览移动：移动区域、地图和标注对象接口已预留。",
             "zoom": "总览缩放：框选缩放接口已预留，滚轮缩放沿用当前地图控件。",
-            "measure": "总览测量：长度和面积测量接口已预留。",
+            "measure": "总览测量：单击添加折点，双击完成，Esc 清空。",
             "modify_track": "修正轨迹：导航轨迹编辑、平滑和节点修正接口已预留。",
             "annotate": "标注：地图标注放置和标题编辑接口已预留。",
             "crosshair": "显示十字线：总览十字线显示开关接口已预留。",
@@ -4427,12 +4688,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(messages.get(mode, "总览工具已切换。"), 3000)
 
     def _set_explore_tool_mode(self, mode: str) -> None:
+        if mode != "measure" and self._measurement_mode:
+            self._set_measurement_mode(False)
         if self._interface_pick_mode:
             self.btn_interface_pick.setChecked(False)
         messages = {
             "pan": "探索平移：拖拽切片平移，滚轮缩放。",
             "zoom": "探索缩放：框选缩放接口已预留，滚轮缩放沿用当前切片控件。",
-            "measure": "探索测量：切片距离和深度测量接口已预留。",
+            "measure": "探索测量：单击添加折点，双击完成，Esc 清空。",
             "crosshair": "显示十字线：B-scan、C-scan 和道波形十字线显示开关接口已预留。",
             "hyperbola": "显示双曲线：双曲线预览接口已预留。",
             "time_ground": "显示地面时间标记：地面时间标记显示接口已预留。",
@@ -4440,6 +4703,179 @@ class MainWindow(QtWidgets.QMainWindow):
             "dual_axis": "双深度轴：深度/时间双轴显示接口已预留。",
         }
         self.statusBar().showMessage(messages.get(mode, "探索工具已切换。"), 3000)
+
+    def _toggle_explore_measure_mode(self, checked: bool = False) -> None:
+        self._set_measurement_mode(bool(checked), surface="explore")
+
+    def _toggle_overview_measure_mode(self, checked: bool = False) -> None:
+        self._set_measurement_mode(bool(checked), surface="overview")
+
+    def _set_measurement_mode(self, enabled: bool, *, surface: str = "explore") -> None:
+        self._measurement_mode = bool(enabled)
+        self._measurement_surface = "overview" if surface == "overview" else "explore"
+        if hasattr(self, "btn_explore_measure"):
+            self.btn_explore_measure.blockSignals(True)
+            self.btn_explore_measure.setChecked(self._measurement_mode and self._measurement_surface == "explore")
+            self.btn_explore_measure.blockSignals(False)
+        if hasattr(self, "btn_overview_measure"):
+            self.btn_overview_measure.blockSignals(True)
+            self.btn_overview_measure.setChecked(self._measurement_mode and self._measurement_surface == "overview")
+            self.btn_overview_measure.blockSignals(False)
+        if self._measurement_mode and self._interface_pick_mode:
+            self.btn_interface_pick.setChecked(False)
+        self.overview_map.set_measurement_mode(self._measurement_mode and self._measurement_surface == "overview")
+        mode = "measure" if self._measurement_mode and self._measurement_surface == "explore" else "default"
+        for widget in (self.bscan_view, self.width_view, self.cscan_view):
+            widget.set_interaction_mode(mode)
+        if self._measurement_mode:
+            self._show_measurement_dialog()
+            self.statusBar().showMessage("测量模式：单击添加折点，双击完成，Esc 清空。", 4000)
+        else:
+            if self._measurement_dialog is not None:
+                self._measurement_dialog.close()
+            self.statusBar().showMessage("测量模式已关闭。", 2500)
+
+    def _show_measurement_dialog(self) -> None:
+        if self._measurement_dialog is not None and self._measurement_dialog.isVisible():
+            anchor = self.overview_map if self._measurement_surface == "overview" else self.bscan_view
+            self._measurement_dialog.move(anchor.mapToGlobal(QtCore.QPoint(52, 34)))
+            self._measurement_dialog.raise_()
+            self._measurement_dialog.activateWindow()
+            self._update_measurement_dialog()
+            return
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("测量")
+        dialog.setModal(False)
+        dialog.setWindowFlags(dialog.windowFlags() | QtCore.Qt.Tool | QtCore.Qt.FramelessWindowHint)
+        dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(2)
+        self._measurement_length_label = QtWidgets.QLabel("Length:      0.000 m")
+        self._measurement_area_label = QtWidgets.QLabel("Area:        0.000 m²")
+        label_font = QtGui.QFont("Microsoft YaHei UI", 12)
+        self._measurement_length_label.setFont(label_font)
+        self._measurement_area_label.setFont(label_font)
+        layout.addWidget(self._measurement_length_label)
+        layout.addWidget(self._measurement_area_label)
+        dialog.setStyleSheet(
+            "QDialog { background: #b8e3ee; border: 2px solid #4169e1; border-radius: 3px; } "
+            "QLabel { color: #000000; background: transparent; }"
+        )
+        dialog.destroyed.connect(self._on_measurement_dialog_destroyed)
+        self._measurement_dialog = dialog
+        self._update_measurement_dialog()
+        dialog.adjustSize()
+        anchor = self.overview_map if self._measurement_surface == "overview" else self.bscan_view
+        dialog.move(anchor.mapToGlobal(QtCore.QPoint(52, 34)))
+        dialog.show()
+
+    def _on_measurement_dialog_destroyed(self) -> None:
+        self._measurement_dialog = None
+        self._measurement_length_label = None
+        self._measurement_area_label = None
+
+    def _on_measure_point_added(self, view_key: object, data_x: float, data_y: float) -> None:
+        key = str(view_key)
+        self._prepare_measurement_view(key)
+        points = self._measurement_points.setdefault(key, [])
+        if self._measurement_complete.get(key, False):
+            points.clear()
+            self._measurement_complete[key] = False
+        self._measurement_preview[key] = None
+        points.append((float(data_x), float(data_y)))
+        self._apply_measurement_overlay(key)
+        self._update_measurement_dialog()
+
+    def _on_measure_preview_changed(self, view_key: object, data_x: float, data_y: float) -> None:
+        key = str(view_key)
+        if key != self._measurement_active_view:
+            return
+        if not self._measurement_points.get(key) or self._measurement_complete.get(key, False):
+            return
+        self._measurement_preview[key] = (float(data_x), float(data_y))
+        self._apply_measurement_overlay(key)
+        self._update_measurement_dialog()
+
+    def _on_measure_completed(self, view_key: object, data_x: float, data_y: float) -> None:
+        key = str(view_key)
+        self._prepare_measurement_view(key)
+        points = self._measurement_points.setdefault(key, [])
+        point = (float(data_x), float(data_y))
+        if not points or float(np.hypot(points[-1][0] - point[0], points[-1][1] - point[1])) > 1e-6:
+            points.append(point)
+        self._measurement_preview[key] = None
+        self._measurement_complete[key] = True
+        self._apply_measurement_overlay(key)
+        self._update_measurement_dialog()
+        self.statusBar().showMessage("测量完成。单击可重新开始，Esc 清空。", 3000)
+
+    def _on_overview_measurement_changed(self, length: float, area: float) -> None:
+        self._measurement_overview_stats = (float(length), float(area))
+        if self._measurement_surface == "overview":
+            self._update_measurement_dialog()
+
+    def _on_measure_cleared(self, _view_key: object) -> None:
+        self._clear_measurement()
+
+    def _prepare_measurement_view(self, key: str) -> None:
+        if key == self._measurement_active_view:
+            return
+        self._measurement_active_view = key
+        self._measurement_preview.clear()
+        self._measurement_points.clear()
+        self._measurement_complete.clear()
+        self._clear_measurement_overlays()
+
+    def _clear_measurement(self) -> None:
+        self._measurement_preview.clear()
+        self._measurement_points.clear()
+        self._measurement_complete.clear()
+        self._measurement_overview_stats = (0.0, 0.0)
+        self._clear_measurement_overlays()
+        self.overview_map.clear_measurement()
+        self._update_measurement_dialog()
+
+    def _clear_measurement_overlays(self) -> None:
+        for widget in (self.bscan_view, self.width_view, self.cscan_view):
+            widget.set_measurement_points([], complete=False)
+
+    def _apply_measurement_overlay(self, key: str) -> None:
+        widget = self._scan_view_widget(key)
+        if isinstance(widget, RasterViewportWidget):
+            widget.set_measurement_points(
+                self._measurement_points.get(key, []),
+                complete=self._measurement_complete.get(key, False),
+                preview_point=self._measurement_preview.get(key),
+            )
+
+    def _update_measurement_dialog(self) -> None:
+        if self._measurement_surface == "overview":
+            length, area = self._measurement_overview_stats
+        else:
+            points = list(self._measurement_points.get(self._measurement_active_view, []))
+            preview = self._measurement_preview.get(self._measurement_active_view)
+            if preview is not None and points and not self._measurement_complete.get(self._measurement_active_view, False):
+                points.append(preview)
+            length, area = self._measurement_stats(points)
+        if self._measurement_length_label is not None:
+            self._measurement_length_label.setText(f"Length: {length:10.3f} m")
+        if self._measurement_area_label is not None:
+            self._measurement_area_label.setText(f"Area:   {area:10.3f} m²")
+
+    @staticmethod
+    def _measurement_stats(points: list[tuple[float, float]]) -> tuple[float, float]:
+        if len(points) < 2:
+            return 0.0, 0.0
+        length = 0.0
+        for first, second in zip(points, points[1:]):
+            length += float(np.hypot(float(second[0]) - float(first[0]), float(second[1]) - float(first[1])))
+        area = 0.0
+        if len(points) >= 3:
+            x = np.asarray([float(point[0]) for point in points], dtype=float)
+            y = np.asarray([float(point[1]) for point in points], dtype=float)
+            area = float(abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))) / 2.0)
+        return length, area
 
     def _show_interface_tracing_panel(self) -> None:
         dialog = QtWidgets.QDialog(self)
@@ -5761,7 +6197,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_interface_pick.setChecked(self._interface_pick_mode)
         self.btn_interface_pick.setText("拾取中" if self._interface_pick_mode else "拾取")
         self.btn_interface_pick.blockSignals(False)
-        self.bscan_view.set_interaction_mode("paint" if self._interface_pick_mode else "default")
+        if self._measurement_mode and self._measurement_surface == "explore":
+            for widget in (self.bscan_view, self.width_view, self.cscan_view):
+                widget.set_interaction_mode("measure")
+        else:
+            self.bscan_view.set_interaction_mode("paint" if self._interface_pick_mode else "default")
 
     def _active_interface(self):
         region = self.app_controller.project_controller.get_active_region()
@@ -5895,6 +6335,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _toggle_interface_pick_mode(self, checked: bool) -> None:
         self._interface_pick_mode = bool(checked)
+        if self._interface_pick_mode and self._measurement_mode:
+            self._set_measurement_mode(False)
         if not self._interface_pick_mode:
             self._last_interface_pick = None
         self.btn_interface_pick.setText("拾取中" if self._interface_pick_mode else "拾取")
