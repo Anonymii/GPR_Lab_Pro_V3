@@ -2108,6 +2108,7 @@ class RasterViewportWidget(QtWidgets.QWidget):
     point_selected = QtCore.Signal(object, float, float)
     guide_moved = QtCore.Signal(object, float, float)
     erase_requested = QtCore.Signal(object, float, float)
+    context_menu_requested = QtCore.Signal(object, object, float, float)
     overlay_drag_started = QtCore.Signal(object)
     overlay_dragged = QtCore.Signal(object, float, float)
     overlay_drag_finished = QtCore.Signal(object)
@@ -2220,6 +2221,27 @@ class RasterViewportWidget(QtWidgets.QWidget):
 
     def viewport(self) -> tuple[tuple[float, float], tuple[float, float]]:
         return self._viewport_x, self._viewport_y
+
+    def has_content(self) -> bool:
+        return self._image is not None and not self._image.isNull()
+
+    def fit_to_data(self) -> None:
+        if not self.has_content():
+            return
+        self._viewport_x = self._data_x
+        self._viewport_y = self._viewport_limit_y
+        self.view_changed.emit(self.view_key, self._viewport_x, self._viewport_y)
+        self.update()
+
+    def center_on(self, data_x: float, data_y: float) -> None:
+        if not self.has_content():
+            return
+        span_x = max(self._viewport_x[1] - self._viewport_x[0], 1e-9)
+        span_y = max(self._viewport_y[1] - self._viewport_y[0], 1e-9)
+        self._viewport_x = self._clamp_range((data_x - span_x / 2.0, data_x + span_x / 2.0), self._data_x)
+        self._viewport_y = self._clamp_y_range((data_y - span_y / 2.0, data_y + span_y / 2.0), self._viewport_limit_y)
+        self.view_changed.emit(self.view_key, self._viewport_x, self._viewport_y)
+        self.update()
 
     def paintEvent(self, _event: QtGui.QPaintEvent) -> None:
         painter = QtGui.QPainter(self)
@@ -2405,6 +2427,16 @@ class RasterViewportWidget(QtWidgets.QWidget):
         self._viewport_y = self._clamp_y_range(new_ylim, self._viewport_limit_y)
         self.view_changed.emit(self.view_key, self._viewport_x, self._viewport_y)
         self.update()
+        event.accept()
+
+    def contextMenuEvent(self, event: QtGui.QContextMenuEvent) -> None:
+        if not self.has_content():
+            super().contextMenuEvent(event)
+            return
+        plot_rect = self._plot_rect()
+        local_pos = QtCore.QPointF(event.pos())
+        data_x, data_y = self._data_from_point(local_pos, plot_rect)
+        self.context_menu_requested.emit(self.view_key, event.globalPos(), data_x, data_y)
         event.accept()
 
     def _plot_rect(self) -> QtCore.QRectF:
@@ -2740,6 +2772,7 @@ class TraceViewportWidget(QtWidgets.QWidget):
     view_changed = QtCore.Signal(object, object, object)
     point_selected = QtCore.Signal(object, float, float)
     guide_moved = QtCore.Signal(object, float, float)
+    context_menu_requested = QtCore.Signal(object, object, float, float)
 
     def __init__(
         self,
@@ -2853,6 +2886,27 @@ class TraceViewportWidget(QtWidgets.QWidget):
     def viewport(self) -> tuple[tuple[float, float], tuple[float, float]]:
         return self._viewport_x, self._viewport_y
 
+    def has_content(self) -> bool:
+        return self._x_data.size > 0 and self._y_data.size > 0
+
+    def fit_to_data(self) -> None:
+        if not self.has_content():
+            return
+        self._viewport_x = self._data_x
+        self._viewport_y = self._viewport_limit_y
+        self.view_changed.emit(self.view_key, self._viewport_x, self._viewport_y)
+        self.update()
+
+    def center_on(self, data_x: float, data_y: float) -> None:
+        if not self.has_content():
+            return
+        span_x = max(self._viewport_x[1] - self._viewport_x[0], 1e-9)
+        span_y = max(self._viewport_y[1] - self._viewport_y[0], 1e-9)
+        self._viewport_x = self._clamp_range((data_x - span_x / 2.0, data_x + span_x / 2.0), self._data_x)
+        self._viewport_y = self._clamp_y_range((data_y - span_y / 2.0, data_y + span_y / 2.0), self._viewport_limit_y)
+        self.view_changed.emit(self.view_key, self._viewport_x, self._viewport_y)
+        self.update()
+
     def paintEvent(self, _event: QtGui.QPaintEvent) -> None:
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
@@ -2959,6 +3013,16 @@ class TraceViewportWidget(QtWidgets.QWidget):
         self._viewport_y = self._clamp_y_range(new_ylim, self._viewport_limit_y)
         self.view_changed.emit(self.view_key, self._viewport_x, self._viewport_y)
         self.update()
+        event.accept()
+
+    def contextMenuEvent(self, event: QtGui.QContextMenuEvent) -> None:
+        if not self.has_content():
+            super().contextMenuEvent(event)
+            return
+        plot_rect = self._plot_rect()
+        local_pos = QtCore.QPointF(event.pos())
+        data_x, data_y = self._data_from_point(local_pos, plot_rect)
+        self.context_menu_requested.emit(self.view_key, event.globalPos(), data_x, data_y)
         event.accept()
 
     def _plot_rect(self) -> QtCore.QRectF:
@@ -3910,6 +3974,7 @@ class MainWindow(QtWidgets.QMainWindow):
             widget.view_changed.connect(self._on_view_changed)
             widget.point_selected.connect(self._on_view_selected)
             widget.guide_moved.connect(self._on_view_selected)
+            widget.context_menu_requested.connect(self._show_scan_view_menu)
         self.bscan_view.erase_requested.connect(self._on_view_erase_requested)
         self.bscan_view.overlay_drag_started.connect(self._on_overlay_drag_started)
         self.bscan_view.overlay_dragged.connect(self._on_overlay_dragged)
@@ -4496,14 +4561,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.app_controller.project_state.is_open:
             self.action_save_project = self.file_menu.addAction("保存工程", self._save_project)
             self.file_menu.addSeparator()
-            self.action_import_data = self.file_menu.addAction("导入数据", self._load_data)
-            self.file_menu.addAction("添加地理影像", self._create_project_map)
-            self.file_menu.addAction("添加标注分组", self._create_annotation_group)
-            self.file_menu.addAction("添加拼接", self._create_stitching)
             self.action_load_template = self.file_menu.addAction("加载模板", self._load_template)
-            self.action_save_processed = self.file_menu.addAction("保存处理结果", self._save_processed)
-            self.file_menu.addAction("导出导航数据...", lambda: self._show_feature_placeholder("导出导航数据", "导航数据 TSV 导入/导出接口已预留。"))
-            self.file_menu.addAction("数据源信息", self._show_data_source_information)
+            self.action_import_data = None
+            self.action_save_processed = None
         else:
             self.action_save_project = None
             self.action_import_data = None
@@ -7064,6 +7124,138 @@ class MainWindow(QtWidgets.QMainWindow):
         if key == "trace":
             self.bscan_view.set_viewport(ylim=ylim)
             self.width_view.set_viewport(ylim=ylim)
+
+    def _show_scan_view_menu(self, view_key: object, global_pos: object, data_x: float, data_y: float) -> None:
+        widget = self._scan_view_widget(str(view_key))
+        if widget is None:
+            return
+        menu = QtWidgets.QMenu(self)
+        set_crosshair_action = menu.addAction(
+            self._standard_icon(QtWidgets.QStyle.SP_FileDialogNewFolder),
+            "设置十字线",
+        )
+        center_action = menu.addAction("居中到十字线")
+        menu.addSeparator()
+        fit_display_action = menu.addAction(
+            self._standard_icon(QtWidgets.QStyle.SP_FileDialogContentsView),
+            "适配显示数据",
+        )
+        fit_region_action = menu.addAction("适配当前区域")
+        menu.addSeparator()
+        copy_action = menu.addAction("复制图像到剪贴板")
+        save_action = menu.addAction("图像另存为...")
+        chosen = menu.exec(global_pos if isinstance(global_pos, QtCore.QPoint) else QtGui.QCursor.pos())
+        key = str(view_key)
+        if chosen is set_crosshair_action:
+            self._on_view_selected(key, float(data_x), float(data_y))
+        elif chosen is center_action:
+            self._center_scan_view_on_crosshair(key, fallback_x=float(data_x), fallback_y=float(data_y))
+        elif chosen is fit_display_action:
+            self._fit_scan_view_to_data(key, "已适配显示数据。")
+        elif chosen is fit_region_action:
+            self._fit_scan_view_to_data(key, "已适配当前区域。")
+        elif chosen is copy_action:
+            self._copy_scan_view_image(key)
+        elif chosen is save_action:
+            self._save_scan_view_image(key)
+
+    def _scan_view_widget(self, view_key: str) -> QtWidgets.QWidget | None:
+        return {
+            "bscan": self.bscan_view,
+            "width": self.width_view,
+            "cscan": self.cscan_view,
+            "trace": self.trace_view,
+        }.get(str(view_key))
+
+    def _scan_view_label(self, view_key: str) -> str:
+        return {
+            "bscan": "B-scan",
+            "width": "Width slice",
+            "cscan": "C-scan",
+            "trace": "Trace line",
+        }.get(str(view_key), "Scan")
+
+    def _fit_scan_view_to_data(self, view_key: str, message: str) -> None:
+        widget = self._scan_view_widget(view_key)
+        if widget is None or not hasattr(widget, "fit_to_data"):
+            return
+        widget.fit_to_data()
+        self._has_custom_viewport = False
+        self.statusBar().showMessage(message, 2500)
+
+    def _center_scan_view_on_crosshair(self, view_key: str, *, fallback_x: float, fallback_y: float) -> None:
+        widget = self._scan_view_widget(view_key)
+        if widget is None or not hasattr(widget, "center_on"):
+            return
+        data_x, data_y = self._current_crosshair_for_view(view_key, fallback_x=fallback_x, fallback_y=fallback_y)
+        widget.center_on(float(data_x), float(data_y))
+        self._has_custom_viewport = True
+        self.statusBar().showMessage("已居中到十字线。", 2500)
+
+    def _current_crosshair_for_view(self, view_key: str, *, fallback_x: float, fallback_y: float) -> tuple[float, float]:
+        if self.display_data is None:
+            return fallback_x, fallback_y
+        selection = self.app_controller.selection_state
+        sample_index = int(np.clip(selection.sample_index, 0, max(self.display_data.ascan_time_ns.size - 1, 0)))
+        time_ns = float(self.display_data.ascan_time_ns[sample_index]) if self.display_data.ascan_time_ns.size else fallback_y
+        key = str(view_key)
+        if key == "bscan":
+            return float(selection.trace_index), time_ns
+        if key == "width":
+            line_count = int(self.display_data.meta.get("line_count", 1))
+            half_width = max((line_count - 1) / 2.0, 0.5)
+            return float(selection.line_index) - half_width, time_ns
+        if key == "cscan":
+            return float(selection.trace_index), float(selection.line_index)
+        if key == "trace":
+            return fallback_x, time_ns
+        return fallback_x, fallback_y
+
+    def _copy_scan_view_image(self, view_key: str) -> None:
+        widget = self._scan_view_widget(view_key)
+        if widget is None:
+            return
+        pixmap = widget.grab()
+        if pixmap.isNull():
+            QtWidgets.QMessageBox.warning(self, "复制图像", "当前视图没有可复制的图像。")
+            return
+        QtWidgets.QApplication.clipboard().setPixmap(pixmap)
+        self.statusBar().showMessage(f"{self._scan_view_label(view_key)} 图像已复制到剪贴板。", 3000)
+
+    def _save_scan_view_image(self, view_key: str) -> None:
+        widget = self._scan_view_widget(view_key)
+        if widget is None:
+            return
+        pixmap = widget.grab()
+        if pixmap.isNull():
+            QtWidgets.QMessageBox.warning(self, "图像另存为", "当前视图没有可保存的图像。")
+            return
+        default_name = f"{self._scan_view_label(view_key).replace(' ', '_')}.jpg"
+        path, selected_filter = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "图像另存为",
+            default_name,
+            "JPEG (*.jpg *.jpeg *.jpe *.jfif);;PNG (*.png);;TIFF (*.tif *.tiff)",
+        )
+        if not path:
+            return
+        suffix = Path(path).suffix.lower()
+        if not suffix:
+            if "PNG" in selected_filter:
+                path = f"{path}.png"
+                fmt = "PNG"
+            elif "TIFF" in selected_filter:
+                path = f"{path}.tif"
+                fmt = "TIFF"
+            else:
+                path = f"{path}.jpg"
+                fmt = "JPG"
+        else:
+            fmt = "PNG" if suffix == ".png" else "TIFF" if suffix in {".tif", ".tiff"} else "JPG"
+        if not pixmap.save(path, fmt):
+            QtWidgets.QMessageBox.warning(self, "图像另存为", "图像保存失败，请检查路径和文件格式。")
+            return
+        self.statusBar().showMessage(f"图像已保存到 {path}", 4000)
 
     def _on_view_selected(self, view_key: object, data_x: float, data_y: float) -> None:
         if self.display_data is None or not self._has_processed_result():
