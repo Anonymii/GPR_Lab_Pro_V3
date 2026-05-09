@@ -74,6 +74,72 @@ UI_TEXT = {
         "overview": "总览",
         "explore": "探索",
         "help": "帮助",
+        "new_project": "新建工程",
+        "open_project": "打开工程",
+        "save_project": "保存工程",
+        "load_template": "加载模板",
+        "save_processed_result": "保存处理结果",
+        "online_map_load": "加载在线地图",
+        "online_map_change": "更改在线地图",
+        "online_map_offline": "切回离线地图",
+        "overview_depth": "总览深度",
+        "distance_m": "距离 (m)",
+        "width_m": "宽度 (m)",
+        "time_ns": "时间 (ns)",
+        "trace_line": "道波形",
+        "amplitude": "幅值",
+        "linked_slices": "联动切片",
+        "crossline_slice": "横向切片 (X)",
+        "inline_slice": "纵向切片 (Y)",
+        "horizontal_slice": "水平切片 (Z)",
+        "measure_title": "测量",
+        "measure_length": "长度",
+        "measure_area": "面积",
+        "scan_set_crosshair": "设置十字线",
+        "scan_center_crosshair": "居中到十字线",
+        "scan_fit_display": "适配显示数据",
+        "scan_fit_region": "适配当前区域",
+        "scan_copy_image": "复制图像到剪贴板",
+        "scan_save_image": "图像另存为...",
+        "scan_copy_title": "复制图像",
+        "scan_save_title": "图像另存为",
+        "scan_no_copy_image": "当前视图没有可复制的图像。",
+        "scan_no_save_image": "当前视图没有可保存的图像。",
+        "scan_save_failed": "图像保存失败，请检查路径和文件格式。",
+        "scan_fit_display_done": "已适配显示数据。",
+        "scan_fit_region_done": "已适配当前区域。",
+        "scan_center_done": "已居中到十字线。",
+        "scan_image_copied": "{view} 图像已复制到剪贴板。",
+        "scan_image_saved": "图像已保存到 {path}",
+        "scan_view_bscan": "B-scan",
+        "scan_view_width": "宽度切片",
+        "scan_view_cscan": "C-scan",
+        "scan_view_trace": "道波形",
+        "scan_view_generic": "扫描图",
+        "measurement_on": "测量模式：单击添加折点，双击完成，Esc 清空。",
+        "measurement_off": "测量模式已关闭。",
+        "measurement_done": "测量完成。单击可重新开始，Esc 清空。",
+        "language_prompt": "选择界面语言",
+        "language_updated": "界面语言已切换。",
+        "overview_tool_select": "选择",
+        "overview_tool_pan": "平移",
+        "overview_tool_move": "移动",
+        "overview_tool_zoom": "缩放",
+        "overview_tool_measure": "测量",
+        "overview_tool_modify_track": "修正轨迹",
+        "overview_tool_annotate": "标注",
+        "overview_tool_crosshair": "显示十字线",
+        "overview_tool_layers": "图层",
+        "overview_tool_view_finder": "视图定位器",
+        "explore_tool_pan": "平移",
+        "explore_tool_zoom": "缩放",
+        "explore_tool_measure": "测量",
+        "explore_tool_trace_interface": "界面追踪",
+        "explore_tool_crosshair": "显示十字线",
+        "explore_tool_hyperbola": "显示双曲线",
+        "explore_tool_time_ground": "显示地面时间标记",
+        "explore_tool_headers": "显示头信息",
+        "explore_tool_dual_axis": "双深度轴",
     },
     "en": {
         "file": "File",
@@ -114,6 +180,72 @@ UI_TEXT = {
         "overview": "Overview",
         "explore": "Explore",
         "help": "Help",
+        "new_project": "New Project",
+        "open_project": "Open Project",
+        "save_project": "Save Project",
+        "load_template": "Load Template",
+        "save_processed_result": "Save Processed Result",
+        "online_map_load": "Load Online Map",
+        "online_map_change": "Change Online Map",
+        "online_map_offline": "Switch to Offline Map",
+        "overview_depth": "Overview Depth",
+        "distance_m": "Distance (m)",
+        "width_m": "Width (m)",
+        "time_ns": "Time (ns)",
+        "trace_line": "Trace line",
+        "amplitude": "Amplitude",
+        "linked_slices": "Linked Slices",
+        "crossline_slice": "Crossline slice (X)",
+        "inline_slice": "Inline slice (Y)",
+        "horizontal_slice": "Horizontal slice (Z)",
+        "measure_title": "Measure",
+        "measure_length": "Length",
+        "measure_area": "Area",
+        "scan_set_crosshair": "Set Crosshair",
+        "scan_center_crosshair": "Center View On Crosshair",
+        "scan_fit_display": "Fit Overview to Displayed Data",
+        "scan_fit_region": "Fit Overview To Region",
+        "scan_copy_image": "Copy Image to Clipboard",
+        "scan_save_image": "Save Image As...",
+        "scan_copy_title": "Copy Image",
+        "scan_save_title": "Save Image As",
+        "scan_no_copy_image": "The current view has no image to copy.",
+        "scan_no_save_image": "The current view has no image to save.",
+        "scan_save_failed": "Failed to save the image. Please check the path and file format.",
+        "scan_fit_display_done": "Displayed data fitted.",
+        "scan_fit_region_done": "Current region fitted.",
+        "scan_center_done": "Centered on crosshair.",
+        "scan_image_copied": "{view} image copied to clipboard.",
+        "scan_image_saved": "Image saved to {path}",
+        "scan_view_bscan": "B-scan",
+        "scan_view_width": "Width slice",
+        "scan_view_cscan": "C-scan",
+        "scan_view_trace": "Trace line",
+        "scan_view_generic": "Scan view",
+        "measurement_on": "Measurement mode: click to add vertices, double-click to finish, Esc to clear.",
+        "measurement_off": "Measurement mode closed.",
+        "measurement_done": "Measurement completed. Click to restart, Esc to clear.",
+        "language_prompt": "Select UI language",
+        "language_updated": "UI language updated.",
+        "overview_tool_select": "Select",
+        "overview_tool_pan": "Pan",
+        "overview_tool_move": "Move",
+        "overview_tool_zoom": "Zoom",
+        "overview_tool_measure": "Measure",
+        "overview_tool_modify_track": "Modify Track",
+        "overview_tool_annotate": "Annotate",
+        "overview_tool_crosshair": "Show Crosshair",
+        "overview_tool_layers": "Layers",
+        "overview_tool_view_finder": "View Finder",
+        "explore_tool_pan": "Pan",
+        "explore_tool_zoom": "Zoom",
+        "explore_tool_measure": "Measure",
+        "explore_tool_trace_interface": "Trace Interface",
+        "explore_tool_crosshair": "Show Crosshair",
+        "explore_tool_hyperbola": "Show Hyperbola",
+        "explore_tool_time_ground": "Show Timeground Marker",
+        "explore_tool_headers": "Show Headers",
+        "explore_tool_dual_axis": "Dual Depth Axis",
     },
 }
 
@@ -3447,6 +3579,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._localized_widgets: dict[str, QtWidgets.QWidget] = {}
         self._ribbon_groups: dict[str, QtWidgets.QGroupBox] = {}
         self._ribbon_buttons: dict[str, QtWidgets.QToolButton] = {}
+        self._tool_strip_buttons: dict[str, list[QtWidgets.QToolButton]] = {}
         self._ribbon_collapsed = False
         self.display_data: DisplayData | None = None
         self._is_busy = False
@@ -3932,18 +4065,18 @@ class MainWindow(QtWidgets.QMainWindow):
         overview_toolbar.setContentsMargins(0, 0, 0, 0)
         overview_toolbar.setSpacing(8)
         self.btn_overview_load_map = QtWidgets.QToolButton()
-        self.btn_overview_load_map.setText("加载在线地图")
+        self.btn_overview_load_map.setText(self._t("online_map_load"))
         self.btn_overview_load_map.setObjectName("interfaceActionButton")
         self.btn_overview_load_map.clicked.connect(self._load_online_map)
         overview_toolbar.addWidget(self.btn_overview_load_map)
         self.btn_overview_clear_map = QtWidgets.QToolButton()
-        self.btn_overview_clear_map.setText("更改在线地图")
+        self.btn_overview_clear_map.setText(self._t("online_map_change"))
         self.btn_overview_clear_map.setObjectName("interfaceActionButton")
         self.btn_overview_clear_map.clicked.connect(self._change_online_map)
         overview_toolbar.addWidget(self.btn_overview_clear_map)
         overview_toolbar.addSpacing(10)
-        overview_depth_label = QtWidgets.QLabel("Overview 深度")
-        overview_toolbar.addWidget(overview_depth_label)
+        self.overview_depth_label = QtWidgets.QLabel(self._t("overview_depth"))
+        overview_toolbar.addWidget(self.overview_depth_label)
         self.overview_depth_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.overview_depth_slider.setRange(0, 0)
         self.overview_depth_slider.valueChanged.connect(self._on_overview_depth_changed)
@@ -4146,7 +4279,8 @@ class MainWindow(QtWidgets.QMainWindow):
         right_layout.setSpacing(6)
         self.ax_s = None
 
-        slider_group = QtWidgets.QGroupBox("联动切片")
+        self.linked_slice_group = QtWidgets.QGroupBox(self._t("linked_slices"))
+        slider_group = self.linked_slice_group
         slider_group.setMaximumHeight(176)
         slider_layout = QtWidgets.QFormLayout(slider_group)
         slider_layout.setContentsMargins(12, 16, 12, 12)
@@ -4183,9 +4317,12 @@ class MainWindow(QtWidgets.QMainWindow):
         sample_row.setSpacing(4)
         sample_row.addWidget(self.sample_slider, stretch=1)
         sample_row.addWidget(self.sample_value_edit)
-        slider_layout.addRow("横向切片 (X)", trace_row)
-        slider_layout.addRow("纵向切片 (Y)", line_row)
-        slider_layout.addRow("水平切片 (Z)", sample_row)
+        self.crossline_slice_label = QtWidgets.QLabel(self._t("crossline_slice"))
+        self.inline_slice_label = QtWidgets.QLabel(self._t("inline_slice"))
+        self.horizontal_slice_label = QtWidgets.QLabel(self._t("horizontal_slice"))
+        slider_layout.addRow(self.crossline_slice_label, trace_row)
+        slider_layout.addRow(self.inline_slice_label, line_row)
+        slider_layout.addRow(self.horizontal_slice_label, sample_row)
         slider_group.setStyleSheet(
             "QGroupBox { font-size: 12px; font-weight: 700; } "
             "QLabel { font-size: 12px; } "
@@ -4470,16 +4607,16 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(strip)
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(4)
-        self._add_tool_strip_button(layout, "选择", self._tool_icon("select"), callback=lambda: self._set_overview_tool_mode("select"), checkable=True, checked=True)
-        self._add_tool_strip_button(layout, "平移", self._tool_icon("pan"), callback=lambda: self._set_overview_tool_mode("pan"), checkable=True)
-        self._add_tool_strip_button(layout, "移动", self._tool_icon("move"), callback=lambda: self._set_overview_tool_mode("move"), checkable=True)
-        self._add_tool_strip_button(layout, "缩放", self._tool_icon("zoom"), callback=lambda: self._set_overview_tool_mode("zoom"), checkable=True)
-        self.btn_overview_measure = self._add_tool_strip_button(layout, "测量", self._tool_icon("measure"), callback=self._toggle_overview_measure_mode, checkable=True)
-        self._add_tool_strip_button(layout, "修正轨迹", self._tool_icon("modify_track"), callback=lambda: self._set_overview_tool_mode("modify_track"))
-        self._add_tool_strip_button(layout, "标注", self._tool_icon("annotate"), callback=lambda: self._set_overview_tool_mode("annotate"))
-        self._add_tool_strip_button(layout, "显示十字线", self._tool_icon("crosshair"), callback=lambda: self._set_overview_tool_mode("crosshair"), checkable=True)
-        self._add_tool_strip_button(layout, "图层", self._tool_icon("layers"), callback=lambda: self._open_display_settings(initial_task_index=2))
-        self._add_tool_strip_button(layout, "视图定位器", self._tool_icon("view_finder"), callback=lambda: self._set_overview_tool_mode("view_finder"))
+        self._add_tool_strip_button(layout, "overview_tool_select", "选择", self._tool_icon("select"), callback=lambda: self._set_overview_tool_mode("select"), checkable=True, checked=True)
+        self._add_tool_strip_button(layout, "overview_tool_pan", "平移", self._tool_icon("pan"), callback=lambda: self._set_overview_tool_mode("pan"), checkable=True)
+        self._add_tool_strip_button(layout, "overview_tool_move", "移动", self._tool_icon("move"), callback=lambda: self._set_overview_tool_mode("move"), checkable=True)
+        self._add_tool_strip_button(layout, "overview_tool_zoom", "缩放", self._tool_icon("zoom"), callback=lambda: self._set_overview_tool_mode("zoom"), checkable=True)
+        self.btn_overview_measure = self._add_tool_strip_button(layout, "overview_tool_measure", "测量", self._tool_icon("measure"), callback=self._toggle_overview_measure_mode, checkable=True)
+        self._add_tool_strip_button(layout, "overview_tool_modify_track", "修正轨迹", self._tool_icon("modify_track"), callback=lambda: self._set_overview_tool_mode("modify_track"))
+        self._add_tool_strip_button(layout, "overview_tool_annotate", "标注", self._tool_icon("annotate"), callback=lambda: self._set_overview_tool_mode("annotate"))
+        self._add_tool_strip_button(layout, "overview_tool_crosshair", "显示十字线", self._tool_icon("crosshair"), callback=lambda: self._set_overview_tool_mode("crosshair"), checkable=True)
+        self._add_tool_strip_button(layout, "overview_tool_layers", "图层", self._tool_icon("layers"), callback=lambda: self._open_display_settings(initial_task_index=2))
+        self._add_tool_strip_button(layout, "overview_tool_view_finder", "视图定位器", self._tool_icon("view_finder"), callback=lambda: self._set_overview_tool_mode("view_finder"))
         layout.addStretch(1)
         return strip
 
@@ -4489,15 +4626,15 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(strip)
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(4)
-        self._add_tool_strip_button(layout, "平移", self._tool_icon("pan"), callback=lambda: self._set_explore_tool_mode("pan"), checkable=True, checked=True)
-        self._add_tool_strip_button(layout, "缩放", self._tool_icon("zoom"), callback=lambda: self._set_explore_tool_mode("zoom"), checkable=True)
-        self.btn_explore_measure = self._add_tool_strip_button(layout, "测量", self._tool_icon("measure"), callback=self._toggle_explore_measure_mode, checkable=True)
-        self._add_tool_strip_button(layout, "界面追踪", self._tool_icon("trace_interface"), callback=self._show_interface_tracing_panel)
-        self._add_tool_strip_button(layout, "显示十字线", self._tool_icon("crosshair"), callback=lambda: self._set_explore_tool_mode("crosshair"), checkable=True, checked=True)
-        self._add_tool_strip_button(layout, "显示双曲线", self._tool_icon("hyperbola"), callback=lambda: self._set_explore_tool_mode("hyperbola"), checkable=True)
-        self._add_tool_strip_button(layout, "显示地面时间标记", self._tool_icon("time_ground"), callback=lambda: self._set_explore_tool_mode("time_ground"), checkable=True)
-        self._add_tool_strip_button(layout, "显示头信息", self._tool_icon("headers"), callback=lambda: self._set_explore_tool_mode("headers"), checkable=True)
-        self._add_tool_strip_button(layout, "双深度轴", self._tool_icon("dual_axis"), callback=lambda: self._set_explore_tool_mode("dual_axis"), checkable=True)
+        self._add_tool_strip_button(layout, "explore_tool_pan", "平移", self._tool_icon("pan"), callback=lambda: self._set_explore_tool_mode("pan"), checkable=True, checked=True)
+        self._add_tool_strip_button(layout, "explore_tool_zoom", "缩放", self._tool_icon("zoom"), callback=lambda: self._set_explore_tool_mode("zoom"), checkable=True)
+        self.btn_explore_measure = self._add_tool_strip_button(layout, "explore_tool_measure", "测量", self._tool_icon("measure"), callback=self._toggle_explore_measure_mode, checkable=True)
+        self._add_tool_strip_button(layout, "explore_tool_trace_interface", "界面追踪", self._tool_icon("trace_interface"), callback=self._show_interface_tracing_panel)
+        self._add_tool_strip_button(layout, "explore_tool_crosshair", "显示十字线", self._tool_icon("crosshair"), callback=lambda: self._set_explore_tool_mode("crosshair"), checkable=True, checked=True)
+        self._add_tool_strip_button(layout, "explore_tool_hyperbola", "显示双曲线", self._tool_icon("hyperbola"), callback=lambda: self._set_explore_tool_mode("hyperbola"), checkable=True)
+        self._add_tool_strip_button(layout, "explore_tool_time_ground", "显示地面时间标记", self._tool_icon("time_ground"), callback=lambda: self._set_explore_tool_mode("time_ground"), checkable=True)
+        self._add_tool_strip_button(layout, "explore_tool_headers", "显示头信息", self._tool_icon("headers"), callback=lambda: self._set_explore_tool_mode("headers"), checkable=True)
+        self._add_tool_strip_button(layout, "explore_tool_dual_axis", "双深度轴", self._tool_icon("dual_axis"), callback=lambda: self._set_explore_tool_mode("dual_axis"), checkable=True)
         layout.addStretch(1)
         return strip
 
@@ -4511,6 +4648,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _add_tool_strip_button(
         self,
         layout: QtWidgets.QBoxLayout,
+        key: str,
         tooltip: str,
         icon: QtWidgets.QStyle.StandardPixmap | QtGui.QIcon,
         *,
@@ -4526,6 +4664,8 @@ class MainWindow(QtWidgets.QMainWindow):
         button.setToolTip(tooltip)
         button.setCheckable(checkable)
         button.setChecked(checked)
+        button.setProperty("i18n_key", key)
+        self._tool_strip_buttons.setdefault(key, []).append(button)
         if callable(callback):
             button.clicked.connect(callback)
         layout.addWidget(button)
@@ -4729,11 +4869,11 @@ class MainWindow(QtWidgets.QMainWindow):
             widget.set_interaction_mode(mode)
         if self._measurement_mode:
             self._show_measurement_dialog()
-            self.statusBar().showMessage("测量模式：单击添加折点，双击完成，Esc 清空。", 4000)
+            self.statusBar().showMessage(self._t("measurement_on"), 4000)
         else:
             if self._measurement_dialog is not None:
                 self._measurement_dialog.close()
-            self.statusBar().showMessage("测量模式已关闭。", 2500)
+            self.statusBar().showMessage(self._t("measurement_off"), 2500)
 
     def _show_measurement_dialog(self) -> None:
         if self._measurement_dialog is not None and self._measurement_dialog.isVisible():
@@ -4744,15 +4884,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self._update_measurement_dialog()
             return
         dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle("测量")
+        dialog.setWindowTitle(self._t("measure_title"))
         dialog.setModal(False)
         dialog.setWindowFlags(dialog.windowFlags() | QtCore.Qt.Tool | QtCore.Qt.FramelessWindowHint)
         dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
         layout = QtWidgets.QVBoxLayout(dialog)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(2)
-        self._measurement_length_label = QtWidgets.QLabel("Length:      0.000 m")
-        self._measurement_area_label = QtWidgets.QLabel("Area:        0.000 m²")
+        self._measurement_length_label = QtWidgets.QLabel(f"{self._t('measure_length')}:      0.000 m")
+        self._measurement_area_label = QtWidgets.QLabel(f"{self._t('measure_area')}:        0.000 m²")
         label_font = QtGui.QFont("Microsoft YaHei UI", 12)
         self._measurement_length_label.setFont(label_font)
         self._measurement_area_label.setFont(label_font)
@@ -4808,7 +4948,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._measurement_complete[key] = True
         self._apply_measurement_overlay(key)
         self._update_measurement_dialog()
-        self.statusBar().showMessage("测量完成。单击可重新开始，Esc 清空。", 3000)
+        self.statusBar().showMessage(self._t("measurement_done"), 3000)
 
     def _on_overview_measurement_changed(self, length: float, area: float) -> None:
         self._measurement_overview_stats = (float(length), float(area))
@@ -4859,9 +4999,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 points.append(preview)
             length, area = self._measurement_stats(points)
         if self._measurement_length_label is not None:
-            self._measurement_length_label.setText(f"Length: {length:10.3f} m")
+            self._measurement_length_label.setText(f"{self._t('measure_length')}: {length:10.3f} m")
         if self._measurement_area_label is not None:
-            self._measurement_area_label.setText(f"Area:   {area:10.3f} m²")
+            self._measurement_area_label.setText(f"{self._t('measure_area')}:   {area:10.3f} m²")
 
     @staticmethod
     def _measurement_stats(points: list[tuple[float, float]]) -> tuple[float, float]:
@@ -4976,7 +5116,7 @@ class MainWindow(QtWidgets.QMainWindow):
         language, ok = QtWidgets.QInputDialog.getItem(
             self,
             self._t("language_settings"),
-            "选择界面语言 / Select UI language",
+            self._t("language_prompt"),
             ["中文", "English"],
             0 if self._ui_language == "zh" else 1,
             False,
@@ -5000,14 +5140,50 @@ class MainWindow(QtWidgets.QMainWindow):
         for key, button in self._ribbon_buttons.items():
             button.setText(self._t(key))
             button.setToolTip(self._t(key).replace("\n", " "))
+        for key, buttons in self._tool_strip_buttons.items():
+            for button in buttons:
+                button.setToolTip(self._t(key))
         if hasattr(self, "project_title_label"):
             self.project_title_label.setText(self._t("project_explorer"))
         if hasattr(self, "view_tabs"):
             self.view_tabs.setTabText(self._overview_tab_index, self._t("overview"))
             self.view_tabs.setTabText(self._explore_tab_index, self._t("explore"))
+        self._apply_language_to_view_labels()
         self._refresh_file_menu()
+        self._refresh_overview_controls()
         self._update_project_title()
-        self.statusBar().showMessage("界面语言已切换。" if language == "zh" else "UI language updated.", 3000)
+        self.statusBar().showMessage(self._t("language_updated"), 3000)
+
+    def _apply_language_to_view_labels(self) -> None:
+        if hasattr(self, "overview_depth_label"):
+            self.overview_depth_label.setText(self._t("overview_depth"))
+        if hasattr(self, "linked_slice_group"):
+            self.linked_slice_group.setTitle(self._t("linked_slices"))
+        if hasattr(self, "crossline_slice_label"):
+            self.crossline_slice_label.setText(self._t("crossline_slice"))
+        if hasattr(self, "inline_slice_label"):
+            self.inline_slice_label.setText(self._t("inline_slice"))
+        if hasattr(self, "horizontal_slice_label"):
+            self.horizontal_slice_label.setText(self._t("horizontal_slice"))
+        if hasattr(self, "bscan_view"):
+            self.bscan_view.title = self._t("distance_m")
+            self.bscan_view.y_label = self._t("time_ns")
+            self.bscan_view.update()
+        if hasattr(self, "width_view"):
+            self.width_view.title = self._t("width_m")
+            self.width_view.y_label = self._t("time_ns")
+            self.width_view.update()
+        if hasattr(self, "cscan_view"):
+            self.cscan_view.title = self._t("distance_m")
+            self.cscan_view.y_label = self._t("width_m")
+            self.cscan_view.update()
+        if hasattr(self, "trace_view"):
+            self.trace_view.title = self._t("trace_line")
+            self.trace_view.x_label = self._t("amplitude")
+            self.trace_view.update()
+        if self._measurement_dialog is not None:
+            self._measurement_dialog.setWindowTitle(self._t("measure_title"))
+        self._update_measurement_dialog()
 
     def _prepare_pipeline_dialog_geometry(self) -> None:
         if self.pipeline_dialog is None:
@@ -5219,14 +5395,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _refresh_file_menu(self) -> None:
         self.file_menu.clear()
-        self.action_new_project = self.file_menu.addAction("新建工程", self._new_project)
-        self.action_open_project = self.file_menu.addAction("打开工程", self._open_project)
+        self.action_new_project = self.file_menu.addAction(self._t("new_project"), self._new_project)
+        self.action_open_project = self.file_menu.addAction(self._t("open_project"), self._open_project)
         if self.app_controller.project_state.is_open:
-            self.action_save_project = self.file_menu.addAction("保存工程", self._save_project)
+            self.action_save_project = self.file_menu.addAction(self._t("save_project"), self._save_project)
             self.file_menu.addSeparator()
-            self.action_load_template = self.file_menu.addAction("加载模板", self._load_template)
+            self.action_save_processed = self.file_menu.addAction(self._t("save_processed_result"), self._save_processed)
+            self.action_load_template = self.file_menu.addAction(self._t("load_template"), self._load_template)
             self.action_import_data = None
-            self.action_save_processed = None
         else:
             self.action_save_project = None
             self.action_import_data = None
@@ -5408,7 +5584,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._overview_depth_text_editing and not self.overview_depth_value.hasFocus():
             self.overview_depth_value.setText(f"{current * dt_ns:.3f}")
         has_project = self.app_controller.project_state.is_open
-        self.btn_overview_load_map.setText("切回离线地图" if self._overview_map_mode == "online" else "加载在线地图")
+        self.btn_overview_load_map.setText(self._t("online_map_offline") if self._overview_map_mode == "online" else self._t("online_map_load"))
+        self.btn_overview_clear_map.setText(self._t("online_map_change"))
         self.btn_overview_load_map.setEnabled(has_project and not self._is_busy)
         self.btn_overview_clear_map.setEnabled(has_project and not self._is_busy)
         self.overview_depth_slider.setEnabled(sample_count > 0 and not self._is_busy)
@@ -7806,18 +7983,18 @@ class MainWindow(QtWidgets.QMainWindow):
         menu = QtWidgets.QMenu(self)
         set_crosshair_action = menu.addAction(
             self._standard_icon(QtWidgets.QStyle.SP_FileDialogNewFolder),
-            "设置十字线",
+            self._t("scan_set_crosshair"),
         )
-        center_action = menu.addAction("居中到十字线")
+        center_action = menu.addAction(self._t("scan_center_crosshair"))
         menu.addSeparator()
         fit_display_action = menu.addAction(
             self._standard_icon(QtWidgets.QStyle.SP_FileDialogContentsView),
-            "适配显示数据",
+            self._t("scan_fit_display"),
         )
-        fit_region_action = menu.addAction("适配当前区域")
+        fit_region_action = menu.addAction(self._t("scan_fit_region"))
         menu.addSeparator()
-        copy_action = menu.addAction("复制图像到剪贴板")
-        save_action = menu.addAction("图像另存为...")
+        copy_action = menu.addAction(self._t("scan_copy_image"))
+        save_action = menu.addAction(self._t("scan_save_image"))
         chosen = menu.exec(global_pos if isinstance(global_pos, QtCore.QPoint) else QtGui.QCursor.pos())
         key = str(view_key)
         if chosen is set_crosshair_action:
@@ -7825,9 +8002,9 @@ class MainWindow(QtWidgets.QMainWindow):
         elif chosen is center_action:
             self._center_scan_view_on_crosshair(key, fallback_x=float(data_x), fallback_y=float(data_y))
         elif chosen is fit_display_action:
-            self._fit_scan_view_to_data(key, "已适配显示数据。")
+            self._fit_scan_view_to_data(key, self._t("scan_fit_display_done"))
         elif chosen is fit_region_action:
-            self._fit_scan_view_to_data(key, "已适配当前区域。")
+            self._fit_scan_view_to_data(key, self._t("scan_fit_region_done"))
         elif chosen is copy_action:
             self._copy_scan_view_image(key)
         elif chosen is save_action:
@@ -7843,11 +8020,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _scan_view_label(self, view_key: str) -> str:
         return {
-            "bscan": "B-scan",
-            "width": "宽度切片",
-            "cscan": "C-scan",
-            "trace": "道波形",
-        }.get(str(view_key), "扫描图")
+            "bscan": self._t("scan_view_bscan"),
+            "width": self._t("scan_view_width"),
+            "cscan": self._t("scan_view_cscan"),
+            "trace": self._t("scan_view_trace"),
+        }.get(str(view_key), self._t("scan_view_generic"))
 
     def _fit_scan_view_to_data(self, view_key: str, message: str) -> None:
         widget = self._scan_view_widget(view_key)
@@ -7864,7 +8041,7 @@ class MainWindow(QtWidgets.QMainWindow):
         data_x, data_y = self._current_crosshair_for_view(view_key, fallback_x=fallback_x, fallback_y=fallback_y)
         widget.center_on(float(data_x), float(data_y))
         self._has_custom_viewport = True
-        self.statusBar().showMessage("已居中到十字线。", 2500)
+        self.statusBar().showMessage(self._t("scan_center_done"), 2500)
 
     def _current_crosshair_for_view(self, view_key: str, *, fallback_x: float, fallback_y: float) -> tuple[float, float]:
         if self.display_data is None:
@@ -7891,10 +8068,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         pixmap = widget.grab()
         if pixmap.isNull():
-            QtWidgets.QMessageBox.warning(self, "复制图像", "当前视图没有可复制的图像。")
+            QtWidgets.QMessageBox.warning(self, self._t("scan_copy_title"), self._t("scan_no_copy_image"))
             return
         QtWidgets.QApplication.clipboard().setPixmap(pixmap)
-        self.statusBar().showMessage(f"{self._scan_view_label(view_key)} 图像已复制到剪贴板。", 3000)
+        self.statusBar().showMessage(self._t("scan_image_copied").format(view=self._scan_view_label(view_key)), 3000)
 
     def _save_scan_view_image(self, view_key: str) -> None:
         widget = self._scan_view_widget(view_key)
@@ -7902,12 +8079,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         pixmap = widget.grab()
         if pixmap.isNull():
-            QtWidgets.QMessageBox.warning(self, "图像另存为", "当前视图没有可保存的图像。")
+            QtWidgets.QMessageBox.warning(self, self._t("scan_save_title"), self._t("scan_no_save_image"))
             return
         default_name = f"{self._scan_view_label(view_key).replace(' ', '_')}.jpg"
         path, selected_filter = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "图像另存为",
+            self._t("scan_save_title"),
             default_name,
             "JPEG (*.jpg *.jpeg *.jpe *.jfif);;PNG (*.png);;TIFF (*.tif *.tiff)",
         )
@@ -7927,9 +8104,9 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             fmt = "PNG" if suffix == ".png" else "TIFF" if suffix in {".tif", ".tiff"} else "JPG"
         if not pixmap.save(path, fmt):
-            QtWidgets.QMessageBox.warning(self, "图像另存为", "图像保存失败，请检查路径和文件格式。")
+            QtWidgets.QMessageBox.warning(self, self._t("scan_save_title"), self._t("scan_save_failed"))
             return
-        self.statusBar().showMessage(f"图像已保存到 {path}", 4000)
+        self.statusBar().showMessage(self._t("scan_image_saved").format(path=path), 4000)
 
     def _on_view_selected(self, view_key: object, data_x: float, data_y: float) -> None:
         if self.display_data is None or not self._has_processed_result():
