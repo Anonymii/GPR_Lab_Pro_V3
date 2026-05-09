@@ -30,6 +30,92 @@ if "MPLCONFIGDIR" not in os.environ:
 
 
 TITLE_FONT = FontProperties(family=["Microsoft YaHei", "SimHei", "Noto Sans CJK SC", "sans-serif"])
+APP_VERSION = "V4.2 Examiner UI Compatibility"
+APP_BASELINE_VERSION = "V4.1"
+
+
+UI_TEXT = {
+    "zh": {
+        "file": "文件",
+        "home": "主页",
+        "view": "视图",
+        "data": "数据",
+        "project_group": "工程",
+        "processing_group": "处理",
+        "view_group": "显示与图层",
+        "tools_group": "工具",
+        "export_group": "导入/导出",
+        "add_3dr": "添加雷达\n文件",
+        "add_geo_image": "添加地理\n影像",
+        "add_region": "添加\n区域",
+        "add_stitching": "添加\n拼接",
+        "add_annotation_group": "添加标注\n分组",
+        "add_interface": "添加\n界面",
+        "region_processing": "区域处理\n设置",
+        "process_selected": "处理选中\n区域",
+        "edit_region_size": "编辑区域\n范围",
+        "display_processing": "显示处理\n设置",
+        "geo_positioning": "地理\n定位",
+        "data_source_info": "数据源\n信息",
+        "overview_layers": "总览\n图层",
+        "overlay_selection": "叠加数据\n选择",
+        "overlay_colors": "叠加\n色表",
+        "toggle_migration": "迁移显示\n切换",
+        "map_service": "地图\n服务",
+        "custom_tms": "自定义\nTMS",
+        "export_project": "导出工程\n数据",
+        "export_overview": "导出总览\n图像",
+        "export_navigation": "导出导航\n数据",
+        "export_interfaces": "导出界面\n点云",
+        "core_samples": "芯样\n标定",
+        "language": "语言",
+        "language_settings": "语言设置",
+        "project_explorer": "工程浏览器",
+        "overview": "总览",
+        "explore": "探索",
+        "help": "帮助",
+    },
+    "en": {
+        "file": "File",
+        "home": "Home",
+        "view": "View",
+        "data": "Data",
+        "project_group": "Project",
+        "processing_group": "Processing",
+        "view_group": "Display / Layers",
+        "tools_group": "Tools",
+        "export_group": "Import / Export",
+        "add_3dr": "Add 3DR\nFile",
+        "add_geo_image": "Add Geo\nImage",
+        "add_region": "Add\nRegion",
+        "add_stitching": "Add\nStitching",
+        "add_annotation_group": "Add Annotation\nGroup",
+        "add_interface": "Add\nInterface",
+        "region_processing": "Region Processing\nSettings",
+        "process_selected": "Process Selected\nRegions",
+        "edit_region_size": "Edit Region\nSize",
+        "display_processing": "Display Processing\nSettings",
+        "geo_positioning": "Geo\nPositioning",
+        "data_source_info": "Data Source\nInformation",
+        "overview_layers": "Overview\nLayers",
+        "overlay_selection": "Overlay\nSelection",
+        "overlay_colors": "Overlay\nColors",
+        "toggle_migration": "Migration\nToggle",
+        "map_service": "Map\nService",
+        "custom_tms": "Custom\nTMS",
+        "export_project": "Export Project\nData",
+        "export_overview": "Export Overview\nImage",
+        "export_navigation": "Export Navigation\nData",
+        "export_interfaces": "Export Interface\nCloud",
+        "core_samples": "Core Sample\nCalibration",
+        "language": "Language",
+        "language_settings": "Language Settings",
+        "project_explorer": "Project Explorer",
+        "overview": "Overview",
+        "explore": "Explore",
+        "help": "Help",
+    },
+}
 
 
 class NewProjectDialog(QtWidgets.QDialog):
@@ -3026,6 +3112,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, app_controller: GPRApplication):
         super().__init__()
         self.app_controller = app_controller
+        self._ui_language = "zh"
+        self._localized_widgets: dict[str, QtWidgets.QWidget] = {}
+        self._ribbon_groups: dict[str, QtWidgets.QGroupBox] = {}
+        self._ribbon_buttons: dict[str, QtWidgets.QToolButton] = {}
+        self._ribbon_collapsed = False
         self.display_data: DisplayData | None = None
         self._is_busy = False
         self._progress_dialog: QtWidgets.QProgressDialog | None = None
@@ -3185,6 +3276,131 @@ class MainWindow(QtWidgets.QMainWindow):
             QFrame#toolbarCard {
                 background: #fcfdfe;
             }
+            QFrame#ribbonFrame {
+                background: #dbe7f3;
+                border: 1px solid #a9bdd2;
+                border-radius: 2px;
+            }
+            QTabWidget#examinerRibbon::pane {
+                border: 1px solid #a9bdd2;
+                background: #dbe7f3;
+                top: -1px;
+            }
+            QTabWidget#examinerRibbon QTabBar::tab {
+                background: transparent;
+                border: none;
+                padding: 2px 15px;
+                margin-right: 1px;
+                color: #1f3852;
+                min-height: 16px;
+            }
+            QTabWidget#examinerRibbon QTabBar::tab:selected {
+                background: transparent;
+                color: #10283e;
+                font-weight: 700;
+            }
+            QToolButton#ribbonFileButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #f9fcff, stop:1 #d7e2ed);
+                border: 1px solid #a9bdd2;
+                border-radius: 3px;
+                padding: 2px 10px;
+                min-width: 70px;
+                max-width: 78px;
+                min-height: 22px;
+                max-height: 26px;
+                font-weight: 700;
+                color: #17324c;
+            }
+            QToolButton#ribbonCollapseButton {
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 2px;
+                padding: 1px 6px;
+                min-width: 28px;
+                max-width: 32px;
+                min-height: 20px;
+                max-height: 24px;
+                color: #314b63;
+                font-weight: 700;
+            }
+            QToolButton#ribbonCollapseButton:hover {
+                background: #fff7d9;
+                border-color: #d9a441;
+            }
+            QGroupBox#ribbonGroup {
+                background: #eef5fc;
+                border: 1px solid #c1d1e1;
+                border-radius: 3px;
+                margin-top: 2px;
+                padding: 2px 2px 13px 2px;
+                font-size: 8pt;
+                color: #49627b;
+                font-weight: 500;
+            }
+            QGroupBox#ribbonGroup::title {
+                subcontrol-origin: margin;
+                subcontrol-position: bottom center;
+                padding: 0 3px;
+                color: #5c7185;
+                background: #eef5fc;
+            }
+            QToolButton#ribbonButton {
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 3px;
+                padding: 1px 3px 2px 3px;
+                min-width: 56px;
+                max-width: 70px;
+                min-height: 48px;
+                max-height: 50px;
+                font-weight: 500;
+                font-size: 8pt;
+                color: #27445f;
+            }
+            QToolButton#ribbonButton:hover {
+                background: #fff7d9;
+                border-color: #d9a441;
+            }
+            QToolButton#ribbonButton:pressed {
+                background: #f4dc93;
+                border-color: #b88524;
+            }
+            QToolButton#viewToolButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #ffffff, stop:1 #d9e6f2);
+                border: 1px solid #9fb4c8;
+                border-radius: 3px;
+                padding: 2px;
+                min-width: 30px;
+                max-width: 30px;
+                min-height: 30px;
+                max-height: 30px;
+            }
+            QToolButton#viewToolButton:checked, QToolButton#viewToolButton:hover {
+                background: #ffe7a3;
+                border-color: #c58b22;
+            }
+            QFrame#projectExplorerPanel {
+                background: #f5f8fb;
+                border: 1px solid #a9bdd2;
+                border-radius: 3px;
+            }
+            QToolButton#projectPanelToggleButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #f8fbfe, stop:1 #d7e4f0);
+                border: 1px solid #9fb4c8;
+                border-radius: 3px;
+                padding: 0;
+                min-width: 22px;
+                max-width: 22px;
+                min-height: 22px;
+                max-height: 22px;
+            }
+            QToolButton#projectPanelToggleButton:hover {
+                background: #fff1bf;
+                border-color: #d3a141;
+            }
             QDialog#pipelineDialog, QDialog#displayDialog, QProgressDialog#progressDialog {
                 background: #eef1f4;
             }
@@ -3224,11 +3440,13 @@ class MainWindow(QtWidgets.QMainWindow):
             }
             QLabel {
                 color: #2a3744;
+                background: transparent;
             }
             QLabel#panelTitle {
-                font-size: 16px;
+                font-size: 13px;
                 font-weight: 700;
                 color: #273442;
+                background: transparent;
             }
             QLabel#panelSubtitle {
                 color: #7a8591;
@@ -3297,61 +3515,45 @@ class MainWindow(QtWidgets.QMainWindow):
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         root_layout = QtWidgets.QVBoxLayout(central)
-        root_layout.setContentsMargins(12, 12, 12, 12)
-        root_layout.setSpacing(10)
+        root_layout.setContentsMargins(2, 2, 2, 2)
+        root_layout.setSpacing(4)
 
-        toolbar_card = QtWidgets.QFrame()
-        toolbar_card.setObjectName("toolbarCard")
-        root_layout.addWidget(toolbar_card)
-        top_bar = QtWidgets.QHBoxLayout(toolbar_card)
-        top_bar.setContentsMargins(12, 10, 12, 10)
-        top_bar.setSpacing(10)
-
+        ribbon_frame = self._build_examiner_ribbon()
+        root_layout.addWidget(ribbon_frame)
         self.file_button = QtWidgets.QToolButton()
-        self.file_button.setText("文件")
+        self.file_button.setObjectName("ribbonFileButton")
+        self.file_button.setText(self._t("file"))
         self.file_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         self.file_menu = QtWidgets.QMenu(self)
         self.file_button.setMenu(self.file_menu)
-        top_bar.addWidget(self.file_button)
-
-        self.btn_pipeline_panel = QtWidgets.QPushButton("处理流程设置")
-        self.btn_pipeline_panel.clicked.connect(self._open_pipeline_settings)
-        top_bar.addWidget(self.btn_pipeline_panel)
-
-        self.btn_display_settings = QtWidgets.QPushButton("显示设置")
-        self.btn_display_settings.clicked.connect(self._open_display_settings)
-        top_bar.addWidget(self.btn_display_settings)
-
-        self.btn_start = QtWidgets.QPushButton("开始处理")
-        self.btn_start.setObjectName("primaryAction")
-        self.btn_start.clicked.connect(self._start_processing)
-        top_bar.addWidget(self.btn_start)
-
-        self.btn_help = QtWidgets.QPushButton("帮助")
-        self.btn_help.clicked.connect(self._open_help_dir)
-        top_bar.addWidget(self.btn_help)
-        top_bar.addStretch(1)
-        self._apply_soft_shadow(toolbar_card, blur_radius=18, y_offset=3, alpha=20)
+        self.ribbon_tabs.setCornerWidget(self.file_button, QtCore.Qt.TopLeftCorner)
+        self.btn_pipeline_panel = self._ribbon_buttons["region_processing"]
+        self.btn_display_settings = self._ribbon_buttons["display_processing"]
+        self.btn_start = self._ribbon_buttons["process_selected"]
+        self.btn_help = self._ribbon_buttons["help"]
+        self._apply_soft_shadow(ribbon_frame, blur_radius=14, y_offset=2, alpha=16)
 
         self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         root_layout.addWidget(self.main_splitter, stretch=1)
 
         self.project_panel = QtWidgets.QFrame()
-        self.project_panel.setObjectName("sideCard")
+        self.project_panel.setObjectName("projectExplorerPanel")
         project_layout = QtWidgets.QVBoxLayout(self.project_panel)
-        project_layout.setContentsMargins(10, 10, 10, 10)
-        project_layout.setSpacing(8)
+        project_layout.setContentsMargins(8, 8, 8, 8)
+        project_layout.setSpacing(6)
         project_header = QtWidgets.QHBoxLayout()
         project_header.setContentsMargins(0, 0, 0, 0)
-        project_header.setSpacing(6)
-        self.project_title_label = QtWidgets.QLabel("工程")
+        project_header.setSpacing(4)
+        self.project_title_label = QtWidgets.QLabel(self._t("project_explorer"))
         self.project_title_label.setObjectName("panelTitle")
         project_header.addWidget(self.project_title_label)
         project_header.addStretch(1)
         self.project_panel_toggle = QtWidgets.QToolButton()
-        self.project_panel_toggle.setText("◀")
+        self.project_panel_toggle.setObjectName("projectPanelToggleButton")
+        self.project_panel_toggle.setArrowType(QtCore.Qt.LeftArrow)
+        self.project_panel_toggle.setToolTip("收起工程浏览器")
         self.project_panel_toggle.setAutoRaise(False)
-        self.project_panel_toggle.setFixedSize(28, 28)
+        self.project_panel_toggle.setFixedSize(22, 22)
         self.project_panel_toggle.clicked.connect(self._toggle_project_panel)
         project_header.addWidget(self.project_panel_toggle)
         project_layout.addLayout(project_header)
@@ -3415,8 +3617,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.overview_map.setStyleSheet("background: #fafbfc; border: 1px solid #d0d7df; border-radius: 14px;")
         self.overview_map.region_activated.connect(self._on_overview_region_activated)
         self.overview_map.point_selected.connect(self._on_overview_point_selected)
-        overview_layout.addWidget(self.overview_map, stretch=1)
-        self._overview_tab_index = self.view_tabs.addTab(overview_panel, "Overview")
+        overview_body = QtWidgets.QHBoxLayout()
+        overview_body.setContentsMargins(0, 0, 0, 0)
+        overview_body.setSpacing(6)
+        overview_body.addWidget(self._build_overview_tool_strip())
+        overview_body.addWidget(self.overview_map, stretch=1)
+        overview_layout.addLayout(overview_body, stretch=1)
+        self._overview_tab_index = self.view_tabs.addTab(overview_panel, self._t("overview"))
 
         explore_panel = QtWidgets.QFrame()
         explore_panel.setObjectName("viewCard")
@@ -3505,6 +3712,15 @@ class MainWindow(QtWidgets.QMainWindow):
             button.setFixedHeight(26)
         interface_row.addStretch(1)
         explore_layout.addLayout(interface_row)
+        explore_body = QtWidgets.QHBoxLayout()
+        explore_body.setContentsMargins(0, 0, 0, 0)
+        explore_body.setSpacing(6)
+        explore_body.addWidget(self._build_explore_tool_strip())
+        explore_slices = QtWidgets.QVBoxLayout()
+        explore_slices.setContentsMargins(0, 0, 0, 0)
+        explore_slices.setSpacing(8)
+        explore_body.addLayout(explore_slices, stretch=1)
+        explore_layout.addLayout(explore_body, stretch=1)
         top_row = QtWidgets.QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
         top_row.setSpacing(10)
@@ -3537,7 +3753,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.trace_view.setStyleSheet("background: #fafbfc; border: 1px solid #d0d7df; border-radius: 14px;")
         top_row.addWidget(self.trace_view, stretch=14)
-        explore_layout.addLayout(top_row, stretch=8)
+        explore_slices.addLayout(top_row, stretch=8)
 
         bottom_row = QtWidgets.QHBoxLayout()
         bottom_row.setContentsMargins(0, 0, 0, 0)
@@ -3621,9 +3837,9 @@ class MainWindow(QtWidgets.QMainWindow):
         info_group.setStyleSheet("QGroupBox { font-size: 10px; } QTextBrowser { font-size: 10px; }")
         right_layout.addWidget(info_group, stretch=1)
         bottom_row.addWidget(bottom_right_panel, stretch=28)
-        explore_layout.addLayout(bottom_row, stretch=2)
+        explore_slices.addLayout(bottom_row, stretch=2)
 
-        self._explore_tab_index = self.view_tabs.addTab(explore_panel, "Explore")
+        self._explore_tab_index = self.view_tabs.addTab(explore_panel, self._t("explore"))
         self.view_tabs.currentChanged.connect(self._on_view_tab_changed)
         self.main_splitter.addWidget(self.view_tabs)
         self._apply_soft_shadow(explore_panel)
@@ -3693,18 +3909,332 @@ class MainWindow(QtWidgets.QMainWindow):
             self._project_panel_last_width = max(200, current)
             self.project_tree.hide()
             self.project_title_label.hide()
+            self.project_panel_toggle.setArrowType(QtCore.Qt.RightArrow)
+            self.project_panel_toggle.setToolTip("展开工程浏览器")
             self.project_panel.setMinimumWidth(36)
             self.project_panel.setMaximumWidth(36)
-            self.project_panel_toggle.setText("▶")
             self.main_splitter.setSizes([36, max(self.main_splitter.width() - 36, 1)])
         else:
             self.project_tree.show()
             self.project_title_label.show()
+            self.project_panel_toggle.setArrowType(QtCore.Qt.LeftArrow)
+            self.project_panel_toggle.setToolTip("收起工程浏览器")
             self.project_panel.setMinimumWidth(200)
             self.project_panel.setMaximumWidth(16777215)
-            self.project_panel_toggle.setText("◀")
             width = max(200, self._project_panel_last_width)
             self.main_splitter.setSizes([width, max(self.main_splitter.width() - width, 1)])
+
+    def _t(self, key: str) -> str:
+        language = self._ui_language if self._ui_language in UI_TEXT else "zh"
+        return UI_TEXT[language].get(key, UI_TEXT["zh"].get(key, key))
+
+    def _standard_icon(self, icon: QtWidgets.QStyle.StandardPixmap) -> QtGui.QIcon:
+        return self.style().standardIcon(icon)
+
+    def _build_examiner_ribbon(self) -> QtWidgets.QFrame:
+        ribbon_frame = QtWidgets.QFrame()
+        ribbon_frame.setObjectName("ribbonFrame")
+        ribbon_frame.setMaximumHeight(94)
+        ribbon_frame.setMinimumHeight(86)
+        ribbon_layout = QtWidgets.QVBoxLayout(ribbon_frame)
+        ribbon_layout.setContentsMargins(0, 0, 0, 0)
+        ribbon_layout.setSpacing(0)
+
+        self.ribbon_tabs = QtWidgets.QTabWidget()
+        self.ribbon_tabs.setObjectName("examinerRibbon")
+        self.ribbon_tabs.setDocumentMode(True)
+        self.ribbon_tabs.setTabPosition(QtWidgets.QTabWidget.North)
+        self.ribbon_tabs.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.ribbon_tabs.tabBar().setFocusPolicy(QtCore.Qt.NoFocus)
+        self.ribbon_tabs.tabBar().setDrawBase(False)
+        self.ribbon_tabs.setMaximumHeight(92)
+        ribbon_layout.addWidget(self.ribbon_tabs)
+
+        home_tab = QtWidgets.QWidget()
+        home_layout = QtWidgets.QHBoxLayout(home_tab)
+        home_layout.setContentsMargins(3, 3, 3, 3)
+        home_layout.setSpacing(3)
+        home_layout.addWidget(
+            self._build_ribbon_group(
+                "project_group",
+                [
+                    ("add_3dr", QtWidgets.QStyle.SP_DialogOpenButton, self._load_data),
+                    ("add_geo_image", QtWidgets.QStyle.SP_FileDialogDetailedView, lambda: self._show_feature_placeholder("添加地理影像", "地图影像与 world file 导入接口已预留。")),
+                    ("add_region", QtWidgets.QStyle.SP_FileDialogNewFolder, self._add_region_from_ribbon),
+                    ("add_stitching", QtWidgets.QStyle.SP_ArrowRight, lambda: self._show_feature_placeholder("添加拼接", "拼接向导接口已预留：矩形/曲线、区域勾选、分辨率与左右宽度。")),
+                    ("add_annotation_group", QtWidgets.QStyle.SP_DialogYesButton, lambda: self._show_feature_placeholder("添加标注分组", "标注分组、点/线标注和 caption 图层将在工程树模型中补齐。")),
+                    ("add_interface", QtWidgets.QStyle.SP_DialogApplyButton, self._create_interface),
+                ],
+            )
+        )
+        home_layout.addWidget(
+            self._build_ribbon_group(
+                "processing_group",
+                [
+                    ("region_processing", QtWidgets.QStyle.SP_FileDialogContentsView, self._open_pipeline_settings),
+                    ("process_selected", QtWidgets.QStyle.SP_MediaPlay, self._start_processing),
+                    ("edit_region_size", QtWidgets.QStyle.SP_FileDialogListView, self._edit_active_region_size),
+                    ("display_processing", QtWidgets.QStyle.SP_ComputerIcon, self._open_display_settings),
+                    ("geo_positioning", QtWidgets.QStyle.SP_DriveNetIcon, lambda: self._show_feature_placeholder("地理定位", "内部 GPS、外部 NMEA、批量用户输入、设备 offset 与坐标系选择接口已预留。")),
+                    ("data_source_info", QtWidgets.QStyle.SP_MessageBoxInformation, self._show_data_source_information),
+                ],
+            )
+        )
+        home_layout.addStretch(1)
+
+        view_tab = QtWidgets.QWidget()
+        view_layout = QtWidgets.QHBoxLayout(view_tab)
+        view_layout.setContentsMargins(3, 3, 3, 3)
+        view_layout.setSpacing(3)
+        view_layout.addWidget(
+            self._build_ribbon_group(
+                "view_group",
+                [
+                    ("overview_layers", QtWidgets.QStyle.SP_FileDialogInfoView, lambda: self._show_feature_placeholder("总览图层", "文件、区域、地图、标注、标注标题、任务结果与界面叠加图层面板已预留。")),
+                    ("overlay_selection", QtWidgets.QStyle.SP_ArrowDown, lambda: self._show_feature_placeholder("叠加数据选择", "界面深度、epsilon、confidence 和任务输出矩阵的叠加选择接口已预留。")),
+                    ("overlay_colors", QtWidgets.QStyle.SP_DialogResetButton, lambda: self._show_feature_placeholder("叠加色表", "固定范围色表、阈值色表和透明度滑条接口已预留。")),
+                    ("toggle_migration", QtWidgets.QStyle.SP_BrowserReload, lambda: self._show_feature_placeholder("迁移显示切换", "迁移/未迁移显示快速切换入口已预留。")),
+                ],
+            )
+        )
+        view_layout.addWidget(
+            self._build_ribbon_group(
+                "tools_group",
+                [
+                    ("map_service", QtWidgets.QStyle.SP_DriveNetIcon, self._load_online_map),
+                    ("custom_tms", QtWidgets.QStyle.SP_DirLinkIcon, lambda: self._show_feature_placeholder("自定义 TMS", "国产化地图服务、离线瓦片与 {Z}/{X}/{Y}/{-Y} TMS 模板配置入口已预留。")),
+                    ("language_settings", QtWidgets.QStyle.SP_FileDialogInfoView, self._show_language_settings),
+                    ("help", QtWidgets.QStyle.SP_DialogHelpButton, self._open_help_dir),
+                ],
+            )
+        )
+        view_layout.addStretch(1)
+
+        data_tab = QtWidgets.QWidget()
+        data_layout = QtWidgets.QHBoxLayout(data_tab)
+        data_layout.setContentsMargins(3, 3, 3, 3)
+        data_layout.setSpacing(3)
+        data_layout.addWidget(
+            self._build_ribbon_group(
+                "export_group",
+                [
+                    ("export_project", QtWidgets.QStyle.SP_DialogSaveButton, self._save_processed),
+                    ("export_overview", QtWidgets.QStyle.SP_FileIcon, lambda: self._show_feature_placeholder("导出总览图像", "总览截图、world file、KMZ/DXF 导出接口已预留。")),
+                    ("export_navigation", QtWidgets.QStyle.SP_DriveHDIcon, lambda: self._show_feature_placeholder("导出导航数据", "导航数据 TSV 导入/导出接口已预留。")),
+                    ("export_interfaces", QtWidgets.QStyle.SP_DirIcon, lambda: self._show_feature_placeholder("导出界面点云", "界面点云、深度/epsilon/confidence 属性导出接口已预留。")),
+                    ("core_samples", QtWidgets.QStyle.SP_DialogApplyButton, lambda: self._show_feature_placeholder("芯样标定", "芯样 epsilon 标定向导接口已预留。")),
+                ],
+            )
+        )
+        data_layout.addStretch(1)
+
+        self._home_tab_index = self.ribbon_tabs.addTab(home_tab, self._t("home"))
+        self._view_ribbon_tab_index = self.ribbon_tabs.addTab(view_tab, self._t("view"))
+        self._data_ribbon_tab_index = self.ribbon_tabs.addTab(data_tab, self._t("data"))
+        self.ribbon_collapse_button = QtWidgets.QToolButton()
+        self.ribbon_collapse_button.setObjectName("ribbonCollapseButton")
+        self.ribbon_collapse_button.setText("⌃")
+        self.ribbon_collapse_button.setToolTip("折叠功能区")
+        self.ribbon_collapse_button.clicked.connect(self._toggle_ribbon_collapsed)
+        self.ribbon_tabs.setCornerWidget(self.ribbon_collapse_button, QtCore.Qt.TopRightCorner)
+        return ribbon_frame
+
+    def _toggle_ribbon_collapsed(self) -> None:
+        self._set_ribbon_collapsed(not self._ribbon_collapsed)
+
+    def _set_ribbon_collapsed(self, collapsed: bool) -> None:
+        self._ribbon_collapsed = bool(collapsed)
+        if collapsed:
+            self.ribbon_tabs.setMaximumHeight(32)
+            self.ribbon_tabs.setMinimumHeight(32)
+            parent = self.ribbon_tabs.parentWidget()
+            if parent is not None:
+                parent.setMaximumHeight(34)
+                parent.setMinimumHeight(32)
+            self.ribbon_collapse_button.setText("⌄")
+            self.ribbon_collapse_button.setToolTip("展开功能区")
+        else:
+            self.ribbon_tabs.setMaximumHeight(92)
+            self.ribbon_tabs.setMinimumHeight(0)
+            parent = self.ribbon_tabs.parentWidget()
+            if parent is not None:
+                parent.setMaximumHeight(94)
+                parent.setMinimumHeight(86)
+            self.ribbon_collapse_button.setText("⌃")
+            self.ribbon_collapse_button.setToolTip("折叠功能区")
+        self.updateGeometry()
+
+    def _build_ribbon_group(
+        self,
+        text_key: str,
+        buttons: list[tuple[str, QtWidgets.QStyle.StandardPixmap, object]],
+    ) -> QtWidgets.QGroupBox:
+        group = QtWidgets.QGroupBox(self._t(text_key))
+        group.setObjectName("ribbonGroup")
+        self._ribbon_groups[text_key] = group
+        group.setMaximumHeight(68)
+        group.setMinimumHeight(64)
+        layout = QtWidgets.QHBoxLayout(group)
+        layout.setContentsMargins(1, 1, 1, 12)
+        layout.setSpacing(1)
+        for key, icon, callback in buttons:
+            button = self._make_ribbon_button(key, icon, callback)
+            layout.addWidget(button)
+        return group
+
+    def _make_ribbon_button(
+        self,
+        key: str,
+        icon: QtWidgets.QStyle.StandardPixmap,
+        callback: object,
+    ) -> QtWidgets.QToolButton:
+        button = QtWidgets.QToolButton()
+        button.setObjectName("ribbonButton")
+        button.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+        button.setIcon(self._standard_icon(icon))
+        button.setIconSize(QtCore.QSize(20, 20))
+        button.setFixedHeight(50)
+        button.setText(self._t(key))
+        button.setToolTip(self._t(key).replace("\n", " "))
+        if callable(callback):
+            button.clicked.connect(callback)
+        self._ribbon_buttons[key] = button
+        return button
+
+    def _build_overview_tool_strip(self) -> QtWidgets.QWidget:
+        strip = QtWidgets.QFrame()
+        strip.setObjectName("overviewToolStrip")
+        layout = QtWidgets.QVBoxLayout(strip)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(4)
+        self._add_tool_strip_button(layout, "选择", QtWidgets.QStyle.SP_ArrowUp, checkable=True)
+        self._add_tool_strip_button(layout, "平移", QtWidgets.QStyle.SP_ArrowRight, checkable=True, checked=True)
+        self._add_tool_strip_button(layout, "移动", QtWidgets.QStyle.SP_DialogOpenButton, callback=lambda: self._show_feature_placeholder("移动对象", "总览中的文件/区域拖拽移动接口已预留。"))
+        self._add_tool_strip_button(layout, "轨迹", QtWidgets.QStyle.SP_BrowserReload, callback=lambda: self._show_feature_placeholder("修正轨迹", "Modify Track 导航轨迹修正工具接口已预留。"))
+        self._add_tool_strip_button(layout, "测量", QtWidgets.QStyle.SP_FileDialogDetailedView, callback=lambda: self._show_feature_placeholder("测量工具", "距离与面积测量工具接口已预留。"))
+        self._add_tool_strip_button(layout, "图层", QtWidgets.QStyle.SP_FileDialogInfoView, callback=lambda: self._show_feature_placeholder("总览图层", "Overview Layers 面板接口已预留。"))
+        layout.addStretch(1)
+        return strip
+
+    def _build_explore_tool_strip(self) -> QtWidgets.QWidget:
+        strip = QtWidgets.QFrame()
+        strip.setObjectName("exploreToolStrip")
+        layout = QtWidgets.QVBoxLayout(strip)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(4)
+        self._add_tool_strip_button(layout, "平移", QtWidgets.QStyle.SP_ArrowRight, checkable=True, checked=True)
+        self._add_tool_strip_button(layout, "缩放", QtWidgets.QStyle.SP_FileDialogContentsView, checkable=True)
+        self._add_tool_strip_button(layout, "测量", QtWidgets.QStyle.SP_FileDialogDetailedView, callback=lambda: self._show_feature_placeholder("探索测量", "Explore 切片距离/深度测量接口已预留。"))
+        self._add_tool_strip_button(layout, "双曲线", QtWidgets.QStyle.SP_ArrowUp, callback=lambda: self._show_feature_placeholder("双曲线预览", "由 Epsilon、Time Ground 与 Migration 参数驱动的双曲线预览接口已预留。"))
+        self._add_tool_strip_button(layout, "追踪", QtWidgets.QStyle.SP_DialogApplyButton, callback=self._toggle_interface_pick_mode, checkable=True)
+        self._add_tool_strip_button(layout, "擦除", QtWidgets.QStyle.SP_DialogCancelButton, callback=self._clear_interface_point)
+        self._add_tool_strip_button(layout, "绘制", QtWidgets.QStyle.SP_FileDialogNewFolder, callback=lambda: self._show_feature_placeholder("手绘界面", "Draw Interface 与 Snap 模式接口已预留。"))
+        self._add_tool_strip_button(layout, "插值", QtWidgets.QStyle.SP_BrowserReload, callback=self._fill_interface_line)
+        self._add_tool_strip_button(layout, "Epsilon", QtWidgets.QStyle.SP_DialogYesButton, callback=lambda: self._show_feature_placeholder("Epsilon 编辑", "Epsilon 绘制和插值刷接口已预留。"))
+        layout.addStretch(1)
+        return strip
+
+    def _add_tool_strip_button(
+        self,
+        layout: QtWidgets.QBoxLayout,
+        tooltip: str,
+        icon: QtWidgets.QStyle.StandardPixmap,
+        *,
+        callback: object | None = None,
+        checkable: bool = False,
+        checked: bool = False,
+    ) -> QtWidgets.QToolButton:
+        button = QtWidgets.QToolButton()
+        button.setObjectName("viewToolButton")
+        button.setIcon(self._standard_icon(icon))
+        button.setIconSize(QtCore.QSize(20, 20))
+        button.setToolTip(tooltip)
+        button.setCheckable(checkable)
+        button.setChecked(checked)
+        if callable(callback):
+            button.clicked.connect(callback)
+        layout.addWidget(button)
+        return button
+
+    def _add_region_from_ribbon(self) -> None:
+        active_file = self.app_controller.project_controller.get_active_file()
+        active_region = self.app_controller.project_controller.get_active_region()
+        if active_file is None:
+            QtWidgets.QMessageBox.warning(self, "添加区域", "请先添加雷达数据文件。")
+            return
+        base_region_id = active_region.region_id if active_region is not None else None
+        self._create_region(active_file.file_id, base_region_id=base_region_id)
+
+    def _edit_active_region_size(self) -> None:
+        region = self.app_controller.project_controller.get_active_region()
+        if region is None:
+            QtWidgets.QMessageBox.warning(self, "编辑区域范围", "请先在工程浏览器中选择区域。")
+            return
+        self._edit_region_bounds(region.region_id)
+
+    def _show_data_source_information(self) -> None:
+        dataset = self.app_controller.dataset
+        if dataset is None:
+            QtWidgets.QMessageBox.information(self, "数据源信息", "当前尚未导入雷达数据。")
+            return
+        header = dataset.header if isinstance(dataset.header, dict) else {}
+        info_lines = [
+            f"文件名: {dataset.filename}",
+            f"数据规模: {dataset.sample_count} × {dataset.trace_count} × {dataset.line_count}",
+            f"数据属性: {dataset.attribute}",
+            f"默认变换: {dataset.transform_name}",
+            f"采样间隔: {dataset.dt_ns:.6g} ns",
+            f"时间窗: {dataset.tw_ns:.6g} ns",
+        ]
+        if header:
+            start_mhz = float(header.get("start_frequency_hz", 0.0)) / 1e6
+            end_mhz = float(header.get("end_frequency_hz", 0.0)) / 1e6
+            info_lines.append(f"频率范围: {start_mhz:.1f} - {end_mhz:.1f} MHz")
+        QtWidgets.QMessageBox.information(self, "数据源信息", "\n".join(info_lines))
+
+    def _show_feature_placeholder(self, title: str, message: str) -> None:
+        QtWidgets.QMessageBox.information(
+            self,
+            title,
+            f"{message}\n\n该入口属于 {APP_VERSION} 的 3D-Radar Examiner 兼容接口，后续可在不改动主界面的情况下接入具体实现。",
+        )
+
+    def _show_language_settings(self) -> None:
+        language, ok = QtWidgets.QInputDialog.getItem(
+            self,
+            self._t("language_settings"),
+            "选择界面语言 / Select UI language",
+            ["中文", "English"],
+            0 if self._ui_language == "zh" else 1,
+            False,
+        )
+        if not ok:
+            return
+        self._set_ui_language("en" if language == "English" else "zh")
+
+    def _set_ui_language(self, language: str) -> None:
+        if language not in UI_TEXT:
+            return
+        self._ui_language = language
+        if hasattr(self, "file_button"):
+            self.file_button.setText(self._t("file"))
+        if hasattr(self, "ribbon_tabs"):
+            self.ribbon_tabs.setTabText(self._home_tab_index, self._t("home"))
+            self.ribbon_tabs.setTabText(self._view_ribbon_tab_index, self._t("view"))
+            self.ribbon_tabs.setTabText(self._data_ribbon_tab_index, self._t("data"))
+        for key, group in self._ribbon_groups.items():
+            group.setTitle(self._t(key))
+        for key, button in self._ribbon_buttons.items():
+            button.setText(self._t(key))
+            button.setToolTip(self._t(key).replace("\n", " "))
+        if hasattr(self, "project_title_label"):
+            self.project_title_label.setText(self._t("project_explorer"))
+        if hasattr(self, "view_tabs"):
+            self.view_tabs.setTabText(self._overview_tab_index, self._t("overview"))
+            self.view_tabs.setTabText(self._explore_tab_index, self._t("explore"))
+        self._refresh_file_menu()
+        self._update_project_title()
+        self.statusBar().showMessage("界面语言已切换。" if language == "zh" else "UI language updated.", 3000)
 
     def _prepare_pipeline_dialog_geometry(self) -> None:
         if self.pipeline_dialog is None:
@@ -3896,11 +4426,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self.action_import_data = self.file_menu.addAction("导入数据", self._load_data)
             self.action_load_template = self.file_menu.addAction("加载模板", self._load_template)
             self.action_save_processed = self.file_menu.addAction("保存处理结果", self._save_processed)
+            self.file_menu.addAction("数据源信息", self._show_data_source_information)
         else:
             self.action_save_project = None
             self.action_import_data = None
             self.action_load_template = None
             self.action_save_processed = None
+        self.file_menu.addSeparator()
+        language_menu = self.file_menu.addMenu(self._t("language"))
+        chinese_action = language_menu.addAction("中文")
+        chinese_action.setCheckable(True)
+        chinese_action.setChecked(self._ui_language == "zh")
+        chinese_action.triggered.connect(lambda _checked=False: self._set_ui_language("zh"))
+        english_action = language_menu.addAction("English")
+        english_action.setCheckable(True)
+        english_action.setChecked(self._ui_language == "en")
+        english_action.triggered.connect(lambda _checked=False: self._set_ui_language("en"))
+        self.file_menu.addAction(self._t("language_settings"), self._show_language_settings)
 
     def _new_project(self) -> None:
         dialog = NewProjectDialog(self)
@@ -4466,7 +5008,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_project_title(self) -> None:
         project_name = self.app_controller.project_state.name
-        self.setWindowTitle(f"{project_name} - GPR Lab Pro V4")
+        self.setWindowTitle(f"{project_name} - GPR Lab Pro {APP_VERSION}")
         self.status_project.setText(f"工程: {project_name}")
 
     def _refresh_project_tree(self) -> None:
@@ -4483,6 +5025,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for file_item in project_state.files:
             file_node = QtWidgets.QTreeWidgetItem([file_item.name or "未命名文件"])
             file_node.setData(0, QtCore.Qt.UserRole, ("file", file_item.file_id))
+            file_node.setIcon(0, self._standard_icon(QtWidgets.QStyle.SP_DriveHDIcon))
             file_node.setExpanded(True)
             self.project_tree.addTopLevelItem(file_node)
             for region in file_item.regions:
@@ -4491,6 +5034,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 region_text = f"{region.name} [{trace_count}×{line_count}]"
                 region_node = QtWidgets.QTreeWidgetItem([region_text])
                 region_node.setData(0, QtCore.Qt.UserRole, ("region", region.region_id))
+                if self._region_has_processed_result(region.region_id, self._overview_region_preview_by_region.get(region.region_id)):
+                    region_node.setIcon(0, self._standard_icon(QtWidgets.QStyle.SP_DialogApplyButton))
+                else:
+                    region_node.setIcon(0, self._standard_icon(QtWidgets.QStyle.SP_FileDialogDetailedView))
                 file_node.addChild(region_node)
                 if region.region_id == current_region_id:
                     target_item = region_node
@@ -5440,7 +5987,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_display_settings.setEnabled(has_dataset and not self._is_busy)
         self.btn_start.setEnabled(has_project and has_dataset and not self._is_busy)
         self.btn_help.setEnabled(not self._is_busy)
-        self.btn_pipeline_panel.setText("处理流程设置 *" if dirty else "处理流程设置")
+        self.btn_pipeline_panel.setText(f"{self._t('region_processing')} *" if dirty else self._t("region_processing"))
         self.btn_cancel_draft.setEnabled(has_dataset and not self._is_busy)
         self.btn_apply_draft.setEnabled(has_dataset and dirty and not self._is_busy)
         self.btn_save_template.setEnabled(has_dataset and not self._is_busy)
