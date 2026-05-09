@@ -140,6 +140,16 @@ UI_TEXT = {
         "explore_tool_time_ground": "显示地面时间标记",
         "explore_tool_headers": "显示头信息",
         "explore_tool_dual_axis": "双深度轴",
+        "headers_title": "头信息",
+        "headers_no_data": "当前没有可显示的数据头信息。",
+        "headers_dataset": "数据源头",
+        "headers_display": "显示数据",
+        "headers_region": "当前区域",
+        "headers_key": "字段",
+        "headers_value": "值",
+        "headers_updated": "头信息已更新。",
+        "crosshair_shown": "十字线已显示。",
+        "crosshair_hidden": "十字线已隐藏。",
     },
     "en": {
         "file": "File",
@@ -246,6 +256,16 @@ UI_TEXT = {
         "explore_tool_time_ground": "Show Timeground Marker",
         "explore_tool_headers": "Show Headers",
         "explore_tool_dual_axis": "Dual Depth Axis",
+        "headers_title": "Headers",
+        "headers_no_data": "There is no header information to display.",
+        "headers_dataset": "Data Source Header",
+        "headers_display": "Display Data",
+        "headers_region": "Current Region",
+        "headers_key": "Field",
+        "headers_value": "Value",
+        "headers_updated": "Headers updated.",
+        "crosshair_shown": "Crosshair shown.",
+        "crosshair_hidden": "Crosshair hidden.",
     },
 }
 
@@ -3607,6 +3627,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._measurement_dialog: QtWidgets.QDialog | None = None
         self._measurement_length_label: QtWidgets.QLabel | None = None
         self._measurement_area_label: QtWidgets.QLabel | None = None
+        self._show_explore_crosshair = True
+        self._headers_dialog: QtWidgets.QDialog | None = None
+        self._headers_table: QtWidgets.QTreeWidget | None = None
         self._online_map_config = OnlineMapConfigStore.load()
         self._overview_map_mode = "offline"
         self._overview_region_preview_cache: dict[tuple[object, ...], QtGui.QImage] = {}
@@ -4630,10 +4653,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._add_tool_strip_button(layout, "explore_tool_zoom", "缩放", self._tool_icon("zoom"), callback=lambda: self._set_explore_tool_mode("zoom"), checkable=True)
         self.btn_explore_measure = self._add_tool_strip_button(layout, "explore_tool_measure", "测量", self._tool_icon("measure"), callback=self._toggle_explore_measure_mode, checkable=True)
         self._add_tool_strip_button(layout, "explore_tool_trace_interface", "界面追踪", self._tool_icon("trace_interface"), callback=self._show_interface_tracing_panel)
-        self._add_tool_strip_button(layout, "explore_tool_crosshair", "显示十字线", self._tool_icon("crosshair"), callback=lambda: self._set_explore_tool_mode("crosshair"), checkable=True, checked=True)
+        self.btn_explore_crosshair = self._add_tool_strip_button(layout, "explore_tool_crosshair", "显示十字线", self._tool_icon("crosshair"), callback=self._toggle_explore_crosshair, checkable=True, checked=True)
         self._add_tool_strip_button(layout, "explore_tool_hyperbola", "显示双曲线", self._tool_icon("hyperbola"), callback=lambda: self._set_explore_tool_mode("hyperbola"), checkable=True)
         self._add_tool_strip_button(layout, "explore_tool_time_ground", "显示地面时间标记", self._tool_icon("time_ground"), callback=lambda: self._set_explore_tool_mode("time_ground"), checkable=True)
-        self._add_tool_strip_button(layout, "explore_tool_headers", "显示头信息", self._tool_icon("headers"), callback=lambda: self._set_explore_tool_mode("headers"), checkable=True)
+        self.btn_explore_headers = self._add_tool_strip_button(layout, "explore_tool_headers", "显示头信息", self._tool_icon("headers"), callback=self._toggle_headers_panel, checkable=True)
         self._add_tool_strip_button(layout, "explore_tool_dual_axis", "双深度轴", self._tool_icon("dual_axis"), callback=lambda: self._set_explore_tool_mode("dual_axis"), checkable=True)
         layout.addStretch(1)
         return strip
@@ -4810,6 +4833,108 @@ class MainWindow(QtWidgets.QMainWindow):
             painter.drawText(QtCore.QRectF(4, 4, 20, 20), QtCore.Qt.AlignCenter, "i")
         painter.end()
         return QtGui.QIcon(pixmap)
+
+    def _toggle_explore_crosshair(self, checked: bool = True) -> None:
+        self._show_explore_crosshair = bool(checked)
+        if self.display_data is not None:
+            self._refresh_display(self.display_data)
+        self.statusBar().showMessage(self._t("crosshair_shown") if self._show_explore_crosshair else self._t("crosshair_hidden"), 2500)
+
+    def _toggle_headers_panel(self, checked: bool = False) -> None:
+        if checked:
+            self._show_headers_panel()
+        elif self._headers_dialog is not None:
+            self._headers_dialog.close()
+
+    def _show_headers_panel(self) -> None:
+        if self.display_data is None and self.app_controller.dataset is None:
+            QtWidgets.QMessageBox.information(self, self._t("headers_title"), self._t("headers_no_data"))
+            if hasattr(self, "btn_explore_headers"):
+                self.btn_explore_headers.blockSignals(True)
+                self.btn_explore_headers.setChecked(False)
+                self.btn_explore_headers.blockSignals(False)
+            return
+        if self._headers_dialog is not None and self._headers_dialog.isVisible():
+            self._refresh_headers_panel()
+            self._headers_dialog.raise_()
+            self._headers_dialog.activateWindow()
+            return
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(self._t("headers_title"))
+        dialog.setModal(False)
+        dialog.setWindowFlags(dialog.windowFlags() | QtCore.Qt.Tool)
+        dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        dialog.resize(560, 520)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(10, 10, 10, 10)
+        self._headers_table = QtWidgets.QTreeWidget(dialog)
+        self._headers_table.setColumnCount(2)
+        self._headers_table.setAlternatingRowColors(True)
+        self._headers_table.header().setStretchLastSection(True)
+        layout.addWidget(self._headers_table)
+        dialog.destroyed.connect(self._on_headers_dialog_destroyed)
+        self._headers_dialog = dialog
+        self._refresh_headers_panel()
+        dialog.show()
+
+    def _on_headers_dialog_destroyed(self) -> None:
+        self._headers_dialog = None
+        self._headers_table = None
+        if hasattr(self, "btn_explore_headers"):
+            self.btn_explore_headers.blockSignals(True)
+            self.btn_explore_headers.setChecked(False)
+            self.btn_explore_headers.blockSignals(False)
+
+    def _refresh_headers_panel(self) -> None:
+        if self._headers_table is None:
+            return
+        self._headers_table.clear()
+        self._headers_table.setHeaderLabels([self._t("headers_key"), self._t("headers_value")])
+        dataset = self.app_controller.dataset
+        if dataset is not None:
+            dataset_item = QtWidgets.QTreeWidgetItem([self._t("headers_dataset"), ""])
+            self._headers_table.addTopLevelItem(dataset_item)
+            for key, value in sorted(dict(dataset.header).items()):
+                dataset_item.addChild(QtWidgets.QTreeWidgetItem([str(key), self._format_header_value(value)]))
+            dataset_item.addChild(QtWidgets.QTreeWidgetItem(["filename", str(dataset.filename)]))
+            dataset_item.addChild(QtWidgets.QTreeWidgetItem(["transform", str(dataset.transform_name)]))
+            dataset_item.addChild(QtWidgets.QTreeWidgetItem(["attribute", str(dataset.attribute)]))
+        if self.display_data is not None:
+            display_item = QtWidgets.QTreeWidgetItem([self._t("headers_display"), ""])
+            self._headers_table.addTopLevelItem(display_item)
+            for key, value in sorted(dict(self.display_data.meta).items()):
+                display_item.addChild(QtWidgets.QTreeWidgetItem([str(key), self._format_header_value(value)]))
+            display_item.addChild(QtWidgets.QTreeWidgetItem(["trace_info", str(self.display_data.trace_info)]))
+        region = self.app_controller.project_controller.get_active_region()
+        if region is not None:
+            region_item = QtWidgets.QTreeWidgetItem([self._t("headers_region"), ""])
+            self._headers_table.addTopLevelItem(region_item)
+            region_fields = {
+                "name": getattr(region, "name", ""),
+                "trace_start": getattr(region, "trace_start", ""),
+                "trace_stop": getattr(region, "trace_stop", ""),
+                "line_start": getattr(region, "line_start", ""),
+                "line_stop": getattr(region, "line_stop", ""),
+                "sample_start": getattr(region, "sample_start", ""),
+                "sample_stop": getattr(region, "sample_stop", ""),
+            }
+            for key, value in region_fields.items():
+                region_item.addChild(QtWidgets.QTreeWidgetItem([str(key), self._format_header_value(value)]))
+        self._headers_table.expandAll()
+        for column in range(2):
+            self._headers_table.resizeColumnToContents(column)
+        if self._headers_dialog is not None:
+            self._headers_dialog.setWindowTitle(self._t("headers_title"))
+
+    @staticmethod
+    def _format_header_value(value: object) -> str:
+        if isinstance(value, float):
+            return f"{value:.6g}"
+        if isinstance(value, (list, tuple)):
+            return ", ".join(str(item) for item in value[:8]) + ("..." if len(value) > 8 else "")
+        if isinstance(value, dict):
+            return ", ".join(f"{key}={val}" for key, val in list(value.items())[:8])
+        return str(value)
 
     def _set_overview_tool_mode(self, mode: str) -> None:
         if mode != "measure" and self._measurement_mode:
@@ -5181,6 +5306,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.trace_view.title = self._t("trace_line")
             self.trace_view.x_label = self._t("amplitude")
             self.trace_view.update()
+        self._refresh_headers_panel()
         if self._measurement_dialog is not None:
             self._measurement_dialog.setWindowTitle(self._t("measure_title"))
         self._update_measurement_dialog()
@@ -7457,6 +7583,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_selection.setText(self._selection_text(display))
         self._refresh_overview_scene()
         self._refresh_interface_overlays()
+        self._refresh_headers_panel()
 
     def _update_bscan_view(
         self,
@@ -7481,8 +7608,8 @@ class MainWindow(QtWidgets.QMainWindow):
             initial_viewport_x=initial_trace_window,
             initial_viewport_y=(visible_start_ns, visible_end_ns),
             viewport_limit_y=(visible_start_ns, visible_end_ns),
-            vertical_line=(trace_index, "#00c16a"),
-            horizontal_line=(time_ns, "#ff8a00"),
+            vertical_line=(trace_index, "#00c16a") if self._show_explore_crosshair else None,
+            horizontal_line=(time_ns, "#ff8a00") if self._show_explore_crosshair else None,
         )
 
     def _update_crossline_view(
@@ -7511,8 +7638,8 @@ class MainWindow(QtWidgets.QMainWindow):
             show_axes=self.app_controller.display_state.show_axes,
             initial_viewport_y=(visible_start_ns, visible_end_ns),
             viewport_limit_y=(visible_start_ns, visible_end_ns),
-            vertical_line=(float(line_index) - half_width, "#195fbf"),
-            horizontal_line=(time_ns, "#195fbf"),
+            vertical_line=(float(line_index) - half_width, "#195fbf") if self._show_explore_crosshair else None,
+            horizontal_line=(time_ns, "#195fbf") if self._show_explore_crosshair else None,
         )
 
     def _update_cscan_view(
@@ -7534,8 +7661,8 @@ class MainWindow(QtWidgets.QMainWindow):
             reset_view=not self._has_custom_viewport,
             show_axes=self.app_controller.display_state.show_axes,
             initial_viewport_x=initial_trace_window,
-            vertical_line=(trace_index, "#195fbf"),
-            horizontal_line=(line_index, "#195fbf"),
+            vertical_line=(trace_index, "#195fbf") if self._show_explore_crosshair else None,
+            horizontal_line=(line_index, "#195fbf") if self._show_explore_crosshair else None,
         )
 
     def _update_ascan_view(self, display: DisplayData, sample_index: int, time_ns: float) -> None:
@@ -7557,8 +7684,8 @@ class MainWindow(QtWidgets.QMainWindow):
             show_axes=self.app_controller.display_state.show_axes,
             initial_viewport_y=(start_ns, end_ns),
             viewport_limit_y=(start_ns, end_ns),
-            marker=(marker_x, marker_y),
-            horizontal_line=(marker_y, "#195fbf"),
+            marker=(marker_x, marker_y) if self._show_explore_crosshair else None,
+            horizontal_line=(marker_y, "#195fbf") if self._show_explore_crosshair else None,
         )
 
     def _sync_slice_controls(self, display: DisplayData) -> None:
