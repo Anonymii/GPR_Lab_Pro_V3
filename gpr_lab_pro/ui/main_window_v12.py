@@ -2779,7 +2779,7 @@ class TraceViewportWidget(QtWidgets.QWidget):
         view_key: str,
         *,
         title: str,
-        x_label: str = "Amplitude",
+        x_label: str = "幅值",
         margins: tuple[int, int, int, int] = (18, 12, 34, 18),
         allow_pan_x: bool = True,
         allow_pan_y: bool = True,
@@ -3475,20 +3475,28 @@ class MainWindow(QtWidgets.QMainWindow):
                 background: #f4dc93;
                 border-color: #b88524;
             }
-            QToolButton#viewToolButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #ffffff, stop:1 #d9e6f2);
-                border: 1px solid #9fb4c8;
-                border-radius: 3px;
-                padding: 2px;
-                min-width: 30px;
-                max-width: 30px;
-                min-height: 30px;
-                max-height: 30px;
+            QFrame#overviewToolStrip, QFrame#exploreToolStrip {
+                background: #f7f8f8;
+                border: 1px solid #aeb4b8;
+                border-radius: 7px;
             }
-            QToolButton#viewToolButton:checked, QToolButton#viewToolButton:hover {
-                background: #ffe7a3;
-                border-color: #c58b22;
+            QToolButton#viewToolButton {
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 3px;
+                padding: 1px;
+                min-width: 28px;
+                max-width: 28px;
+                min-height: 28px;
+                max-height: 28px;
+            }
+            QToolButton#viewToolButton:hover {
+                background: #e6edf4;
+                border-color: #a4b8c9;
+            }
+            QToolButton#viewToolButton:checked {
+                background: #b8b8b8;
+                border-color: #9c9c9c;
             }
             QFrame#projectExplorerPanel {
                 background: #f5f8fb;
@@ -3835,8 +3843,8 @@ class MainWindow(QtWidgets.QMainWindow):
         top_row.setSpacing(10)
         self.bscan_view = RasterViewportWidget(
             "bscan",
-            title="Distance (m)",
-            y_label="Time (ns)",
+            title="距离 (m)",
+            y_label="时间 (ns)",
             margins=(52, 10, 34, 18),
             allow_zoom_x=True,
             allow_zoom_y=True,
@@ -3845,8 +3853,8 @@ class MainWindow(QtWidgets.QMainWindow):
         top_row.addWidget(self.bscan_view, stretch=90)
         self.width_view = RasterViewportWidget(
             "width",
-            title="Width (m)",
-            y_label="Time (ns)",
+            title="宽度 (m)",
+            y_label="时间 (ns)",
             margins=(28, 8, 30, 16),
             allow_zoom_x=False,
             allow_zoom_y=True,
@@ -3855,14 +3863,14 @@ class MainWindow(QtWidgets.QMainWindow):
         top_row.addWidget(self.width_view, stretch=14)
         self.trace_view = TraceViewportWidget(
             "trace",
-            title="Trace line",
+            title="道波形",
             margins=(20, 8, 30, 16),
             allow_zoom_x=False,
             allow_zoom_y=True,
         )
         self.trace_view.setStyleSheet("background: #fafbfc; border: 1px solid #d0d7df; border-radius: 14px;")
         top_row.addWidget(self.trace_view, stretch=14)
-        explore_slices.addLayout(top_row, stretch=8)
+        explore_slices.addLayout(top_row, stretch=7)
 
         bottom_row = QtWidgets.QHBoxLayout()
         bottom_row.setContentsMargins(0, 0, 0, 0)
@@ -3870,8 +3878,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.cscan_view = RasterViewportWidget(
             "cscan",
-            title="Distance (m)",
-            y_label="Width (m)",
+            title="距离 (m)",
+            y_label="宽度 (m)",
             margins=(52, 10, 34, 22),
             allow_zoom_x=True,
             allow_zoom_y=False,
@@ -3922,31 +3930,17 @@ class MainWindow(QtWidgets.QMainWindow):
         sample_row.setSpacing(4)
         sample_row.addWidget(self.sample_slider, stretch=1)
         sample_row.addWidget(self.sample_value_edit)
-        slider_layout.addRow("Crossline slice (X)", trace_row)
-        slider_layout.addRow("Inline slice (Y)", line_row)
-        slider_layout.addRow("Horizontal slice (Z)", sample_row)
+        slider_layout.addRow("横向切片 (X)", trace_row)
+        slider_layout.addRow("纵向切片 (Y)", line_row)
+        slider_layout.addRow("水平切片 (Z)", sample_row)
         slider_group.setStyleSheet(
             "QGroupBox { font-size: 10px; } "
             "QLabel { font-size: 10px; } "
             "QLineEdit { font-size: 10px; padding: 1px 4px; min-height: 18px; }"
         )
         right_layout.addWidget(slider_group, stretch=1)
-
-        info_group = QtWidgets.QGroupBox("当前设置")
-        info_layout = QtWidgets.QVBoxLayout(info_group)
-        info_layout.setContentsMargins(6, 8, 6, 6)
-        self.trace_info = QtWidgets.QTextBrowser()
-        self.trace_info.setOpenLinks(False)
-        self.trace_info.setReadOnly(True)
-        self.trace_info.setStyleSheet(
-            "padding: 4px; background: #fafbfc; border: 1px solid #d0d7df; "
-            "border-radius: 12px; font-size: 10px;"
-        )
-        info_layout.addWidget(self.trace_info)
-        info_group.setStyleSheet("QGroupBox { font-size: 10px; } QTextBrowser { font-size: 10px; }")
-        right_layout.addWidget(info_group, stretch=1)
         bottom_row.addWidget(bottom_right_panel, stretch=28)
-        explore_slices.addLayout(bottom_row, stretch=2)
+        explore_slices.addLayout(bottom_row, stretch=3)
 
         self._explore_tab_index = self.view_tabs.addTab(explore_panel, self._t("explore"))
         self.view_tabs.currentChanged.connect(self._on_view_tab_changed)
@@ -4217,12 +4211,16 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(strip)
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(4)
-        self._add_tool_strip_button(layout, "选择", QtWidgets.QStyle.SP_ArrowUp, checkable=True)
-        self._add_tool_strip_button(layout, "平移", QtWidgets.QStyle.SP_ArrowRight, checkable=True, checked=True)
-        self._add_tool_strip_button(layout, "移动", QtWidgets.QStyle.SP_DialogOpenButton, callback=lambda: self._show_feature_placeholder("移动对象", "总览中的文件/区域拖拽移动接口已预留。"))
-        self._add_tool_strip_button(layout, "轨迹", QtWidgets.QStyle.SP_BrowserReload, callback=lambda: self._show_feature_placeholder("修正轨迹", "Modify Track 导航轨迹修正工具接口已预留。"))
-        self._add_tool_strip_button(layout, "测量", QtWidgets.QStyle.SP_FileDialogDetailedView, callback=lambda: self._show_feature_placeholder("测量工具", "距离与面积测量工具接口已预留。"))
-        self._add_tool_strip_button(layout, "图层", QtWidgets.QStyle.SP_FileDialogInfoView, callback=lambda: self._show_feature_placeholder("总览图层", "Overview Layers 面板接口已预留。"))
+        self._add_tool_strip_button(layout, "选择", self._tool_icon("select"), callback=lambda: self._set_overview_tool_mode("select"), checkable=True, checked=True)
+        self._add_tool_strip_button(layout, "平移", self._tool_icon("pan"), callback=lambda: self._set_overview_tool_mode("pan"), checkable=True)
+        self._add_tool_strip_button(layout, "移动", self._tool_icon("move"), callback=lambda: self._set_overview_tool_mode("move"), checkable=True)
+        self._add_tool_strip_button(layout, "缩放", self._tool_icon("zoom"), callback=lambda: self._set_overview_tool_mode("zoom"), checkable=True)
+        self._add_tool_strip_button(layout, "测量", self._tool_icon("measure"), callback=lambda: self._set_overview_tool_mode("measure"), checkable=True)
+        self._add_tool_strip_button(layout, "修正轨迹", self._tool_icon("modify_track"), callback=lambda: self._set_overview_tool_mode("modify_track"))
+        self._add_tool_strip_button(layout, "标注", self._tool_icon("annotate"), callback=lambda: self._set_overview_tool_mode("annotate"))
+        self._add_tool_strip_button(layout, "显示十字线", self._tool_icon("crosshair"), callback=lambda: self._set_overview_tool_mode("crosshair"), checkable=True)
+        self._add_tool_strip_button(layout, "图层", self._tool_icon("layers"), callback=lambda: self._open_display_settings(initial_task_index=2))
+        self._add_tool_strip_button(layout, "视图定位器", self._tool_icon("view_finder"), callback=lambda: self._set_overview_tool_mode("view_finder"))
         layout.addStretch(1)
         return strip
 
@@ -4232,23 +4230,30 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(strip)
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(4)
-        self._add_tool_strip_button(layout, "平移", QtWidgets.QStyle.SP_ArrowRight, checkable=True, checked=True)
-        self._add_tool_strip_button(layout, "缩放", QtWidgets.QStyle.SP_FileDialogContentsView, checkable=True)
-        self._add_tool_strip_button(layout, "测量", QtWidgets.QStyle.SP_FileDialogDetailedView, callback=lambda: self._show_feature_placeholder("探索测量", "Explore 切片距离/深度测量接口已预留。"))
-        self._add_tool_strip_button(layout, "双曲线", QtWidgets.QStyle.SP_ArrowUp, callback=lambda: self._show_feature_placeholder("双曲线预览", "由 Epsilon、Time Ground 与 Migration 参数驱动的双曲线预览接口已预留。"))
-        self._add_tool_strip_button(layout, "追踪", QtWidgets.QStyle.SP_DialogApplyButton, callback=self._toggle_interface_pick_mode, checkable=True)
-        self._add_tool_strip_button(layout, "擦除", QtWidgets.QStyle.SP_DialogCancelButton, callback=self._clear_interface_point)
-        self._add_tool_strip_button(layout, "绘制", QtWidgets.QStyle.SP_FileDialogNewFolder, callback=lambda: self._show_feature_placeholder("手绘界面", "Draw Interface 与 Snap 模式接口已预留。"))
-        self._add_tool_strip_button(layout, "插值", QtWidgets.QStyle.SP_BrowserReload, callback=self._fill_interface_line)
-        self._add_tool_strip_button(layout, "Epsilon", QtWidgets.QStyle.SP_DialogYesButton, callback=lambda: self._show_feature_placeholder("Epsilon 编辑", "Epsilon 绘制和插值刷接口已预留。"))
+        self._add_tool_strip_button(layout, "平移", self._tool_icon("pan"), callback=lambda: self._set_explore_tool_mode("pan"), checkable=True, checked=True)
+        self._add_tool_strip_button(layout, "缩放", self._tool_icon("zoom"), callback=lambda: self._set_explore_tool_mode("zoom"), checkable=True)
+        self._add_tool_strip_button(layout, "测量", self._tool_icon("measure"), callback=lambda: self._set_explore_tool_mode("measure"), checkable=True)
+        self._add_tool_strip_button(layout, "界面追踪", self._tool_icon("trace_interface"), callback=self._show_interface_tracing_panel)
+        self._add_tool_strip_button(layout, "显示十字线", self._tool_icon("crosshair"), callback=lambda: self._set_explore_tool_mode("crosshair"), checkable=True, checked=True)
+        self._add_tool_strip_button(layout, "显示双曲线", self._tool_icon("hyperbola"), callback=lambda: self._set_explore_tool_mode("hyperbola"), checkable=True)
+        self._add_tool_strip_button(layout, "显示地面时间标记", self._tool_icon("time_ground"), callback=lambda: self._set_explore_tool_mode("time_ground"), checkable=True)
+        self._add_tool_strip_button(layout, "显示头信息", self._tool_icon("headers"), callback=lambda: self._set_explore_tool_mode("headers"), checkable=True)
+        self._add_tool_strip_button(layout, "双深度轴", self._tool_icon("dual_axis"), callback=lambda: self._set_explore_tool_mode("dual_axis"), checkable=True)
         layout.addStretch(1)
         return strip
+
+    def _add_tool_strip_separator(self, layout: QtWidgets.QBoxLayout) -> None:
+        separator = QtWidgets.QFrame()
+        separator.setFrameShape(QtWidgets.QFrame.HLine)
+        separator.setFrameShadow(QtWidgets.QFrame.Sunken)
+        separator.setFixedHeight(8)
+        layout.addWidget(separator)
 
     def _add_tool_strip_button(
         self,
         layout: QtWidgets.QBoxLayout,
         tooltip: str,
-        icon: QtWidgets.QStyle.StandardPixmap,
+        icon: QtWidgets.QStyle.StandardPixmap | QtGui.QIcon,
         *,
         callback: object | None = None,
         checkable: bool = False,
@@ -4256,8 +4261,9 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> QtWidgets.QToolButton:
         button = QtWidgets.QToolButton()
         button.setObjectName("viewToolButton")
-        button.setIcon(self._standard_icon(icon))
-        button.setIconSize(QtCore.QSize(20, 20))
+        button.setIcon(icon if isinstance(icon, QtGui.QIcon) else self._standard_icon(icon))
+        button.setIconSize(QtCore.QSize(22, 22))
+        button.setFixedSize(28, 28)
         button.setToolTip(tooltip)
         button.setCheckable(checkable)
         button.setChecked(checked)
@@ -4265,6 +4271,227 @@ class MainWindow(QtWidgets.QMainWindow):
             button.clicked.connect(callback)
         layout.addWidget(button)
         return button
+
+    def _tool_icon(self, kind: str) -> QtGui.QIcon:
+        pixmap = QtGui.QPixmap(28, 28)
+        pixmap.fill(QtCore.Qt.transparent)
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.setPen(QtGui.QPen(QtGui.QColor("#1c2d3f"), 2.0))
+        painter.setBrush(QtGui.QColor("#f8fbff"))
+        rect = QtCore.QRectF(3.0, 3.0, 22.0, 22.0)
+        if kind == "select":
+            painter.setBrush(QtGui.QColor("#111827"))
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(8, 6), QtCore.QPointF(21, 14), QtCore.QPointF(8, 22)]))
+        elif kind == "pan":
+            painter.setBrush(QtGui.QColor("#e6b56d"))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#7c5a23"), 1.4))
+            painter.drawRoundedRect(QtCore.QRectF(8, 10, 12, 12), 4, 4)
+            for x in (9.5, 12.0, 14.5, 17.0):
+                painter.drawLine(QtCore.QPointF(x, 6), QtCore.QPointF(x, 14))
+        elif kind == "zoom":
+            painter.setBrush(QtGui.QColor("#d9ecff"))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#2f6fa9"), 2.0))
+            painter.drawEllipse(QtCore.QPointF(12, 12), 7, 7)
+            painter.drawLine(QtCore.QPointF(17, 17), QtCore.QPointF(23, 23))
+        elif kind == "move":
+            painter.setBrush(QtGui.QColor("#dff2d6"))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#5d8d38"), 1.6))
+            painter.drawLine(QtCore.QPointF(14, 5), QtCore.QPointF(14, 23))
+            painter.drawLine(QtCore.QPointF(5, 14), QtCore.QPointF(23, 14))
+            painter.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(14, 4), QtCore.QPointF(10, 9), QtCore.QPointF(18, 9)]))
+            painter.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(14, 24), QtCore.QPointF(10, 19), QtCore.QPointF(18, 19)]))
+            painter.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(4, 14), QtCore.QPointF(9, 10), QtCore.QPointF(9, 18)]))
+            painter.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(24, 14), QtCore.QPointF(19, 10), QtCore.QPointF(19, 18)]))
+        elif kind == "measure":
+            painter.setBrush(QtGui.QColor("#f9d18b"))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#8a5a12"), 1.6))
+            painter.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(7, 21), QtCore.QPointF(21, 21), QtCore.QPointF(7, 7)]))
+            painter.drawLine(QtCore.QPointF(10, 18), QtCore.QPointF(13, 18))
+            painter.drawLine(QtCore.QPointF(10, 15), QtCore.QPointF(15, 15))
+        elif kind == "trace_interface":
+            painter.setPen(QtGui.QPen(QtGui.QColor("#1fb855"), 1.7))
+            painter.drawPolyline(QtGui.QPolygonF([QtCore.QPointF(4, 20), QtCore.QPointF(8, 13), QtCore.QPointF(12, 18), QtCore.QPointF(16, 10), QtCore.QPointF(24, 18)]))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#e04f5f"), 1.5))
+            painter.drawPolyline(QtGui.QPolygonF([QtCore.QPointF(5, 15), QtCore.QPointF(9, 19), QtCore.QPointF(13, 12), QtCore.QPointF(17, 17), QtCore.QPointF(23, 9)]))
+        elif kind == "crosshair":
+            painter.setBrush(QtGui.QColor("#68b9ff"))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#2d78c4"), 1.5))
+            painter.drawRoundedRect(QtCore.QRectF(10, 4, 8, 20), 1.5, 1.5)
+            painter.drawRoundedRect(QtCore.QRectF(4, 10, 20, 8), 1.5, 1.5)
+        elif kind == "hyperbola":
+            painter.setBrush(QtGui.QColor("#79cf54"))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#4e9b31"), 1.5))
+            painter.drawRoundedRect(QtCore.QRectF(10, 4, 8, 20), 1.5, 1.5)
+            painter.drawRoundedRect(QtCore.QRectF(4, 10, 20, 8), 1.5, 1.5)
+        elif kind == "time_ground":
+            painter.setBrush(QtGui.QColor("#ffc94d"))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#e58e00"), 1.5))
+            painter.drawRoundedRect(QtCore.QRectF(10, 4, 8, 20), 1.5, 1.5)
+            painter.drawRoundedRect(QtCore.QRectF(4, 10, 20, 8), 1.5, 1.5)
+        elif kind == "headers":
+            painter.setBrush(QtGui.QColor("#9bc871"))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#5f873d"), 1.5))
+            painter.drawRect(QtCore.QRectF(6, 8, 16, 13))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#cce5b1"), 1.2))
+            painter.drawLine(QtCore.QPointF(8, 11), QtCore.QPointF(20, 11))
+        elif kind == "dual_axis":
+            painter.setBrush(QtGui.QColor("#9bc871"))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#5f873d"), 1.2))
+            painter.drawRect(QtCore.QRectF(5, 7, 7, 16))
+            painter.drawRect(QtCore.QRectF(16, 7, 7, 16))
+            painter.setBrush(QtGui.QColor("#f7f8f8"))
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.drawRect(QtCore.QRectF(12, 7, 4, 16))
+        elif kind in {"add_point", "fill_line"}:
+            painter.setBrush(QtGui.QColor("#d9ecff" if kind == "add_point" else "#cdeeb8"))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#3a70a4" if kind == "add_point" else "#5b8f29"), 1.5))
+            painter.drawRect(QtCore.QRectF(6, 8, 16, 12))
+            painter.drawLine(QtCore.QPointF(14, 6), QtCore.QPointF(14, 24))
+            painter.drawLine(QtCore.QPointF(6, 15), QtCore.QPointF(22, 15))
+        elif kind == "delete_point":
+            painter.setPen(QtGui.QPen(QtGui.QColor("#b23a48"), 3.0))
+            painter.drawLine(QtCore.QPointF(8, 8), QtCore.QPointF(20, 20))
+            painter.drawLine(QtCore.QPointF(20, 8), QtCore.QPointF(8, 20))
+        elif kind == "draw_interface":
+            painter.setPen(QtGui.QPen(QtGui.QColor("#f59e0b"), 2.4))
+            painter.drawPolyline(QtGui.QPolygonF([QtCore.QPointF(5, 18), QtCore.QPointF(10, 11), QtCore.QPointF(15, 17), QtCore.QPointF(22, 9)]))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#6b7280"), 1.6))
+            painter.drawLine(QtCore.QPointF(20, 7), QtCore.QPointF(24, 11))
+        elif kind == "smooth":
+            painter.setBrush(QtGui.QColor("#b7d39b"))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#5f7f3d"), 1.5))
+            painter.drawEllipse(rect)
+            painter.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 2.0))
+            painter.drawArc(QtCore.QRectF(8, 9, 12, 10), 200 * 16, 150 * 16)
+        elif kind == "epsilon":
+            painter.setBrush(QtGui.QColor("#b7d39b"))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#5f7f3d"), 1.5))
+            painter.drawEllipse(rect)
+            painter.setPen(QtGui.QPen(QtGui.QColor("#1f2f42"), 2.0))
+            painter.drawText(QtCore.QRectF(4, 5, 20, 20), QtCore.Qt.AlignCenter, "e")
+        elif kind == "folder_plus":
+            painter.setBrush(QtGui.QColor("#f4c35d"))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#8a5a12"), 1.2))
+            painter.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(4, 10), QtCore.QPointF(11, 10), QtCore.QPointF(13, 13), QtCore.QPointF(24, 13), QtCore.QPointF(21, 22), QtCore.QPointF(4, 22)]))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#2ba84a"), 2.2))
+            painter.drawLine(QtCore.QPointF(21, 6), QtCore.QPointF(21, 16))
+            painter.drawLine(QtCore.QPointF(16, 11), QtCore.QPointF(26, 11))
+        elif kind == "refresh":
+            painter.setPen(QtGui.QPen(QtGui.QColor("#2b8ac6"), 2.0))
+            painter.drawArc(QtCore.QRectF(6, 6, 16, 16), 35 * 16, 280 * 16)
+            painter.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(20, 7), QtCore.QPointF(23, 12), QtCore.QPointF(17, 11)]))
+        elif kind == "layers":
+            painter.setPen(QtGui.QPen(QtGui.QColor("#111827"), 1.6))
+            for y in (8, 14, 20):
+                painter.drawRoundedRect(QtCore.QRectF(6, y, 16, 3), 1, 1)
+        elif kind == "annotate":
+            painter.setPen(QtGui.QPen(QtGui.QColor("#3468d8"), 2.0))
+            painter.setBrush(QtGui.QColor("#6aa9ff"))
+            painter.drawLine(QtCore.QPointF(9, 7), QtCore.QPointF(9, 23))
+            painter.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(9, 7), QtCore.QPointF(21, 10), QtCore.QPointF(9, 15)]))
+        elif kind == "modify_track":
+            painter.setPen(QtGui.QPen(QtGui.QColor("#4b8f3a"), 2.0))
+            painter.drawPolyline(QtGui.QPolygonF([QtCore.QPointF(6, 20), QtCore.QPointF(10, 14), QtCore.QPointF(14, 17), QtCore.QPointF(20, 8)]))
+            painter.setBrush(QtGui.QColor("#4b8f3a"))
+            for point in (QtCore.QPointF(6, 20), QtCore.QPointF(10, 14), QtCore.QPointF(14, 17), QtCore.QPointF(20, 8)):
+                painter.drawEllipse(point, 2.2, 2.2)
+        elif kind == "view_finder":
+            painter.setPen(QtGui.QPen(QtGui.QColor("#5b8f29"), 2.0))
+            painter.drawRect(QtCore.QRectF(6, 6, 16, 16))
+            painter.drawLine(QtCore.QPointF(14, 4), QtCore.QPointF(14, 10))
+            painter.drawLine(QtCore.QPointF(14, 18), QtCore.QPointF(14, 24))
+            painter.drawLine(QtCore.QPointF(4, 14), QtCore.QPointF(10, 14))
+            painter.drawLine(QtCore.QPointF(18, 14), QtCore.QPointF(24, 14))
+        elif kind == "info":
+            painter.setBrush(QtGui.QColor("#e7f0ff"))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#1f6fbf"), 1.7))
+            painter.drawEllipse(rect)
+            painter.drawText(QtCore.QRectF(4, 4, 20, 20), QtCore.Qt.AlignCenter, "i")
+        painter.end()
+        return QtGui.QIcon(pixmap)
+
+    def _set_overview_tool_mode(self, mode: str) -> None:
+        messages = {
+            "select": "总览选择：点击区域可激活并联动到探索界面。",
+            "pan": "总览平移：拖拽地图或滚轮缩放。",
+            "move": "总览移动：移动区域、地图和标注对象接口已预留。",
+            "zoom": "总览缩放：框选缩放接口已预留，滚轮缩放沿用当前地图控件。",
+            "measure": "总览测量：长度和面积测量接口已预留。",
+            "modify_track": "修正轨迹：导航轨迹编辑、平滑和节点修正接口已预留。",
+            "annotate": "标注：地图标注放置和标题编辑接口已预留。",
+            "crosshair": "显示十字线：总览十字线显示开关接口已预留。",
+            "view_finder": "视图定位器：定位当前探索视窗范围接口已预留。",
+        }
+        self.statusBar().showMessage(messages.get(mode, "总览工具已切换。"), 3000)
+
+    def _set_explore_tool_mode(self, mode: str) -> None:
+        if self._interface_pick_mode:
+            self.btn_interface_pick.setChecked(False)
+        messages = {
+            "pan": "探索平移：拖拽切片平移，滚轮缩放。",
+            "zoom": "探索缩放：框选缩放接口已预留，滚轮缩放沿用当前切片控件。",
+            "measure": "探索测量：切片距离和深度测量接口已预留。",
+            "crosshair": "显示十字线：B-scan、C-scan 和道波形十字线显示开关接口已预留。",
+            "hyperbola": "显示双曲线：双曲线预览接口已预留。",
+            "time_ground": "显示地面时间标记：地面时间标记显示接口已预留。",
+            "headers": "显示头信息：扫描头和文件头信息叠加显示接口已预留。",
+            "dual_axis": "双深度轴：深度/时间双轴显示接口已预留。",
+        }
+        self.statusBar().showMessage(messages.get(mode, "探索工具已切换。"), 3000)
+
+    def _show_interface_tracing_panel(self) -> None:
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("界面追踪")
+        dialog.setModal(False)
+        dialog.setWindowFlags(dialog.windowFlags() | QtCore.Qt.Tool)
+        dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        layout = QtWidgets.QGridLayout(dialog)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setHorizontalSpacing(14)
+        layout.setVerticalSpacing(6)
+        title = QtWidgets.QLabel("界面追踪")
+        title_font = title.font()
+        title_font.setBold(True)
+        title_font.setPointSize(14)
+        title.setFont(title_font)
+        layout.addWidget(title, 0, 0, 1, 3)
+        rows = [
+            ("方法", "幅值", ["幅值", "实部", "包络"]),
+            ("仅当前视窗", "否", ["否", "是"]),
+            ("阈值", "0.4", None),
+            ("最大孔洞尺寸 [m]", "1", None),
+            ("最大 Z 变化", "3", None),
+            ("填充两侧", "是", ["是", "否"]),
+            ("置信度", "1", None),
+        ]
+        for row, (label_text, value, options) in enumerate(rows, start=1):
+            label = QtWidgets.QLabel(label_text)
+            info = QtWidgets.QLabel("i")
+            info.setAlignment(QtCore.Qt.AlignCenter)
+            info.setFixedSize(18, 18)
+            info.setStyleSheet("border: 1px solid #7aa0d8; border-radius: 9px; color: #3f6fb5; font-weight: 700;")
+            if options:
+                field = QtWidgets.QComboBox()
+                field.addItems(options)
+                field.setCurrentText(value)
+            else:
+                field = QtWidgets.QLineEdit(value)
+            field.setMinimumWidth(130)
+            layout.addWidget(label, row, 0)
+            layout.addWidget(info, row, 1)
+            layout.addWidget(field, row, 2)
+        trace_button = QtWidgets.QPushButton("追踪")
+        trace_button.clicked.connect(lambda: self._show_feature_placeholder("界面追踪", "界面追踪参数面板已对齐；自动追踪执行接口待接入。"))
+        close_button = QtWidgets.QPushButton("关闭")
+        close_button.clicked.connect(dialog.close)
+        layout.addWidget(trace_button, len(rows) + 1, 1)
+        layout.addWidget(close_button, len(rows) + 1, 2)
+        dialog.adjustSize()
+        parent_rect = self.geometry()
+        dialog.move(parent_rect.left() + 72, parent_rect.bottom() - dialog.height() - 72)
+        dialog.show()
 
     def _add_region_from_ribbon(self) -> None:
         active_file = self.app_controller.project_controller.get_active_file()
@@ -6745,6 +6972,8 @@ class MainWindow(QtWidgets.QMainWindow):
             edit.setText(text)
 
     def _refresh_settings_info(self) -> None:
+        if not hasattr(self, "trace_info"):
+            return
         stage_text = self.status_stage.text().replace("阶段: ", "")
         if not (self._pipeline_configured and self._display_configured):
             rows = [
@@ -6825,6 +7054,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_overview_scene()
 
     def _set_trace_info_html(self, html: str) -> None:
+        if not hasattr(self, "trace_info"):
+            self._settings_html_cache = html
+            return
         if html == self._settings_html_cache:
             return
         self._settings_html_cache = html
@@ -7170,10 +7402,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _scan_view_label(self, view_key: str) -> str:
         return {
             "bscan": "B-scan",
-            "width": "Width slice",
+            "width": "宽度切片",
             "cscan": "C-scan",
-            "trace": "Trace line",
-        }.get(str(view_key), "Scan")
+            "trace": "道波形",
+        }.get(str(view_key), "扫描图")
 
     def _fit_scan_view_to_data(self, view_key: str, message: str) -> None:
         widget = self._scan_view_widget(view_key)
