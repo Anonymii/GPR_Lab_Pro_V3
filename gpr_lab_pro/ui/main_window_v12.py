@@ -3655,6 +3655,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pipeline_scope = "current_region"
         self._general_epsilon = 5.0
         self._general_time_ground_ns = 0.0
+        self._time_ground_gain_preview_enabled = False
+        self._time_ground_preview_absorption_db_m = 0.0
+        self._time_ground_preview_max_gain = 80.0
         self.pipeline_dialog: QtWidgets.QDialog | None = None
         self._settings_html_cache: str | None = None
         self._active_interface_by_region: dict[str, str] = {}
@@ -4898,6 +4901,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _toggle_time_ground_marker(self, checked: bool = True) -> None:
         self._show_time_ground_marker = bool(checked)
+        if not self._show_time_ground_marker and self._time_ground_gain_preview_enabled:
+            self._set_time_ground_gain_preview(False)
         self._refresh_time_ground_marker()
         if hasattr(self, "btn_explore_time_ground"):
             self.btn_explore_time_ground.blockSignals(True)
@@ -4933,8 +4938,30 @@ class MainWindow(QtWidgets.QMainWindow):
             self.general_time_ground_spin.blockSignals(True)
             self.general_time_ground_spin.setValue(value)
             self.general_time_ground_spin.blockSignals(False)
-        self._refresh_time_ground_marker()
+        if self._time_ground_gain_preview_enabled:
+            self._rerender_explore_views_only()
+        else:
+            self._refresh_time_ground_marker()
         self.statusBar().showMessage(f"地面时间：{value:.3f} ns", 1500)
+
+    def _toggle_time_ground_gain_preview(self, checked: bool = True) -> None:
+        self._set_time_ground_gain_preview(bool(checked))
+        message = "地面增益预览已开启，仅刷新当前显示预览。" if self._time_ground_gain_preview_enabled else "地面增益预览已关闭。"
+        self.statusBar().showMessage(message, 2500)
+
+    def _set_time_ground_gain_preview(self, enabled: bool) -> None:
+        self._time_ground_gain_preview_enabled = bool(enabled)
+        if hasattr(self, "general_time_ground_preview_check"):
+            self.general_time_ground_preview_check.blockSignals(True)
+            self.general_time_ground_preview_check.setChecked(self._time_ground_gain_preview_enabled)
+            self.general_time_ground_preview_check.blockSignals(False)
+        if self._time_ground_gain_preview_enabled and not self._show_time_ground_marker:
+            self._show_time_ground_marker = True
+            if hasattr(self, "btn_explore_time_ground"):
+                self.btn_explore_time_ground.blockSignals(True)
+                self.btn_explore_time_ground.setChecked(True)
+                self.btn_explore_time_ground.blockSignals(False)
+        self._rerender_explore_views_only()
 
     def _toggle_headers_panel(self, checked: bool = False) -> None:
         if checked:
@@ -5671,8 +5698,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.general_time_ground_spin.setToolTip("地面时间用于后续地面时间标记、深度零点和增益基准。")
         self.general_time_ground_spin.valueChanged.connect(self._on_general_time_ground_changed)
 
+        self.general_time_ground_preview_check = QtWidgets.QCheckBox("启用地面增益预览")
+        self.general_time_ground_preview_check.setToolTip(
+            "仅在当前 B-scan、宽度切片和道波形显示中按地面时间重绘预览，不修改原始数据或处理结果。"
+        )
+        self.general_time_ground_preview_check.setChecked(self._time_ground_gain_preview_enabled)
+        self.general_time_ground_preview_check.toggled.connect(self._toggle_time_ground_gain_preview)
+
         layout.addRow("介电常数 Epsilon", self.general_epsilon_spin)
         layout.addRow("地面时间 Time Ground", self.general_time_ground_spin)
+        layout.addRow("", self.general_time_ground_preview_check)
         return group
 
     def _connect_signals(self) -> None:
@@ -6296,12 +6331,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_general_epsilon_changed(self, value: float) -> None:
         self._general_epsilon = float(value)
+        if self._time_ground_gain_preview_enabled:
+            self._rerender_explore_views_only()
         self.statusBar().showMessage("介电常数已更新，深度轴/迁移/双曲线接口已预留。", 2500)
 
     def _on_general_time_ground_changed(self, value: float) -> None:
         self._general_time_ground_ns = float(value)
-        self._refresh_time_ground_marker()
-        self.statusBar().showMessage("地面时间已更新，地面标记和增益基准接口已预留。", 2500)
+        if self._time_ground_gain_preview_enabled:
+            self._rerender_explore_views_only()
+        else:
+            self._refresh_time_ground_marker()
+        self.statusBar().showMessage("地面时间已更新，地面标记与显示增益预览已同步。", 2500)
 
     def _on_project_changed(self, _project) -> None:
         self._last_interface_pick = None
@@ -7768,6 +7808,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.general_epsilon_spin.setEnabled(has_dataset and not self._is_busy)
         if hasattr(self, "general_time_ground_spin"):
             self.general_time_ground_spin.setEnabled(has_dataset and not self._is_busy)
+        if hasattr(self, "general_time_ground_preview_check"):
+            self.general_time_ground_preview_check.setEnabled(has_dataset and not self._is_busy)
         self._refresh_overview_controls()
         self._refresh_step_details()
     def _refresh_display(self, display: DisplayData) -> None:
@@ -7810,6 +7852,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_time_ground_marker()
         self._refresh_headers_panel()
 
+    def _rerender_explore_views_only(self) -> None:
+        display = self.display_data
+        if display is None:
+            self._refresh_time_ground_marker()
+            return
+        state = self.app_controller.display_state
+        cmap = state.colormap + ("_r" if state.invert and not state.colormap.endswith("_r") else "")
+        trace_count = int(display.meta.get("trace_count", display.bscan.shape[1] if display.bscan.ndim == 2 else 0))
+        line_count = int(display.meta.get("line_count", display.cscan.shape[0] if display.cscan.ndim == 2 else 0))
+        tw_ns = float(display.meta.get("tw_ns", display.ascan_time_ns[-1] if display.ascan_time_ns.size else 0.0))
+        bscan_start_ns = float(display.meta.get("bscan_start_ns", 0.0))
+        bscan_end_ns = float(display.meta.get("bscan_end_ns", tw_ns))
+        dt_ns = float(display.meta.get("dt_ns", 1.0))
+        selection = display.selection
+        time_ns = selection.sample_index * dt_ns
+        self._update_bscan_view(
+            display,
+            cmap,
+            trace_count,
+            tw_ns,
+            bscan_start_ns,
+            bscan_end_ns,
+            selection.trace_index,
+            time_ns,
+        )
+        self._update_crossline_view(display, cmap, line_count, tw_ns, selection.line_index, time_ns)
+        self._update_ascan_view(display, selection.sample_index, time_ns)
+        self._refresh_time_ground_marker()
+
     def _update_bscan_view(
         self,
         display: DisplayData,
@@ -7821,7 +7892,8 @@ class MainWindow(QtWidgets.QMainWindow):
         trace_index: int,
         time_ns: float,
     ) -> None:
-        bscan_view, visible_start_ns, visible_end_ns = self._crop_time_image(display.bscan, display.ascan_time_ns, start_ns, end_ns)
+        bscan_source = self._apply_time_ground_gain_preview_2d(display.bscan, display.ascan_time_ns)
+        bscan_view, visible_start_ns, visible_end_ns = self._crop_time_image(bscan_source, display.ascan_time_ns, start_ns, end_ns)
         initial_trace_window = self._default_trace_viewport(trace_count, selection_index=trace_index)
         image = self._array_to_qimage(bscan_view, cmap, display.bscan_limits)
         self.bscan_view.set_content(
@@ -7848,7 +7920,7 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> None:
         half_width = max((line_count - 1) / 2.0, 0.5)
         cropped_crossline, visible_start_ns, visible_end_ns = self._crop_time_image(
-            display.crossline,
+            self._apply_time_ground_gain_preview_2d(display.crossline, display.ascan_time_ns),
             display.ascan_time_ns,
             float(display.meta.get("bscan_start_ns", 0.0)),
             float(display.meta.get("bscan_end_ns", total_tw_ns)),
@@ -7892,9 +7964,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_ascan_view(self, display: DisplayData, sample_index: int, time_ns: float) -> None:
         visible_time_ns, visible_values = self._visible_ascan_segment(display)
+        ascan_values = self._apply_time_ground_gain_preview_1d(display.ascan_values, display.ascan_time_ns)
         if display.ascan_values.size and display.ascan_time_ns.size:
-            marker_idx = int(np.clip(sample_index, 0, display.ascan_values.size - 1))
-            marker_x = display.ascan_values[marker_idx]
+            marker_idx = int(np.clip(sample_index, 0, ascan_values.size - 1))
+            marker_x = ascan_values[marker_idx]
             marker_y = float(display.ascan_time_ns[marker_idx])
         else:
             marker_x = 0.0
@@ -8127,10 +8200,64 @@ class MainWindow(QtWidgets.QMainWindow):
             vmax = vmin + 1.0
         return (vmin, vmax)
 
-    @staticmethod
-    def _visible_ascan_segment(display: DisplayData) -> tuple[np.ndarray, np.ndarray]:
+    def _time_ground_preview_active(self) -> bool:
+        return bool(self._time_ground_gain_preview_enabled and self.display_data is not None)
+
+    def _time_ground_preview_gain_curve(self, time_axis: np.ndarray) -> np.ndarray:
+        time_values = np.asarray(time_axis, dtype=float)
+        if time_values.size == 0:
+            return np.empty((0,), dtype=float)
+        gain = np.ones(time_values.shape, dtype=float)
+        if not self._time_ground_preview_active():
+            return gain
+        finite_time = time_values[np.isfinite(time_values)]
+        if finite_time.size == 0:
+            return gain
+        epsilon = max(float(self._general_epsilon), 1.0)
+        c_m_ns = 0.299792458
+        soil_velocity_m_ns = c_m_ns / np.sqrt(epsilon)
+        ground_ns = max(float(self._general_time_ground_ns), 0.0)
+        if ground_ns <= 1e-9:
+            return gain
+        finite_diff = np.diff(np.sort(finite_time))
+        finite_diff = finite_diff[finite_diff > 0]
+        dt_ns = float(np.median(finite_diff)) if finite_diff.size else 0.1
+        reference_range_m = max(soil_velocity_m_ns * max(dt_ns, 0.1) / 2.0, 0.6)
+        swept_ns = np.minimum(np.maximum(time_values, 0.0), ground_ns)
+        swept_depth_m = soil_velocity_m_ns * swept_ns / 2.0
+        range_m = reference_range_m + swept_depth_m
+        spread_gain = (range_m / reference_range_m) ** 2
+        attenuation_db = max(float(self._time_ground_preview_absorption_db_m), 0.0)
+        absorption_gain = np.power(10.0, attenuation_db * 2.0 * swept_depth_m / 20.0)
+        gain = spread_gain * absorption_gain
+        gain = np.nan_to_num(gain, nan=1.0, posinf=self._time_ground_preview_max_gain, neginf=1.0)
+        return np.clip(gain, 1.0, self._time_ground_preview_max_gain)
+
+    def _apply_time_ground_gain_preview_2d(self, data: np.ndarray, time_axis: np.ndarray) -> np.ndarray:
+        array = np.asarray(data, dtype=float)
+        if array.ndim != 2 or array.size == 0 or not self._time_ground_preview_active():
+            return array
+        if array.shape[0] != np.asarray(time_axis).size:
+            return array
+        gain = self._time_ground_preview_gain_curve(time_axis)
+        if gain.size != array.shape[0]:
+            return array
+        return array * gain[:, None]
+
+    def _apply_time_ground_gain_preview_1d(self, values: np.ndarray, time_axis: np.ndarray) -> np.ndarray:
+        array = np.asarray(values, dtype=float)
+        if array.ndim != 1 or array.size == 0 or not self._time_ground_preview_active():
+            return array
+        if array.size != np.asarray(time_axis).size:
+            return array
+        gain = self._time_ground_preview_gain_curve(time_axis)
+        if gain.size != array.size:
+            return array
+        return array * gain
+
+    def _visible_ascan_segment(self, display: DisplayData) -> tuple[np.ndarray, np.ndarray]:
         time_axis = display.ascan_time_ns
-        values = display.ascan_values
+        values = self._apply_time_ground_gain_preview_1d(display.ascan_values, time_axis)
         if time_axis.size == 0 or values.size == 0:
             empty = np.empty((0,), dtype=float)
             return empty, empty
