@@ -239,6 +239,7 @@ class GPRApplication(QtCore.QObject):
         colormap: str | None = None,
         invert: bool | None = None,
         show_axes: bool | None = None,
+        publish: bool = True,
     ) -> None:
         self.display_controller.update_settings(
             contrast_gain=contrast_gain,
@@ -450,7 +451,7 @@ class GPRApplication(QtCore.QObject):
         self.display_controller.select_line(int(region.selection_state.line_index))
         self.display_controller.select_trace(int(region.selection_state.trace_index))
         self.display_controller.select_sample(int(region.selection_state.sample_index))
-        if self._has_renderable_result():
+        if publish and self._has_renderable_result():
             self.display_controller.publish_display()
         else:
             self.signals.display_cleared.emit()

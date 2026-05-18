@@ -2407,6 +2407,7 @@ class RasterViewportWidget(QtWidgets.QWidget):
     view_changed = QtCore.Signal(object, object, object)
     point_selected = QtCore.Signal(object, float, float)
     guide_moved = QtCore.Signal(object, float, float)
+    guide_released = QtCore.Signal(object, float, float)
     slice_scroll_requested = QtCore.Signal(object, object, int)
     erase_requested = QtCore.Signal(object, float, float)
     context_menu_requested = QtCore.Signal(object, object, float, float)
@@ -2725,7 +2726,12 @@ class RasterViewportWidget(QtWidgets.QWidget):
             else:
                 current_x = data_x
                 current_y = data_y
+            if self._vline is not None:
+                self._vline = (float(current_x), self._vline[1])
+            if self._hline is not None:
+                self._hline = (float(current_y), self._hline[1])
             self.guide_moved.emit(self.view_key, float(current_x), float(current_y))
+            self.update()
             event.accept()
             return
         anchor = self._drag_state["pos"]
@@ -2748,8 +2754,14 @@ class RasterViewportWidget(QtWidgets.QWidget):
         event.accept()
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
+        release_mode = str(self._drag_state.get("mode", "")) if self._drag_state is not None else ""
         if self._drag_state is not None and str(self._drag_state.get("mode", "")) == "overlay_drag":
             self.overlay_drag_finished.emit(self.view_key)
+        if release_mode.startswith("guide"):
+            data_x, data_y = self._data_from_point(event.position(), self._plot_rect())
+            current_x = self._vline[0] if self._vline is not None else data_x
+            current_y = self._hline[0] if self._hline is not None else data_y
+            self.guide_released.emit(self.view_key, float(current_x), float(current_y))
         self._drag_state = None
         self._guide_grab_mode = None
         self._update_hover_cursor(event.position(), self._plot_rect())
@@ -3270,6 +3282,7 @@ class TraceViewportWidget(QtWidgets.QWidget):
     view_changed = QtCore.Signal(object, object, object)
     point_selected = QtCore.Signal(object, float, float)
     guide_moved = QtCore.Signal(object, float, float)
+    guide_released = QtCore.Signal(object, float, float)
     slice_scroll_requested = QtCore.Signal(object, object, int)
     context_menu_requested = QtCore.Signal(object, object, float, float)
 
@@ -3468,7 +3481,10 @@ class TraceViewportWidget(QtWidgets.QWidget):
         mode = str(self._drag_state.get("mode", "pan"))
         if mode == "guide_h":
             data_x, data_y = self._data_from_point(event.position(), plot_rect)
+            if self._hline is not None:
+                self._hline = (float(data_y), self._hline[1])
             self.guide_moved.emit(self.view_key, float(data_x), float(data_y))
+            self.update()
             event.accept()
             return
         anchor = self._drag_state["pos"]
@@ -3491,6 +3507,11 @@ class TraceViewportWidget(QtWidgets.QWidget):
         event.accept()
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
+        release_mode = str(self._drag_state.get("mode", "")) if self._drag_state is not None else ""
+        if release_mode.startswith("guide"):
+            data_x, data_y = self._data_from_point(event.position(), self._plot_rect())
+            current_y = self._hline[0] if self._hline is not None else data_y
+            self.guide_released.emit(self.view_key, float(data_x), float(current_y))
         self._drag_state = None
         self._guide_grab_mode = None
         self._update_hover_cursor(event.position(), self._plot_rect())
@@ -3788,6 +3809,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pipeline_configured = False
         self._display_configured = False
         self._has_custom_viewport = False
+        self._scan_image_cache: dict[tuple[int, tuple[int, ...], str, int], np.ndarray] = {}
         self._ordered_steps = []
         self._selected_step_index = -1
         self._pipeline_scope = "current_region"
@@ -4463,12 +4485,12 @@ class MainWindow(QtWidgets.QMainWindow):
             title="宽度 (m)",
             x_label="宽度 (m)",
             y_label="时间 (ns)",
-            margins=(42, 48, 42, 18),
+            margins=(34, 44, 30, 18),
             allow_zoom_x=False,
             allow_zoom_y=True,
         )
         self.width_view.setStyleSheet("background: #fafbfc; border: 1px solid #d0d7df; border-radius: 14px;")
-        top_row.addWidget(self.width_view, stretch=14)
+        top_row.addWidget(self.width_view, stretch=18)
         self.trace_view = TraceViewportWidget(
             "trace",
             title="Trace line",
@@ -4477,7 +4499,7 @@ class MainWindow(QtWidgets.QMainWindow):
             allow_zoom_y=True,
         )
         self.trace_view.setStyleSheet("background: #fafbfc; border: 1px solid #d0d7df; border-radius: 14px;")
-        top_row.addWidget(self.trace_view, stretch=14)
+        top_row.addWidget(self.trace_view, stretch=18)
         explore_slices.addLayout(top_row, stretch=7)
 
         bottom_row = QtWidgets.QHBoxLayout()
@@ -4582,7 +4604,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for widget in (self.bscan_view, self.width_view, self.cscan_view, self.trace_view):
             widget.view_changed.connect(self._on_view_changed)
             widget.point_selected.connect(self._on_view_selected)
-            widget.guide_moved.connect(self._on_view_selected)
+            widget.guide_moved.connect(self._on_view_guide_moved)
+            widget.guide_released.connect(self._on_view_selected)
             widget.slice_scroll_requested.connect(self._on_slice_scroll_requested)
             if hasattr(widget, "extra_horizontal_line_moved"):
                 widget.extra_horizontal_line_moved.connect(self._on_extra_horizontal_line_moved)
@@ -4661,8 +4684,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_examiner_ribbon(self) -> QtWidgets.QFrame:
         ribbon_frame = QtWidgets.QFrame()
         ribbon_frame.setObjectName("ribbonFrame")
-        ribbon_frame.setMaximumHeight(94)
-        ribbon_frame.setMinimumHeight(86)
+        ribbon_frame.setMaximumHeight(118)
+        ribbon_frame.setMinimumHeight(106)
         ribbon_layout = QtWidgets.QVBoxLayout(ribbon_frame)
         ribbon_layout.setContentsMargins(0, 0, 0, 0)
         ribbon_layout.setSpacing(0)
@@ -4674,7 +4697,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ribbon_tabs.setFocusPolicy(QtCore.Qt.NoFocus)
         self.ribbon_tabs.tabBar().setFocusPolicy(QtCore.Qt.NoFocus)
         self.ribbon_tabs.tabBar().setDrawBase(False)
-        self.ribbon_tabs.setMaximumHeight(92)
+        self.ribbon_tabs.setMaximumHeight(116)
         ribbon_layout.addWidget(self.ribbon_tabs)
 
         home_tab = QtWidgets.QWidget()
@@ -4782,12 +4805,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ribbon_collapse_button.setText("⌄")
             self.ribbon_collapse_button.setToolTip("展开功能区")
         else:
-            self.ribbon_tabs.setMaximumHeight(92)
+            self.ribbon_tabs.setMaximumHeight(116)
             self.ribbon_tabs.setMinimumHeight(0)
             parent = self.ribbon_tabs.parentWidget()
             if parent is not None:
-                parent.setMaximumHeight(94)
-                parent.setMinimumHeight(86)
+                parent.setMaximumHeight(118)
+                parent.setMinimumHeight(106)
             self.ribbon_collapse_button.setText("⌃")
             self.ribbon_collapse_button.setToolTip("折叠功能区")
         self.updateGeometry()
@@ -4800,10 +4823,10 @@ class MainWindow(QtWidgets.QMainWindow):
         group = QtWidgets.QGroupBox(self._t(text_key))
         group.setObjectName("ribbonGroup")
         self._ribbon_groups[text_key] = group
-        group.setMaximumHeight(68)
-        group.setMinimumHeight(64)
+        group.setMaximumHeight(88)
+        group.setMinimumHeight(84)
         layout = QtWidgets.QHBoxLayout(group)
-        layout.setContentsMargins(1, 1, 1, 12)
+        layout.setContentsMargins(2, 3, 2, 14)
         layout.setSpacing(1)
         for key, icon, callback in buttons:
             button = self._make_ribbon_button(key, icon, callback)
@@ -4811,35 +4834,75 @@ class MainWindow(QtWidgets.QMainWindow):
         return group
 
     def _build_view_display_controls_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("显示")
+        group = QtWidgets.QGroupBox("Rendering")
         group.setObjectName("ribbonGroup")
-        group.setMaximumHeight(68)
-        group.setMinimumHeight(64)
-        layout = QtWidgets.QGridLayout(group)
-        layout.setContentsMargins(6, 2, 6, 10)
-        layout.setHorizontalSpacing(6)
-        layout.setVerticalSpacing(1)
+        group.setMaximumHeight(88)
+        group.setMinimumHeight(84)
+        group.setMinimumWidth(690)
+        layout = QtWidgets.QHBoxLayout(group)
+        layout.setContentsMargins(8, 4, 8, 16)
+        layout.setSpacing(12)
 
         self.view_contrast_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.view_contrast_slider.setRange(1, 80)
-        self.view_contrast_slider.setFixedWidth(92)
+        self.view_contrast_slider.setFixedWidth(180)
+        self.view_contrast_value_label = QtWidgets.QLabel("0%")
+        self.view_contrast_value_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.view_contrast_value_label.setMinimumWidth(48)
         self.view_cmap_combo = QtWidgets.QComboBox()
         self.view_cmap_combo.addItems(["gray", "copper", "jet"])
-        self.view_cmap_combo.setFixedWidth(82)
-        self.view_reverse_check = QtWidgets.QCheckBox("反色")
+        self.view_cmap_combo.setFixedWidth(142)
+        self.view_reverse_check = QtWidgets.QCheckBox("Reverse Colors")
         self.view_thickness_spin = QtWidgets.QDoubleSpinBox()
         self.view_thickness_spin.setRange(0.5, 8.0)
         self.view_thickness_spin.setSingleStep(0.5)
         self.view_thickness_spin.setDecimals(1)
-        self.view_thickness_spin.setFixedWidth(58)
+        self.view_thickness_spin.setFixedWidth(72)
 
-        layout.addWidget(QtWidgets.QLabel("对比度"), 0, 0)
-        layout.addWidget(self.view_contrast_slider, 0, 1)
-        layout.addWidget(QtWidgets.QLabel("色表"), 1, 0)
-        layout.addWidget(self.view_cmap_combo, 1, 1)
-        layout.addWidget(self.view_reverse_check, 0, 2)
-        layout.addWidget(QtWidgets.QLabel("线宽"), 1, 2)
-        layout.addWidget(self.view_thickness_spin, 1, 3)
+        contrast_layout = QtWidgets.QGridLayout()
+        contrast_layout.setContentsMargins(0, 0, 0, 0)
+        contrast_layout.setHorizontalSpacing(6)
+        contrast_layout.setVerticalSpacing(0)
+        contrast_layout.addWidget(self.view_contrast_value_label, 0, 0, 1, 2)
+        contrast_layout.addWidget(self.view_contrast_slider, 1, 0, 1, 2)
+        contrast_layout.addWidget(QtWidgets.QLabel("Contrast"), 2, 0, 1, 2, QtCore.Qt.AlignCenter)
+
+        colors_layout = QtWidgets.QGridLayout()
+        colors_layout.setContentsMargins(0, 0, 0, 0)
+        colors_layout.setHorizontalSpacing(8)
+        colors_layout.setVerticalSpacing(4)
+        colors_layout.addWidget(self.view_cmap_combo, 0, 0)
+        colors_layout.addWidget(self.view_reverse_check, 1, 0)
+        colors_layout.addWidget(QtWidgets.QLabel("GPR Data Colors"), 2, 0, QtCore.Qt.AlignCenter)
+
+        overlay_layout = QtWidgets.QGridLayout()
+        overlay_layout.setContentsMargins(0, 0, 0, 0)
+        overlay_layout.setHorizontalSpacing(8)
+        overlay_layout.setVerticalSpacing(4)
+        self.view_overlay_combo = QtWidgets.QComboBox()
+        self.view_overlay_combo.addItems(["None", "Interfaces", "Hyperbola"])
+        self.view_overlay_combo.setFixedWidth(140)
+        self.view_overlay_combo.setEnabled(False)
+        overlay_layout.addWidget(self.view_overlay_combo, 0, 0)
+        overlay_layout.addWidget(QtWidgets.QLabel("Overlay Selection"), 2, 0, QtCore.Qt.AlignCenter)
+
+        thickness_layout = QtWidgets.QGridLayout()
+        thickness_layout.setContentsMargins(0, 0, 0, 0)
+        thickness_layout.setHorizontalSpacing(6)
+        thickness_layout.setVerticalSpacing(4)
+        thickness_layout.addWidget(self.view_thickness_spin, 0, 0, QtCore.Qt.AlignCenter)
+        thickness_layout.addWidget(QtWidgets.QLabel("Thickness"), 2, 0, QtCore.Qt.AlignCenter)
+
+        for section in (contrast_layout, colors_layout, overlay_layout, thickness_layout):
+            container = QtWidgets.QWidget()
+            container.setLayout(section)
+            layout.addWidget(container)
+            if section is not thickness_layout:
+                separator = QtWidgets.QFrame()
+                separator.setFrameShape(QtWidgets.QFrame.VLine)
+                separator.setFrameShadow(QtWidgets.QFrame.Plain)
+                separator.setStyleSheet("color: #b9c9d9;")
+                layout.addWidget(separator)
 
         self.view_contrast_slider.valueChanged.connect(self._on_view_contrast_changed)
         self.view_cmap_combo.currentTextChanged.connect(self._on_view_colormap_changed)
@@ -5090,6 +5153,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view_contrast_slider.blockSignals(True)
         self.view_contrast_slider.setValue(int(round(max(0.1, float(state.contrast_gain)) * 10)))
         self.view_contrast_slider.blockSignals(False)
+        if hasattr(self, "view_contrast_value_label"):
+            self.view_contrast_value_label.setText(f"{int(round((float(state.contrast_gain) - 4.0) * 10.0))}%")
         self.view_cmap_combo.blockSignals(True)
         if state.colormap not in [self.view_cmap_combo.itemText(i) for i in range(self.view_cmap_combo.count())]:
             self.view_cmap_combo.addItem(state.colormap)
@@ -5103,23 +5168,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view_thickness_spin.blockSignals(False)
 
     def _on_view_contrast_changed(self, value: int) -> None:
-        self.app_controller.update_display_settings(contrast_gain=max(0.1, float(value) / 10.0))
+        contrast = max(0.1, float(value) / 10.0)
+        if hasattr(self, "view_contrast_value_label"):
+            self.view_contrast_value_label.setText(f"{int(round((contrast - 4.0) * 10.0))}%")
+        self.app_controller.update_display_settings(contrast_gain=contrast, publish=False)
         self._display_configured = True
+        self._rerender_explore_views_only()
         self._refresh_settings_info()
 
     def _on_view_colormap_changed(self, value: str) -> None:
-        self.app_controller.update_display_settings(colormap=str(value or "gray"))
+        self.app_controller.update_display_settings(colormap=str(value or "gray"), publish=False)
         self._display_configured = True
+        self._rerender_explore_views_only()
         self._refresh_settings_info()
 
     def _on_view_reverse_changed(self, checked: bool) -> None:
-        self.app_controller.update_display_settings(invert=bool(checked))
+        self.app_controller.update_display_settings(invert=bool(checked), publish=False)
         self._display_configured = True
+        self._rerender_explore_views_only()
         self._refresh_settings_info()
 
     def _on_view_crosshair_width_changed(self, value: float) -> None:
-        self.app_controller.update_display_settings(crosshair_width=float(value))
+        self.app_controller.update_display_settings(crosshair_width=float(value), publish=False)
         self._display_configured = True
+        self._rerender_explore_views_only()
         self._refresh_settings_info()
 
     def _toggle_dual_depth_axis(self, checked: bool = True) -> None:
@@ -8157,6 +8229,7 @@ class MainWindow(QtWidgets.QMainWindow):
             time_ns,
         )
         self._update_crossline_view(display, cmap, line_count, tw_ns, selection.line_index, time_ns)
+        self._update_cscan_view(display, cmap, trace_count, line_count, selection.trace_index, selection.line_index)
         self._update_ascan_view(display, selection.sample_index, time_ns)
         self._refresh_time_ground_marker()
         self._sync_view_display_controls()
@@ -8175,19 +8248,22 @@ class MainWindow(QtWidgets.QMainWindow):
         bscan_source = self._apply_time_ground_gain_preview_2d(display.bscan, display.ascan_time_ns)
         bscan_view, visible_start_ns, visible_end_ns = self._crop_time_image(bscan_source, display.ascan_time_ns, start_ns, end_ns)
         bscan_view = self._scan_display_image(bscan_view)
-        initial_trace_window = self._default_trace_viewport(trace_count, selection_index=trace_index)
-        image = self._array_to_qimage(bscan_view, cmap, display.bscan_limits)
+        trace_range = self._trace_distance_range(display)
+        trace_position_m = self._trace_distance_m(display, trace_index)
+        initial_trace_window = self._default_trace_distance_viewport(display, selection_index=trace_index)
+        limits = self._render_limits(bscan_source, self.app_controller.display_state.bscan_attr, display.bscan_limits)
+        image = self._array_to_qimage(bscan_view, cmap, limits)
         state = self.app_controller.display_state
         self.bscan_view.set_content(
             image,
-            data_x=(0.0, float(max(trace_count - 1, 1))),
+            data_x=trace_range,
             data_y=(visible_start_ns, visible_end_ns),
             reset_view=not self._has_custom_viewport,
             show_axes=self.app_controller.display_state.show_axes,
             initial_viewport_x=initial_trace_window,
             initial_viewport_y=(visible_start_ns, visible_end_ns),
             viewport_limit_y=(visible_start_ns, visible_end_ns),
-            vertical_line=(trace_index, "#195fbf") if self._show_explore_crosshair else None,
+            vertical_line=(trace_position_m, "#195fbf") if self._show_explore_crosshair else None,
             horizontal_line=(time_ns, "#195fbf") if self._show_explore_crosshair else None,
             title=self._bscan_title(display) if self._show_slice_headers else "B-scan",
             y_label="深度 (m)" if self._dual_depth_axis_enabled else "时间 (ns)",
@@ -8206,26 +8282,30 @@ class MainWindow(QtWidgets.QMainWindow):
         line_index: int,
         time_ns: float,
     ) -> None:
-        half_width = max((line_count - 1) / 2.0, 0.5)
+        line_axis = self._line_axis_m(display)
+        line_range = (float(line_axis[0]), float(line_axis[-1])) if line_axis.size else (-0.5, 0.5)
+        line_position_m = self._line_distance_m(display, line_index)
+        crossline_source = self._apply_time_ground_gain_preview_2d(display.crossline, display.ascan_time_ns)
         cropped_crossline, visible_start_ns, visible_end_ns = self._crop_time_image(
-            self._apply_time_ground_gain_preview_2d(display.crossline, display.ascan_time_ns),
+            crossline_source,
             display.ascan_time_ns,
             float(display.meta.get("bscan_start_ns", 0.0)),
             float(display.meta.get("bscan_end_ns", total_tw_ns)),
         )
         crossline_view = self._smooth_image(cropped_crossline, axis=1)
         crossline_view = self._scan_display_image(crossline_view)
-        image = self._array_to_qimage(crossline_view, cmap, display.crossline_limits)
+        limits = self._render_limits(crossline_source, self.app_controller.display_state.bscan_attr, display.crossline_limits)
+        image = self._array_to_qimage(crossline_view, cmap, limits)
         state = self.app_controller.display_state
         self.width_view.set_content(
             image,
-            data_x=(-half_width, half_width),
+            data_x=line_range,
             data_y=(visible_start_ns, visible_end_ns),
             reset_view=not self._has_custom_viewport,
             show_axes=self.app_controller.display_state.show_axes,
             initial_viewport_y=(visible_start_ns, visible_end_ns),
             viewport_limit_y=(visible_start_ns, visible_end_ns),
-            vertical_line=(float(line_index) - half_width, "#195fbf") if self._show_explore_crosshair else None,
+            vertical_line=(line_position_m, "#195fbf") if self._show_explore_crosshair else None,
             horizontal_line=(time_ns, "#195fbf") if self._show_explore_crosshair else None,
             title=self._crossline_title(display) if self._show_slice_headers else "T-scan",
             y_label="深度 (m)" if self._dual_depth_axis_enabled else "时间 (ns)",
@@ -8245,18 +8325,24 @@ class MainWindow(QtWidgets.QMainWindow):
         line_index: int,
     ) -> None:
         cscan_view = self._scan_display_image(self._smooth_image(display.cscan, axis=0))
-        image = self._array_to_qimage(cscan_view, cmap, display.cscan_limits)
+        limits = self._render_limits(display.cscan, self.app_controller.display_state.cscan_attr, display.cscan_limits)
+        image = self._array_to_qimage(cscan_view, cmap, limits)
         state = self.app_controller.display_state
-        initial_trace_window = self._default_trace_viewport(trace_count, selection_index=trace_index)
+        trace_range = self._trace_distance_range(display)
+        trace_position_m = self._trace_distance_m(display, trace_index)
+        line_axis = self._line_axis_m(display)
+        line_range = (float(line_axis[0]), float(line_axis[-1])) if line_axis.size else (0.0, float(max(line_count - 1, 1)))
+        line_position_m = self._line_distance_m(display, line_index)
+        initial_trace_window = self._default_trace_distance_viewport(display, selection_index=trace_index)
         self.cscan_view.set_content(
             image,
-            data_x=(0.0, float(max(trace_count - 1, 1))),
-            data_y=(0.0, float(max(line_count - 1, 1))),
+            data_x=trace_range,
+            data_y=line_range,
             reset_view=not self._has_custom_viewport,
             show_axes=self.app_controller.display_state.show_axes,
             initial_viewport_x=initial_trace_window,
-            vertical_line=(trace_index, "#195fbf") if self._show_explore_crosshair else None,
-            horizontal_line=(line_index, "#195fbf") if self._show_explore_crosshair else None,
+            vertical_line=(trace_position_m, "#195fbf") if self._show_explore_crosshair else None,
+            horizontal_line=(line_position_m, "#195fbf") if self._show_explore_crosshair else None,
             title=self._cscan_title(display) if self._show_slice_headers else "C-scan",
             crosshair_width=state.crosshair_width,
         )
@@ -8294,15 +8380,26 @@ class MainWindow(QtWidgets.QMainWindow):
         line_count = int(display.meta.get("line_count", 0))
         selection = display.selection
         sample_min, sample_max = self._display_sample_bounds(display)
+        trace_distance = self._trace_distance_m(display, selection.trace_index)
+        sample_time = (
+            float(display.ascan_time_ns[min(selection.sample_index, max(display.ascan_time_ns.size - 1, 0))])
+            if display.ascan_time_ns.size
+            else 0.0
+        )
+        sample_text = (
+            f"{self._time_ns_to_depth_m(sample_time):.3f} m"
+            if self._dual_depth_axis_enabled
+            else f"{sample_time:.3f} ns"
+        )
         controls = (
-            (self.trace_slider, max(trace_count - 1, 0), selection.trace_index, self.trace_value_edit, f"{selection.trace_index + 1}"),
+            (self.trace_slider, max(trace_count - 1, 0), selection.trace_index, self.trace_value_edit, f"{trace_distance:.3f} m"),
             (self.line_slider, max(line_count - 1, 0), selection.line_index, self.line_value_edit, f"{selection.line_index + 1}"),
             (
                 self.sample_slider,
                 sample_max,
                 int(np.clip(selection.sample_index, sample_min, sample_max)),
                 self.sample_value_edit,
-                f"{float(display.ascan_time_ns[min(selection.sample_index, max(display.ascan_time_ns.size - 1, 0))]) if display.ascan_time_ns.size else 0.0:.3f} ns",
+                sample_text,
                 sample_min,
             ),
         )
@@ -8614,6 +8711,89 @@ class MainWindow(QtWidgets.QMainWindow):
             return float(display.ascan_time_ns[index])
         return float(sample_index) * float(dt_ns)
 
+    def _trace_axis_m(self, display: DisplayData | None) -> np.ndarray:
+        if display is None:
+            return np.empty((0,), dtype=float)
+        trace_count = int(display.meta.get("trace_count", display.bscan.shape[1] if display.bscan.ndim == 2 else 0))
+        raw_axis = display.meta.get("trace_distance_m")
+        axis = np.asarray(raw_axis, dtype=float) if raw_axis is not None else np.empty((0,), dtype=float)
+        if axis.size == trace_count and np.all(np.isfinite(axis)):
+            return axis
+        return np.arange(trace_count, dtype=float) * 0.05
+
+    def _trace_distance_m(self, display: DisplayData, trace_index: int) -> float:
+        axis = self._trace_axis_m(display)
+        if axis.size == 0:
+            return float(trace_index) * 0.05
+        index = int(np.clip(trace_index, 0, axis.size - 1))
+        return float(axis[index])
+
+    def _trace_index_from_distance(self, display: DisplayData, distance_m: float) -> int:
+        axis = self._trace_axis_m(display)
+        if axis.size == 0:
+            return 0
+        return int(np.argmin(np.abs(axis - float(distance_m))))
+
+    def _trace_distance_range(self, display: DisplayData) -> tuple[float, float]:
+        axis = self._trace_axis_m(display)
+        if axis.size == 0:
+            return (0.0, 1.0)
+        start = float(np.nanmin(axis))
+        end = float(np.nanmax(axis))
+        if not np.isfinite(start) or not np.isfinite(end) or end <= start:
+            end = start + 1.0
+        return (start, end)
+
+    def _default_trace_distance_viewport(self, display: DisplayData, selection_index: int = 0) -> tuple[float, float]:
+        axis = self._trace_axis_m(display)
+        if axis.size <= 1:
+            return self._trace_distance_range(display)
+        trace_window = self._default_trace_viewport(axis.size, selection_index=selection_index)
+        trace_indices = np.arange(axis.size, dtype=float)
+        start = float(np.interp(trace_window[0], trace_indices, axis))
+        end = float(np.interp(trace_window[1], trace_indices, axis))
+        if end <= start:
+            start, end = self._trace_distance_range(display)
+        return (start, end)
+
+    @staticmethod
+    def _line_axis_m(display: DisplayData | None) -> np.ndarray:
+        if display is None:
+            return np.empty((0,), dtype=float)
+        line_count = int(display.meta.get("line_count", display.cscan.shape[0] if display.cscan.ndim == 2 else 0))
+        half_width = max((line_count - 1) / 2.0, 0.5)
+        return np.arange(line_count, dtype=float) - half_width
+
+    def _line_distance_m(self, display: DisplayData, line_index: int) -> float:
+        axis = self._line_axis_m(display)
+        if axis.size == 0:
+            return float(line_index)
+        index = int(np.clip(line_index, 0, axis.size - 1))
+        return float(axis[index])
+
+    def _line_index_from_distance(self, display: DisplayData, distance_m: float) -> int:
+        axis = self._line_axis_m(display)
+        if axis.size == 0:
+            return 0
+        return int(np.argmin(np.abs(axis - float(distance_m))))
+
+    def _render_limits(
+        self,
+        data: np.ndarray,
+        attribute: str,
+        fallback: tuple[float | None, float | None],
+    ) -> tuple[float | None, float | None]:
+        array = np.asarray(data, dtype=float)
+        if array.size == 0:
+            return fallback
+        if attribute in {"Envelope", "Abs"}:
+            vmax = float(np.nanpercentile(np.abs(array), 99.0))
+            return (0.0, vmax if np.isfinite(vmax) and vmax > 0 else fallback[1])
+        vmax = float(np.nanstd(array) * max(float(self.app_controller.display_state.contrast_gain), 0.1))
+        if not np.isfinite(vmax) or vmax <= 1e-9:
+            return fallback
+        return (-vmax, vmax)
+
     def _format_time_tick(self, value: float) -> str:
         return f"{float(value):.1f}"
 
@@ -8711,14 +8891,20 @@ class MainWindow(QtWidgets.QMainWindow):
         smoothed = interpolated.reshape(*src.shape[:-1], target_len)
         return np.moveaxis(smoothed, -1, axis)
 
-    @classmethod
-    def _scan_display_image(cls, data: np.ndarray, *, target_size: int = 512) -> np.ndarray:
+    def _scan_display_image(self, data: np.ndarray, *, target_size: int = 512) -> np.ndarray:
         array = np.asarray(data, dtype=float)
         if array.ndim != 2 or array.size == 0:
             return array
+        cache_key = (id(data), tuple(array.shape), str(array.dtype), int(target_size))
+        cached = self._scan_image_cache.get(cache_key)
+        if cached is not None:
+            return cached
         result = array
         for axis in (0, 1):
-            result = cls._resample_axis_to_min(result, axis, target_size)
+            result = self._resample_axis_to_min(result, axis, target_size)
+        if len(self._scan_image_cache) > 18:
+            self._scan_image_cache.clear()
+        self._scan_image_cache[cache_key] = result
         return result
 
     @staticmethod
@@ -8783,7 +8969,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if display.ascan_values.size == 0:
             return "选点: ---"
         dt_ns = float(display.meta.get("dt_ns", 1.0))
-        selected_time_ns = selection.sample_index * dt_ns
+        selected_time_ns = self._selection_time_ns(display, selection.sample_index, dt_ns)
         if display.ascan_time_ns.size:
             local_idx = int(np.argmin(np.abs(display.ascan_time_ns - selected_time_ns)))
             time_ns = float(display.ascan_time_ns[local_idx])
@@ -8793,7 +8979,7 @@ class MainWindow(QtWidgets.QMainWindow):
             time_ns = selected_time_ns
             amplitude = 0.0
         return (
-            f"选点: 测线 {selection.line_index + 1} | 道 {selection.trace_index + 1} | "
+            f"选点: 测线 {selection.line_index + 1} | 距离 {self._trace_distance_m(display, selection.trace_index):.3f} m | "
             f"采样点 {selection.sample_index + 1} | 时间 {time_ns:.2f} ns | 幅值 {amplitude:.4f}"
         )
 
@@ -8825,6 +9011,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if target_key == "sample":
             self.app_controller.select_sample(int(selection.sample_index) + int(step))
+
+    def _on_view_guide_moved(self, _view_key: object, _data_x: float, _data_y: float) -> None:
+        # Dragging guide lines should stay in the paint layer; selection publish happens on release.
+        return
 
     def _on_view_changed(
         self,
@@ -8992,12 +9182,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._interface_pick_mode:
                 self._capture_interface_point(float(data_x), float(data_y))
                 return
-            self.app_controller.select_from_bscan(int(round(data_x)), float(data_y))
+            self.app_controller.select_from_bscan(self._trace_index_from_distance(self.display_data, float(data_x)), float(data_y))
             return
         if key == "width":
-            line_count = int(self.display_data.meta.get("line_count", 1))
-            half_width = max((line_count - 1) / 2.0, 0.5)
-            line_index = int(round(np.clip(data_x + half_width, 0, max(line_count - 1, 0))))
+            line_index = self._line_index_from_distance(self.display_data, float(data_x))
             if self.display_data.ascan_time_ns.size:
                 sample_index = int(np.argmin(np.abs(self.display_data.ascan_time_ns - float(data_y))))
             else:
@@ -9006,8 +9194,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.app_controller.select_sample(sample_index)
             return
         if key == "cscan":
-            self.app_controller.select_trace(int(round(data_x)))
-            self.app_controller.select_line(int(round(data_y)))
+            self.app_controller.select_trace(self._trace_index_from_distance(self.display_data, float(data_x)))
+            self.app_controller.select_line(self._line_index_from_distance(self.display_data, float(data_y)))
             return
         if key == "trace":
             if self.display_data.ascan_time_ns.size == 0:

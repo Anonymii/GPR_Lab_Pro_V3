@@ -97,6 +97,7 @@ class DisplayController:
             time_offset_ns=time_offset_ns,
         )
         ascan_magnitude_values = self._build_ascan_magnitude(snapshot.data, selection_state)
+        trace_distance_m = self._trace_distance_axis_m(dataset)
         display = DisplayData(
             bscan=bscan,
             crossline=crossline,
@@ -118,6 +119,7 @@ class DisplayController:
                 "line_count": dataset.line_count,
                 "trace_count": dataset.trace_count,
                 "sample_count": int(snapshot.data.shape[0]) if snapshot.data.ndim >= 1 else dataset.sample_count,
+                "trace_distance_m": trace_distance_m,
                 "bscan_start_ns": bscan_range[0],
                 "bscan_end_ns": bscan_range[1],
                 "crossline_center": float(selection_state.line_index),
@@ -290,3 +292,71 @@ class DisplayController:
         trace_idx = int(np.clip(selection_state.trace_index, 0, volume.shape[1] - 1))
         line_idx = int(np.clip(selection_state.line_index, 0, volume.shape[2] - 1))
         return np.abs(volume[:, trace_idx, line_idx])
+
+    def _trace_distance_axis_m(self, dataset) -> np.ndarray:
+        trace_count = int(max(getattr(dataset, "trace_count", 0), 0))
+        if trace_count <= 0:
+            return np.empty((0,), dtype=float)
+        region_start = int(getattr(dataset, "header", {}).get("region_trace_start", 0) or 0)
+        active_region = self._active_region_for_dataset(getattr(dataset, "dataset_id", ""))
+        if active_region is not None:
+            region_start = int(max(0, active_region.trace_start))
+        active_file = self._active_file_for_dataset(getattr(dataset, "dataset_id", ""))
+        navigation_samples = []
+        if active_file is not None and active_file.navigation.samples:
+            navigation_samples = list(active_file.navigation.samples)
+        elif getattr(dataset, "navigation_samples", None):
+            navigation_samples = list(dataset.navigation_samples)
+        axis = self._distance_axis_from_navigation(navigation_samples, region_start, trace_count)
+        if axis.size == trace_count:
+            return axis
+        spacing_m = float(getattr(dataset, "import_params", {}).get("trace_spacing_m", 0.05) or 0.05)
+        spacing_m = spacing_m if np.isfinite(spacing_m) and spacing_m > 0 else 0.05
+        return (region_start + np.arange(trace_count, dtype=float)) * spacing_m
+
+    def _active_file_for_dataset(self, dataset_id: str):
+        project_state = self.context.project_state
+        if project_state.active_file_id:
+            active_file = next((item for item in project_state.files if item.file_id == project_state.active_file_id), None)
+            if active_file is not None and active_file.dataset_id == dataset_id:
+                return active_file
+        return next((item for item in project_state.files if item.dataset_id == dataset_id), None)
+
+    def _active_region_for_dataset(self, dataset_id: str):
+        project_state = self.context.project_state
+        for file_item in project_state.files:
+            if file_item.dataset_id != dataset_id:
+                continue
+            for region in file_item.regions:
+                if region.region_id == project_state.active_region_id:
+                    return region
+        return None
+
+    @staticmethod
+    def _distance_axis_from_navigation(samples: list, region_start: int, trace_count: int) -> np.ndarray:
+        rows: list[tuple[int, float, float]] = []
+        for fallback_index, sample in enumerate(samples or []):
+            trace_index = int(getattr(sample, "trace_index", fallback_index))
+            x = float(getattr(sample, "x", np.nan))
+            y = float(getattr(sample, "y", np.nan))
+            if np.isfinite(x) and np.isfinite(y):
+                rows.append((trace_index, x, y))
+        if len(rows) < 2:
+            return np.empty((0,), dtype=float)
+        rows.sort(key=lambda item: item[0])
+        indices = np.asarray([row[0] for row in rows], dtype=float)
+        coords = np.asarray([[row[1], row[2]] for row in rows], dtype=float)
+        deltas = np.hypot(np.diff(coords[:, 0]), np.diff(coords[:, 1]))
+        cumulative = np.concatenate([[0.0], np.cumsum(deltas)])
+        valid_steps = np.diff(cumulative) / np.maximum(np.diff(indices), 1.0)
+        valid_steps = valid_steps[np.isfinite(valid_steps) & (valid_steps > 0)]
+        spacing = float(np.median(valid_steps)) if valid_steps.size else 0.05
+        target = region_start + np.arange(trace_count, dtype=float)
+        axis = np.interp(target, indices, cumulative)
+        left_mask = target < indices[0]
+        right_mask = target > indices[-1]
+        if np.any(left_mask):
+            axis[left_mask] = cumulative[0] + (target[left_mask] - indices[0]) * spacing
+        if np.any(right_mask):
+            axis[right_mask] = cumulative[-1] + (target[right_mask] - indices[-1]) * spacing
+        return axis.astype(float, copy=False)

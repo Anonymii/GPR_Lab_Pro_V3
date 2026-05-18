@@ -18,7 +18,7 @@ class DisplayState:
     slice_thickness: int = 5
     crosshair_width: float = 1.2
     bscan_attr: str = "Real"
-    cscan_attr: str = "Envelope"
+    cscan_attr: str = "Real"
     start_time_ns: float = 0.0
     end_time_ns: float = 60.0
     colormap: str = "gray"

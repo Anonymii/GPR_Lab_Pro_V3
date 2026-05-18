@@ -1025,7 +1025,7 @@ class ProjectController:
         self.context.display_state.slice_thickness = 5
         self.context.display_state.crosshair_width = 1.2
         self.context.display_state.bscan_attr = "Real"
-        self.context.display_state.cscan_attr = "Envelope"
+        self.context.display_state.cscan_attr = "Real"
         self.context.display_state.start_time_ns = 0.0
         self.context.display_state.end_time_ns = 60.0
         self.context.display_state.colormap = "gray"
