@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+import xml.etree.ElementTree as ET
+
 import numpy as np
 
 from gpr_lab_pro.app.context import ApplicationContext
@@ -19,6 +22,7 @@ class DisplayController:
         self._crossline_cache_value = None
         self._cscan_cache_key = None
         self._cscan_cache_value = None
+        self._trace_spacing_metadata_cache: dict[str, float | None] = {}
 
     @property
     def display_state(self):
@@ -97,7 +101,7 @@ class DisplayController:
             time_offset_ns=time_offset_ns,
         )
         ascan_magnitude_values = self._build_ascan_magnitude(snapshot.data, selection_state)
-        trace_distance_m = self._trace_distance_axis_m(dataset)
+        trace_distance_m, trace_distance_source, trace_spacing_m = self._trace_distance_axis_m(dataset)
         display = DisplayData(
             bscan=bscan,
             crossline=crossline,
@@ -120,6 +124,8 @@ class DisplayController:
                 "trace_count": dataset.trace_count,
                 "sample_count": int(snapshot.data.shape[0]) if snapshot.data.ndim >= 1 else dataset.sample_count,
                 "trace_distance_m": trace_distance_m,
+                "trace_distance_source": trace_distance_source,
+                "trace_spacing_m": trace_spacing_m,
                 "bscan_start_ns": bscan_range[0],
                 "bscan_end_ns": bscan_range[1],
                 "crossline_center": float(selection_state.line_index),
@@ -293,14 +299,18 @@ class DisplayController:
         line_idx = int(np.clip(selection_state.line_index, 0, volume.shape[2] - 1))
         return np.abs(volume[:, trace_idx, line_idx])
 
-    def _trace_distance_axis_m(self, dataset) -> np.ndarray:
+    def _trace_distance_axis_m(self, dataset) -> tuple[np.ndarray, str, float | None]:
         trace_count = int(max(getattr(dataset, "trace_count", 0), 0))
         if trace_count <= 0:
-            return np.empty((0,), dtype=float)
+            return np.empty((0,), dtype=float), "empty", None
         region_start = int(getattr(dataset, "header", {}).get("region_trace_start", 0) or 0)
         active_region = self._active_region_for_dataset(getattr(dataset, "dataset_id", ""))
         if active_region is not None:
             region_start = int(max(0, active_region.trace_start))
+        spacing_m, spacing_source = self._stable_trace_spacing_m(dataset)
+        if spacing_m is not None:
+            axis = (region_start + np.arange(trace_count, dtype=float)) * spacing_m
+            return axis, spacing_source, spacing_m
         active_file = self._active_file_for_dataset(getattr(dataset, "dataset_id", ""))
         navigation_samples = []
         if active_file is not None and active_file.navigation.samples:
@@ -309,10 +319,103 @@ class DisplayController:
             navigation_samples = list(dataset.navigation_samples)
         axis = self._distance_axis_from_navigation(navigation_samples, region_start, trace_count)
         if axis.size == trace_count:
-            return axis
-        spacing_m = float(getattr(dataset, "import_params", {}).get("trace_spacing_m", 0.05) or 0.05)
-        spacing_m = spacing_m if np.isfinite(spacing_m) and spacing_m > 0 else 0.05
-        return (region_start + np.arange(trace_count, dtype=float)) * spacing_m
+            return axis, "gps_navigation", self._median_spacing(axis)
+        import_params = self._payload_dict(getattr(dataset, "import_params", {}) or {})
+        spacing_m = self._positive_float(import_params.get("trace_spacing_m")) or 0.05
+        return (region_start + np.arange(trace_count, dtype=float)) * spacing_m, "default_trace_spacing", spacing_m
+
+    def _stable_trace_spacing_m(self, dataset) -> tuple[float | None, str]:
+        header = self._payload_dict(getattr(dataset, "header", {}) or {})
+        import_params = self._payload_dict(getattr(dataset, "import_params", {}) or {})
+        header_source = str(header.get("trace_distance_source", "") or "metadata_trace_spacing")
+        for value, source in (
+            (header.get("trace_spacing_m"), header_source),
+            (header.get("distance_trigger_m"), "metadata_distance_trigger"),
+            (import_params.get("trace_spacing_m"), str(import_params.get("trace_distance_source", "") or "import_trace_spacing")),
+        ):
+            spacing_m = self._positive_float(value)
+            if spacing_m is not None:
+                return spacing_m, source
+        metadata_spacing = self._metadata_trace_spacing_m(dataset)
+        if metadata_spacing is not None:
+            return metadata_spacing, "3dra_distance_trigger"
+        return None, ""
+
+    def _metadata_trace_spacing_m(self, dataset) -> float | None:
+        candidates: list[Path] = []
+        source_path = str(getattr(dataset, "source_path", "") or "")
+        if source_path:
+            candidates.append(Path(source_path))
+        active_file = self._active_file_for_dataset(getattr(dataset, "dataset_id", ""))
+        if active_file is not None and active_file.source_path:
+            candidates.append(Path(str(active_file.source_path)))
+        for candidate in candidates:
+            cache_key = str(candidate)
+            if cache_key in self._trace_spacing_metadata_cache:
+                spacing = self._trace_spacing_metadata_cache[cache_key]
+                if spacing is not None:
+                    return spacing
+                continue
+            spacing = self._read_3dra_distance_trigger_m(candidate)
+            self._trace_spacing_metadata_cache[cache_key] = spacing
+            if spacing is not None:
+                return spacing
+        return None
+
+    @staticmethod
+    def _read_3dra_distance_trigger_m(source_path: Path) -> float | None:
+        metadata_candidates: list[Path] = []
+        try:
+            source_path = source_path.resolve()
+        except Exception:
+            pass
+        if source_path.is_dir():
+            metadata_candidates.append(source_path / "metadata.xml")
+        else:
+            metadata_candidates.append(source_path.with_name(f"{source_path.name}.extracted") / "metadata.xml")
+        ns = {"m": "http://www.3d-radar.com/schemas/metaInfo3dra"}
+        for metadata_path in metadata_candidates:
+            if not metadata_path.exists():
+                continue
+            try:
+                root = ET.parse(metadata_path).getroot()
+                node = root.find("m:acquisition_info/m:trigger_configuration/m:distance_trigger/m:distance", ns)
+                spacing = DisplayController._positive_float(node.text if node is not None else None)
+            except Exception:
+                spacing = None
+            if spacing is not None:
+                return spacing
+        return None
+
+    @staticmethod
+    def _positive_float(value: object) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if np.isfinite(number) and number > 0:
+            return number
+        return None
+
+    @staticmethod
+    def _payload_dict(value: object) -> dict[str, object]:
+        if isinstance(value, dict):
+            return dict(value)
+        if hasattr(value, "__dict__"):
+            return dict(vars(value))
+        return {}
+
+    @staticmethod
+    def _median_spacing(axis: np.ndarray) -> float | None:
+        values = np.asarray(axis, dtype=float)
+        if values.size <= 1:
+            return None
+        diffs = np.diff(values)
+        diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+        if diffs.size == 0:
+            return None
+        spacing = float(np.median(diffs))
+        return spacing if np.isfinite(spacing) and spacing > 0 else None
 
     def _active_file_for_dataset(self, dataset_id: str):
         project_state = self.context.project_state

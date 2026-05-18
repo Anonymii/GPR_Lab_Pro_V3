@@ -4475,9 +4475,15 @@ class MainWindow(QtWidgets.QMainWindow):
         explore_slices.setSpacing(8)
         explore_body.addLayout(explore_slices, stretch=1)
         explore_layout.addLayout(explore_body, stretch=1)
-        top_row = QtWidgets.QHBoxLayout()
-        top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(10)
+        slice_grid = QtWidgets.QGridLayout()
+        slice_grid.setContentsMargins(0, 0, 0, 0)
+        slice_grid.setHorizontalSpacing(10)
+        slice_grid.setVerticalSpacing(8)
+        slice_grid.setColumnStretch(0, 90)
+        slice_grid.setColumnStretch(1, 21)
+        slice_grid.setColumnStretch(2, 14)
+        slice_grid.setRowStretch(0, 7)
+        slice_grid.setRowStretch(1, 3)
         self.bscan_view = RasterViewportWidget(
             "bscan",
             title="距离 (m)",
@@ -4488,7 +4494,7 @@ class MainWindow(QtWidgets.QMainWindow):
             allow_zoom_y=True,
         )
         self.bscan_view.setStyleSheet("background: #fafbfc; border: 1px solid #d0d7df; border-radius: 14px;")
-        top_row.addWidget(self.bscan_view, stretch=90)
+        slice_grid.addWidget(self.bscan_view, 0, 0)
         self.width_view = RasterViewportWidget(
             "width",
             title="宽度 (m)",
@@ -4499,7 +4505,7 @@ class MainWindow(QtWidgets.QMainWindow):
             allow_zoom_y=True,
         )
         self.width_view.setStyleSheet("background: #fafbfc; border: 1px solid #d0d7df; border-radius: 14px;")
-        top_row.addWidget(self.width_view, stretch=21)
+        slice_grid.addWidget(self.width_view, 0, 1)
         self.trace_view = TraceViewportWidget(
             "trace",
             title="道波形",
@@ -4508,12 +4514,7 @@ class MainWindow(QtWidgets.QMainWindow):
             allow_zoom_y=True,
         )
         self.trace_view.setStyleSheet("background: #fafbfc; border: 1px solid #d0d7df; border-radius: 14px;")
-        top_row.addWidget(self.trace_view, stretch=14)
-        explore_slices.addLayout(top_row, stretch=7)
-
-        bottom_row = QtWidgets.QHBoxLayout()
-        bottom_row.setContentsMargins(0, 0, 0, 0)
-        bottom_row.setSpacing(10)
+        slice_grid.addWidget(self.trace_view, 0, 2)
 
         self.cscan_view = RasterViewportWidget(
             "cscan",
@@ -4525,7 +4526,7 @@ class MainWindow(QtWidgets.QMainWindow):
             allow_zoom_y=False,
         )
         self.cscan_view.setStyleSheet("background: #fafbfc; border: 1px solid #d0d7df; border-radius: 14px;")
-        bottom_row.addWidget(self.cscan_view, stretch=88)
+        slice_grid.addWidget(self.cscan_view, 1, 0)
 
         bottom_right_panel = QtWidgets.QFrame()
         bottom_right_panel.setObjectName("sideCard")
@@ -4585,8 +4586,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         right_layout.addWidget(slider_group)
         right_layout.addStretch(1)
-        bottom_row.addWidget(bottom_right_panel, stretch=28)
-        explore_slices.addLayout(bottom_row, stretch=3)
+        slice_grid.addWidget(bottom_right_panel, 1, 1, 1, 2)
+        explore_slices.addLayout(slice_grid, stretch=1)
 
         self._explore_tab_index = self.view_tabs.addTab(explore_panel, self._t("explore"))
         self.view_tabs.currentChanged.connect(self._on_view_tab_changed)
@@ -4885,7 +4886,6 @@ class MainWindow(QtWidgets.QMainWindow):
         colors_layout.setVerticalSpacing(4)
         colors_layout.addWidget(self.view_cmap_combo, 0, 0)
         colors_layout.addWidget(self.view_reverse_check, 1, 0)
-        colors_layout.addWidget(QtWidgets.QLabel("雷达数据颜色"), 2, 0, QtCore.Qt.AlignCenter)
 
         overlay_layout = QtWidgets.QGridLayout()
         overlay_layout.setContentsMargins(0, 0, 0, 0)
@@ -8747,8 +8747,27 @@ class MainWindow(QtWidgets.QMainWindow):
         raw_axis = display.meta.get("trace_distance_m")
         axis = np.asarray(raw_axis, dtype=float) if raw_axis is not None else np.empty((0,), dtype=float)
         if axis.size == trace_count and np.all(np.isfinite(axis)):
-            return axis
+            return self._strictly_increasing_trace_axis(axis)
         return np.arange(trace_count, dtype=float) * 0.05
+
+    @staticmethod
+    def _strictly_increasing_trace_axis(axis: np.ndarray) -> np.ndarray:
+        values = np.asarray(axis, dtype=float).copy()
+        if values.size <= 1:
+            return values
+        diffs = np.diff(values)
+        positive = diffs[np.isfinite(diffs) & (diffs > 1e-9)]
+        if positive.size:
+            spacing = float(np.median(positive))
+        else:
+            span = float(values[-1] - values[0])
+            spacing = span / max(values.size - 1, 1) if np.isfinite(span) and span > 0 else 0.05
+        spacing = spacing if np.isfinite(spacing) and spacing > 1e-9 else 0.05
+        min_step = max(spacing * 0.05, 1e-6)
+        for idx in range(1, values.size):
+            if not np.isfinite(values[idx]) or values[idx] <= values[idx - 1] + min_step:
+                values[idx] = values[idx - 1] + spacing
+        return values
 
     def _trace_distance_m(self, display: DisplayData, trace_index: int) -> float:
         axis = self._trace_axis_m(display)
@@ -8761,14 +8780,17 @@ class MainWindow(QtWidgets.QMainWindow):
         axis = self._trace_axis_m(display)
         if axis.size == 0:
             return 0
-        return int(np.argmin(np.abs(axis - float(distance_m))))
+        trace_positions = np.arange(axis.size, dtype=float)
+        value = float(np.clip(distance_m, axis[0], axis[-1]))
+        trace_float = float(np.interp(value, axis, trace_positions))
+        return int(np.clip(round(trace_float), 0, axis.size - 1))
 
     def _trace_distance_range(self, display: DisplayData) -> tuple[float, float]:
         axis = self._trace_axis_m(display)
         if axis.size == 0:
             return (0.0, 1.0)
-        start = float(np.nanmin(axis))
-        end = float(np.nanmax(axis))
+        start = float(axis[0])
+        end = float(axis[-1])
         if not np.isfinite(start) or not np.isfinite(end) or end <= start:
             end = start + 1.0
         return (start, end)
@@ -9144,13 +9166,14 @@ class MainWindow(QtWidgets.QMainWindow):
         time_ns = float(self.display_data.ascan_time_ns[sample_index]) if self.display_data.ascan_time_ns.size else fallback_y
         key = str(view_key)
         if key == "bscan":
-            return float(selection.trace_index), time_ns
+            return self._trace_distance_m(self.display_data, selection.trace_index), time_ns
         if key == "width":
-            line_count = int(self.display_data.meta.get("line_count", 1))
-            half_width = max((line_count - 1) / 2.0, 0.5)
-            return float(selection.line_index) - half_width, time_ns
+            return self._line_distance_m(self.display_data, selection.line_index), time_ns
         if key == "cscan":
-            return float(selection.trace_index), float(selection.line_index)
+            return (
+                self._trace_distance_m(self.display_data, selection.trace_index),
+                self._line_distance_m(self.display_data, selection.line_index),
+            )
         if key == "trace":
             return fallback_x, time_ns
         return fallback_x, fallback_y

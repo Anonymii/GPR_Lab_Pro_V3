@@ -46,6 +46,17 @@ class DatasetRecord:
             "file_size": imported.header.file_size,
             "gps_metadata_present": bool(imported.gps_metadata_present),
         }
+        params_payload = asdict(import_params or DataImportParameters())
+        metadata = dict(getattr(imported, "metadata", {}) or {})
+        trace_spacing_m = cls._positive_float(metadata.get("trace_spacing_m"))
+        if trace_spacing_m is not None:
+            header["trace_spacing_m"] = trace_spacing_m
+            header["trace_distance_source"] = "3dra_distance_trigger"
+            params_payload["trace_spacing_m"] = trace_spacing_m
+            params_payload["trace_distance_source"] = "3dra_distance_trigger"
+            distance_trigger_dmi = metadata.get("distance_trigger_dmi")
+            if distance_trigger_dmi is not None:
+                header["distance_trigger_dmi"] = distance_trigger_dmi
         return cls(
             dataset_id=uuid.uuid4().hex,
             name=imported.filename,
@@ -58,10 +69,20 @@ class DatasetRecord:
             transform_name=imported.transform_name,
             header=header,
             source_path=source_path,
-            import_params=asdict(import_params or DataImportParameters()),
+            import_params=params_payload,
             navigation_samples=list(imported.navigation_samples),
             gps_metadata_present=bool(imported.gps_metadata_present),
         )
+
+    @staticmethod
+    def _positive_float(value: object) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if np.isfinite(number) and number > 0:
+            return number
+        return None
 
     @property
     def shape(self) -> tuple[int, int, int]:

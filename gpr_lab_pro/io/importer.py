@@ -34,6 +34,8 @@ class ISDFTParameters:
 @dataclass(frozen=True)
 class DataImportParameters:
     beta: float = 6.0
+    trace_spacing_m: float | None = None
+    trace_distance_source: str = ""
     # Deprecated compatibility-only fields kept for old project payloads.
     tw_start_ns: float = 0.0
     tw_end_ns: float = 60.0
@@ -68,6 +70,7 @@ class ImportedGPRData:
     transform_name: str
     navigation_samples: list[ImportedNavigationSample] = field(default_factory=list)
     gps_metadata_present: bool = False
+    metadata: dict[str, object] = field(default_factory=dict)
 
     def as_3d(self) -> np.ndarray:
         if not self.channels:

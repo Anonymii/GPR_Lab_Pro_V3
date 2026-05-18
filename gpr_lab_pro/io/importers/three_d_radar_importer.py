@@ -116,6 +116,7 @@ class ThreeDRadarImporter:
             transform_name="3D Radar Cube",
             navigation_samples=navigation_samples,
             gps_metadata_present=bool(navigation_samples),
+            metadata=metadata,
         )
 
     @classmethod
@@ -186,6 +187,10 @@ class ThreeDRadarImporter:
             value = text(xpath)
             return float(value) if value else default
 
+        def int_text(xpath: str, default: int = 0) -> int:
+            value = text(xpath)
+            return int(float(value)) if value else default
+
         return {
             "schema_version": text("m:schema_version"),
             "file_generator": text("m:file_generator"),
@@ -201,6 +206,13 @@ class ThreeDRadarImporter:
                 text("m:acquisition_info/m:scan_configuration/m:number_of_frequencies", "0") or 0
             ),
             "dwell_time_s": float_text("m:acquisition_info/m:scan_configuration/m:dwell_time"),
+            "trace_spacing_m": float_text(
+                "m:acquisition_info/m:trigger_configuration/m:distance_trigger/m:distance"
+            ),
+            "distance_trigger_dmi": int_text(
+                "m:acquisition_info/m:trigger_configuration/m:distance_trigger/m:dmi",
+                -1,
+            ),
         }
 
     @classmethod
