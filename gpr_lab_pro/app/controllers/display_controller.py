@@ -96,12 +96,14 @@ class DisplayController:
             dt_ns=dt_ns,
             time_offset_ns=time_offset_ns,
         )
+        ascan_magnitude_values = self._build_ascan_magnitude(snapshot.data, selection_state)
         display = DisplayData(
             bscan=bscan,
             crossline=crossline,
             cscan=cscan,
             ascan_time_ns=ascan_time_ns,
             ascan_values=ascan_values,
+            ascan_magnitude_values=ascan_magnitude_values,
             spectrum_freq_mhz=spectrum_freq_mhz,
             spectrum_values=spectrum_values,
             bscan_limits=bscan_limits,
@@ -131,6 +133,7 @@ class DisplayController:
         *,
         contrast_gain: float | None = None,
         slice_thickness: int | None = None,
+        crosshair_width: float | None = None,
         bscan_attr: str | None = None,
         cscan_attr: str | None = None,
         start_time_ns: float | None = None,
@@ -143,6 +146,8 @@ class DisplayController:
             self.display_state.contrast_gain = float(max(0.1, contrast_gain))
         if slice_thickness is not None:
             self.display_state.slice_thickness = int(max(0, slice_thickness))
+        if crosshair_width is not None:
+            self.display_state.crosshair_width = float(np.clip(crosshair_width, 0.5, 8.0))
         if bscan_attr is not None:
             self.display_state.bscan_attr = bscan_attr
         if cscan_attr is not None:
@@ -164,6 +169,7 @@ class DisplayController:
     def restore_state(self, state) -> None:
         self.display_state.contrast_gain = float(max(0.1, state.contrast_gain))
         self.display_state.slice_thickness = int(max(0, state.slice_thickness))
+        self.display_state.crosshair_width = float(np.clip(getattr(state, "crosshair_width", 1.2), 0.5, 8.0))
         self.display_state.bscan_attr = state.bscan_attr
         self.display_state.cscan_attr = state.cscan_attr
         self.display_state.start_time_ns = float(max(0.0, state.start_time_ns))
@@ -276,3 +282,11 @@ class DisplayController:
         if not np.isfinite(vmax) or vmax <= 1e-9:
             vmax = 1.0
         return crossline, (-vmax, vmax)
+
+    @staticmethod
+    def _build_ascan_magnitude(volume: np.ndarray, selection_state) -> np.ndarray:
+        if volume.size == 0 or volume.ndim < 3:
+            return np.empty((0,), dtype=float)
+        trace_idx = int(np.clip(selection_state.trace_index, 0, volume.shape[1] - 1))
+        line_idx = int(np.clip(selection_state.line_index, 0, volume.shape[2] - 1))
+        return np.abs(volume[:, trace_idx, line_idx])

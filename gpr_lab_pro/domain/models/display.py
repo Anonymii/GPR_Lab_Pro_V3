@@ -16,6 +16,7 @@ class SelectionState:
 class DisplayState:
     contrast_gain: float = 4.0
     slice_thickness: int = 5
+    crosshair_width: float = 1.2
     bscan_attr: str = "Real"
     cscan_attr: str = "Envelope"
     start_time_ns: float = 0.0
@@ -39,4 +40,5 @@ class DisplayData:
     cscan_limits: tuple[float | None, float | None]
     selection: SelectionState
     trace_info: str
+    ascan_magnitude_values: np.ndarray | None = None
     meta: dict[str, object] = field(default_factory=dict)

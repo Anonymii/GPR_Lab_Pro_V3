@@ -1023,6 +1023,7 @@ class ProjectController:
         self.context.selection_state.sample_index = 0
         self.context.display_state.contrast_gain = 4.0
         self.context.display_state.slice_thickness = 5
+        self.context.display_state.crosshair_width = 1.2
         self.context.display_state.bscan_attr = "Real"
         self.context.display_state.cscan_attr = "Envelope"
         self.context.display_state.start_time_ns = 0.0

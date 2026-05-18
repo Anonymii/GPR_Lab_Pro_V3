@@ -61,6 +61,7 @@ class ExportController:
             "bscan_attr": self.context.display_state.bscan_attr,
             "cscan_attr": self.context.display_state.cscan_attr,
             "slice_thick": self.context.display_state.slice_thickness,
+            "crosshair_width": self.context.display_state.crosshair_width,
             "contrast_gain": self.context.display_state.contrast_gain,
             "start_time_ns": self.context.display_state.start_time_ns,
             "end_time_ns": self.context.display_state.end_time_ns,
@@ -109,6 +110,7 @@ class ExportController:
         b_attr = getattr(tpl, "bscan_attr", None)
         c_attr = getattr(tpl, "cscan_attr", None)
         slice_thick = getattr(tpl, "slice_thick", None)
+        crosshair_width = getattr(tpl, "crosshair_width", None)
         start_time_ns = getattr(tpl, "start_time_ns", None)
         end_time_ns = getattr(tpl, "end_time_ns", None)
         if b_attr:
@@ -117,6 +119,8 @@ class ExportController:
             self.context.display_state.cscan_attr = str(c_attr)
         if slice_thick is not None:
             self.context.display_state.slice_thickness = int(round(float(slice_thick)))
+        if crosshair_width is not None:
+            self.context.display_state.crosshair_width = float(max(0.5, min(8.0, float(crosshair_width))))
         if start_time_ns is not None:
             self.context.display_state.start_time_ns = float(start_time_ns)
         if end_time_ns is not None:

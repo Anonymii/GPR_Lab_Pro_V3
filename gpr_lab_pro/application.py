@@ -231,6 +231,7 @@ class GPRApplication(QtCore.QObject):
         *,
         contrast_gain: float | None = None,
         slice_thickness: int | None = None,
+        crosshair_width: float | None = None,
         bscan_attr: str | None = None,
         cscan_attr: str | None = None,
         start_time_ns: float | None = None,
@@ -242,6 +243,7 @@ class GPRApplication(QtCore.QObject):
         self.display_controller.update_settings(
             contrast_gain=contrast_gain,
             slice_thickness=slice_thickness,
+            crosshair_width=crosshair_width,
             bscan_attr=bscan_attr,
             cscan_attr=cscan_attr,
             start_time_ns=start_time_ns,
