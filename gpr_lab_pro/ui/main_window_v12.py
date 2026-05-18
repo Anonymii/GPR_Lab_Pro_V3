@@ -54,7 +54,7 @@ UI_TEXT = {
         "region_processing": "区域处理\n设置",
         "process_selected": "处理选中\n区域",
         "edit_region_size": "编辑区域\n范围",
-        "display_processing": "显示处理\n设置",
+        "display_processing": "显示\n设置",
         "geo_positioning": "地理\n定位",
         "data_source_info": "数据源\n信息",
         "overview_layers": "总览\n图层",
@@ -170,7 +170,7 @@ UI_TEXT = {
         "region_processing": "Region Processing\nSettings",
         "process_selected": "Process Selected\nRegions",
         "edit_region_size": "Edit Region\nSize",
-        "display_processing": "Display Processing\nSettings",
+        "display_processing": "Display\nSettings",
         "geo_positioning": "Geo\nPositioning",
         "data_source_info": "Data Source\nInformation",
         "overview_layers": "Overview\nLayers",
@@ -2526,6 +2526,10 @@ class RasterViewportWidget(QtWidgets.QWidget):
         self._overlays = list(overlays or [])
         self.update()
 
+    def set_crosshair_width(self, width: float) -> None:
+        self._crosshair_width = float(np.clip(width, 0.5, 8.0))
+        self.update()
+
     def set_active_drag_path(self, points: list[tuple[float, float]] | None) -> None:
         self._active_drag_path = list(points or [])
 
@@ -3335,6 +3339,10 @@ class TraceViewportWidget(QtWidgets.QWidget):
         self._overlay_markers = []
         self.update()
 
+    def set_crosshair_width(self, width: float) -> None:
+        self._crosshair_width = float(np.clip(width, 0.5, 8.0))
+        self.update()
+
     def set_content(
         self,
         x_data: np.ndarray,
@@ -3810,6 +3818,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._display_configured = False
         self._has_custom_viewport = False
         self._scan_image_cache: dict[tuple[int, tuple[int, ...], str, int], np.ndarray] = {}
+        self._view_contrast_dragging = False
         self._ordered_steps = []
         self._selected_step_index = -1
         self._pipeline_scope = "current_region"
@@ -4490,16 +4499,16 @@ class MainWindow(QtWidgets.QMainWindow):
             allow_zoom_y=True,
         )
         self.width_view.setStyleSheet("background: #fafbfc; border: 1px solid #d0d7df; border-radius: 14px;")
-        top_row.addWidget(self.width_view, stretch=18)
+        top_row.addWidget(self.width_view, stretch=21)
         self.trace_view = TraceViewportWidget(
             "trace",
-            title="Trace line",
+            title="道波形",
             margins=(24, 8, 42, 18),
             allow_zoom_x=False,
             allow_zoom_y=True,
         )
         self.trace_view.setStyleSheet("background: #fafbfc; border: 1px solid #d0d7df; border-radius: 14px;")
-        top_row.addWidget(self.trace_view, stretch=18)
+        top_row.addWidget(self.trace_view, stretch=14)
         explore_slices.addLayout(top_row, stretch=7)
 
         bottom_row = QtWidgets.QHBoxLayout()
@@ -4834,7 +4843,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return group
 
     def _build_view_display_controls_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("Rendering")
+        group = QtWidgets.QGroupBox("显示渲染")
         group.setObjectName("ribbonGroup")
         group.setMaximumHeight(88)
         group.setMinimumHeight(84)
@@ -4850,9 +4859,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view_contrast_value_label.setAlignment(QtCore.Qt.AlignCenter)
         self.view_contrast_value_label.setMinimumWidth(48)
         self.view_cmap_combo = QtWidgets.QComboBox()
-        self.view_cmap_combo.addItems(["gray", "copper", "jet"])
-        self.view_cmap_combo.setFixedWidth(142)
-        self.view_reverse_check = QtWidgets.QCheckBox("Reverse Colors")
+        self.view_cmap_combo.addItem("灰度", "gray")
+        self.view_cmap_combo.addItem("铜色", "copper")
+        self.view_cmap_combo.addItem("彩虹", "jet")
+        self.view_cmap_combo.setFixedWidth(170)
+        self.view_reverse_check = QtWidgets.QCheckBox("反色")
+        self.view_reverse_check.setMinimumWidth(64)
         self.view_thickness_spin = QtWidgets.QDoubleSpinBox()
         self.view_thickness_spin.setRange(0.5, 8.0)
         self.view_thickness_spin.setSingleStep(0.5)
@@ -4865,7 +4877,7 @@ class MainWindow(QtWidgets.QMainWindow):
         contrast_layout.setVerticalSpacing(0)
         contrast_layout.addWidget(self.view_contrast_value_label, 0, 0, 1, 2)
         contrast_layout.addWidget(self.view_contrast_slider, 1, 0, 1, 2)
-        contrast_layout.addWidget(QtWidgets.QLabel("Contrast"), 2, 0, 1, 2, QtCore.Qt.AlignCenter)
+        contrast_layout.addWidget(QtWidgets.QLabel("对比度"), 2, 0, 1, 2, QtCore.Qt.AlignCenter)
 
         colors_layout = QtWidgets.QGridLayout()
         colors_layout.setContentsMargins(0, 0, 0, 0)
@@ -4873,25 +4885,25 @@ class MainWindow(QtWidgets.QMainWindow):
         colors_layout.setVerticalSpacing(4)
         colors_layout.addWidget(self.view_cmap_combo, 0, 0)
         colors_layout.addWidget(self.view_reverse_check, 1, 0)
-        colors_layout.addWidget(QtWidgets.QLabel("GPR Data Colors"), 2, 0, QtCore.Qt.AlignCenter)
+        colors_layout.addWidget(QtWidgets.QLabel("雷达数据颜色"), 2, 0, QtCore.Qt.AlignCenter)
 
         overlay_layout = QtWidgets.QGridLayout()
         overlay_layout.setContentsMargins(0, 0, 0, 0)
         overlay_layout.setHorizontalSpacing(8)
         overlay_layout.setVerticalSpacing(4)
         self.view_overlay_combo = QtWidgets.QComboBox()
-        self.view_overlay_combo.addItems(["None", "Interfaces", "Hyperbola"])
-        self.view_overlay_combo.setFixedWidth(140)
+        self.view_overlay_combo.addItems(["无", "界面", "双曲线"])
+        self.view_overlay_combo.setFixedWidth(160)
         self.view_overlay_combo.setEnabled(False)
         overlay_layout.addWidget(self.view_overlay_combo, 0, 0)
-        overlay_layout.addWidget(QtWidgets.QLabel("Overlay Selection"), 2, 0, QtCore.Qt.AlignCenter)
+        overlay_layout.addWidget(QtWidgets.QLabel("叠加选择"), 2, 0, QtCore.Qt.AlignCenter)
 
         thickness_layout = QtWidgets.QGridLayout()
         thickness_layout.setContentsMargins(0, 0, 0, 0)
         thickness_layout.setHorizontalSpacing(6)
         thickness_layout.setVerticalSpacing(4)
         thickness_layout.addWidget(self.view_thickness_spin, 0, 0, QtCore.Qt.AlignCenter)
-        thickness_layout.addWidget(QtWidgets.QLabel("Thickness"), 2, 0, QtCore.Qt.AlignCenter)
+        thickness_layout.addWidget(QtWidgets.QLabel("线宽"), 2, 0, QtCore.Qt.AlignCenter)
 
         for section in (contrast_layout, colors_layout, overlay_layout, thickness_layout):
             container = QtWidgets.QWidget()
@@ -4905,7 +4917,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 layout.addWidget(separator)
 
         self.view_contrast_slider.valueChanged.connect(self._on_view_contrast_changed)
-        self.view_cmap_combo.currentTextChanged.connect(self._on_view_colormap_changed)
+        self.view_contrast_slider.sliderPressed.connect(self._on_view_contrast_drag_started)
+        self.view_contrast_slider.sliderReleased.connect(self._on_view_contrast_drag_finished)
+        self.view_cmap_combo.currentIndexChanged.connect(self._on_view_colormap_changed)
         self.view_reverse_check.toggled.connect(self._on_view_reverse_changed)
         self.view_thickness_spin.valueChanged.connect(self._on_view_crosshair_width_changed)
         self._sync_view_display_controls()
@@ -5156,9 +5170,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "view_contrast_value_label"):
             self.view_contrast_value_label.setText(f"{int(round((float(state.contrast_gain) - 4.0) * 10.0))}%")
         self.view_cmap_combo.blockSignals(True)
-        if state.colormap not in [self.view_cmap_combo.itemText(i) for i in range(self.view_cmap_combo.count())]:
-            self.view_cmap_combo.addItem(state.colormap)
-        self.view_cmap_combo.setCurrentText(state.colormap)
+        values = [str(self.view_cmap_combo.itemData(i) or self.view_cmap_combo.itemText(i)) for i in range(self.view_cmap_combo.count())]
+        if state.colormap not in values:
+            self.view_cmap_combo.addItem(state.colormap, state.colormap)
+            values.append(state.colormap)
+        self.view_cmap_combo.setCurrentIndex(max(0, values.index(state.colormap)))
         self.view_cmap_combo.blockSignals(False)
         self.view_reverse_check.blockSignals(True)
         self.view_reverse_check.setChecked(bool(state.invert))
@@ -5173,11 +5189,20 @@ class MainWindow(QtWidgets.QMainWindow):
             self.view_contrast_value_label.setText(f"{int(round((contrast - 4.0) * 10.0))}%")
         self.app_controller.update_display_settings(contrast_gain=contrast, publish=False)
         self._display_configured = True
-        self._rerender_explore_views_only()
-        self._refresh_settings_info()
+        if not self._view_contrast_dragging:
+            self._rerender_explore_views_only()
+            self._refresh_settings_info()
 
-    def _on_view_colormap_changed(self, value: str) -> None:
-        self.app_controller.update_display_settings(colormap=str(value or "gray"), publish=False)
+    def _on_view_contrast_drag_started(self) -> None:
+        self._view_contrast_dragging = True
+
+    def _on_view_contrast_drag_finished(self) -> None:
+        self._view_contrast_dragging = False
+        self._on_view_contrast_changed(self.view_contrast_slider.value())
+
+    def _on_view_colormap_changed(self, _value: object = None) -> None:
+        value = str(self.view_cmap_combo.currentData() or self.view_cmap_combo.currentText() or "gray")
+        self.app_controller.update_display_settings(colormap=value, publish=False)
         self._display_configured = True
         self._rerender_explore_views_only()
         self._refresh_settings_info()
@@ -5191,8 +5216,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_view_crosshair_width_changed(self, value: float) -> None:
         self.app_controller.update_display_settings(crosshair_width=float(value), publish=False)
         self._display_configured = True
-        self._rerender_explore_views_only()
-        self._refresh_settings_info()
+        for widget in (self.bscan_view, self.width_view, self.cscan_view, self.trace_view):
+            widget.set_crosshair_width(float(value))
 
     def _toggle_dual_depth_axis(self, checked: bool = True) -> None:
         self._dual_depth_axis_enabled = bool(checked)
@@ -5557,11 +5582,17 @@ class MainWindow(QtWidgets.QMainWindow):
             preview = self._measurement_preview.get(self._measurement_active_view)
             if preview is not None and points and not self._measurement_complete.get(self._measurement_active_view, False):
                 points.append(preview)
-            length, area = self._measurement_stats(points)
+            length, area = self._measurement_stats_for_view(self._measurement_active_view, points)
         if self._measurement_length_label is not None:
             self._measurement_length_label.setText(f"{self._t('measure_length')}: {length:10.3f} m")
         if self._measurement_area_label is not None:
             self._measurement_area_label.setText(f"{self._t('measure_area')}:   {area:10.3f} m²")
+
+    def _measurement_stats_for_view(self, key: str, points: list[tuple[float, float]]) -> tuple[float, float]:
+        if key in {"bscan", "width"}:
+            metric_points = [(float(x), self._time_ns_to_depth_m(float(y))) for x, y in points]
+            return self._measurement_stats(metric_points)
+        return self._measurement_stats(points)
 
     @staticmethod
     def _measurement_stats(points: list[tuple[float, float]]) -> tuple[float, float]:
@@ -7328,7 +7359,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     current_segment = []
                     continue
                 sample_idx = int(np.clip(round(float(sample_value)), 0, display.ascan_time_ns.size - 1))
-                point = (float(trace_idx), float(display.ascan_time_ns[sample_idx]))
+                point = (self._trace_distance_m(display, trace_idx), float(display.ascan_time_ns[sample_idx]))
                 current_segment.append(point)
                 point_markers.append(point)
             if len(current_segment) >= 2:
@@ -7336,7 +7367,7 @@ class MainWindow(QtWidgets.QMainWindow):
             marker = None
             if 0 <= current_trace < len(values) and values[current_trace] is not None:
                 marker_sample = int(np.clip(round(float(values[current_trace])), 0, display.ascan_time_ns.size - 1))
-                marker = (float(current_trace), float(display.ascan_time_ns[marker_sample]))
+                marker = (self._trace_distance_m(display, current_trace), float(display.ascan_time_ns[marker_sample]))
             overlays.append(
                 {
                     "segments": segments,
@@ -7355,7 +7386,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return []
         trace_index = int(self.app_controller.selection_state.trace_index)
         current_line = int(self.app_controller.selection_state.line_index)
-        half_width = max((region.line_count() - 1) / 2.0, 0.5)
         overlays: list[dict[str, object]] = []
         active_interface = self._active_interface()
         for interface in region.interfaces:
@@ -7372,7 +7402,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     current_segment = []
                     continue
                 sample_idx = int(np.clip(round(float(values[trace_index])), 0, display.ascan_time_ns.size - 1))
-                point = (float(line_idx) - half_width, float(display.ascan_time_ns[sample_idx]))
+                point = (self._line_distance_m(display, line_idx), float(display.ascan_time_ns[sample_idx]))
                 current_segment.append(point)
                 point_markers.append(point)
             if len(current_segment) >= 2:
@@ -7381,7 +7411,7 @@ class MainWindow(QtWidgets.QMainWindow):
             active_values = list(interface.samples_by_line.get(str(current_line), []))
             if trace_index < len(active_values) and active_values[trace_index] is not None:
                 sample_idx = int(np.clip(round(float(active_values[trace_index])), 0, display.ascan_time_ns.size - 1))
-                marker = (float(current_line) - half_width, float(display.ascan_time_ns[sample_idx]))
+                marker = (self._line_distance_m(display, current_line), float(display.ascan_time_ns[sample_idx]))
             overlays.append(
                 {
                     "segments": segments,
@@ -7429,7 +7459,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if sample_value is None:
                 continue
             sample_idx = int(np.clip(round(float(sample_value)), 0, display.ascan_time_ns.size - 1))
-            points.append((float(trace_idx), float(display.ascan_time_ns[sample_idx])))
+            points.append((self._trace_distance_m(display, trace_idx), float(display.ascan_time_ns[sample_idx])))
         return points
 
     def _build_bscan_hyperbola_overlay(self, display: DisplayData | None) -> list[dict[str, object]]:
@@ -7439,20 +7469,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if trace_count <= 1:
             return []
         selection = self.app_controller.selection_state
-        center_trace = float(np.clip(selection.trace_index, 0, trace_count - 1))
+        center_x_m = self._trace_distance_m(display, int(selection.trace_index))
         dt_ns = float(display.meta.get("dt_ns", 1.0))
         apex_time_ns = self._selection_time_ns(display, selection.sample_index, dt_ns)
         ground_ns = float(self._general_time_ground_ns)
         relative_apex_ns = max(apex_time_ns - ground_ns, 0.05)
         epsilon = max(float(self._general_epsilon), 1.0)
         velocity_m_ns = 299_792_458.0 / np.sqrt(epsilon) * 1e-9
-        span = min(max(trace_count - 1, 1), 160)
-        start_trace = max(0.0, center_trace - span / 2.0)
-        end_trace = min(float(trace_count - 1), center_trace + span / 2.0)
-        xs = np.linspace(start_trace, end_trace, 121)
+        x0, x1 = self._trace_distance_range(display)
+        half_span_m = float(np.clip((x1 - x0) * 0.04, 0.45, 2.0))
+        xs = np.linspace(max(x0, center_x_m - half_span_m), min(x1, center_x_m + half_span_m), 121)
         points: list[tuple[float, float]] = []
         for x in xs:
-            offset_m = float(x - center_trace)
+            offset_m = float(x - center_x_m)
             travel_ns = np.sqrt(relative_apex_ns * relative_apex_ns + (2.0 * offset_m / max(velocity_m_ns, 1e-9)) ** 2)
             y = ground_ns + travel_ns
             if display.ascan_time_ns[0] <= y <= display.ascan_time_ns[-1]:
@@ -8371,7 +8400,7 @@ class MainWindow(QtWidgets.QMainWindow):
             marker=(marker_x, marker_y) if self._show_explore_crosshair else None,
             horizontal_line=(marker_y, "#195fbf") if self._show_explore_crosshair else None,
             secondary_x_data=visible_magnitude,
-            title="Trace line\nReal / Magnitude",
+            title="道波形\n实部 / 幅值",
             crosshair_width=self.app_controller.display_state.crosshair_width,
         )
 
@@ -8806,21 +8835,19 @@ class MainWindow(QtWidgets.QMainWindow):
         return (float(time_ns) - float(self._general_time_ground_ns)) * 1e-9 * velocity_m_s / 2.0
 
     def _bscan_title(self, display: DisplayData) -> str:
-        line_count = int(display.meta.get("line_count", 1))
         line_index = int(self.app_controller.selection_state.line_index)
-        half_width = max((line_count - 1) / 2.0, 0.5)
-        return f"Inline Slice at {float(line_index) - half_width:.3f} m"
+        return f"纵向切片 {self._line_distance_m(display, line_index):.3f} m"
 
-    def _crossline_title(self, _display: DisplayData) -> str:
+    def _crossline_title(self, display: DisplayData) -> str:
         trace_index = int(self.app_controller.selection_state.trace_index)
-        return f"Crossline Slice at {float(trace_index):.3f} m"
+        return f"横向切片 {self._trace_distance_m(display, trace_index):.3f} m"
 
     def _cscan_title(self, display: DisplayData) -> str:
         dt_ns = float(display.meta.get("dt_ns", 1.0))
         time_ns = self._selection_time_ns(display, self.app_controller.selection_state.sample_index, dt_ns)
         if self._dual_depth_axis_enabled:
-            return f"Horizontal Slice at {self._time_ns_to_depth_m(time_ns):.3f} m"
-        return f"Horizontal Slice at {time_ns:.3f} ns"
+            return f"水平切片 {self._time_ns_to_depth_m(time_ns):.3f} m"
+        return f"水平切片 {time_ns:.3f} ns"
 
     def _default_trace_viewport(self, trace_count: int, *, selection_index: int = 0) -> tuple[float, float]:
         max_trace = float(max(trace_count - 1, 1))
@@ -9210,7 +9237,7 @@ class MainWindow(QtWidgets.QMainWindow):
         interface = self._active_interface()
         if region is None or interface is None:
             return
-        trace_index = int(np.clip(round(float(data_x)), 0, max(region.trace_count() - 1, 0)))
+        trace_index = self._trace_index_from_distance(self.display_data, float(data_x)) if self.display_data is not None else 0
         try:
             self.app_controller.set_region_interface_point(
                 region.region_id,
@@ -9282,7 +9309,7 @@ class MainWindow(QtWidgets.QMainWindow):
         interface = self._active_interface()
         if region is None or interface is None:
             return
-        trace_index = int(np.clip(round(float(trace_value)), 0, max(region.trace_count() - 1, 0)))
+        trace_index = self._trace_index_from_distance(self.display_data, float(trace_value))
         sample_index = int(np.argmin(np.abs(self.display_data.ascan_time_ns - float(time_ns))))
         try:
             self.app_controller.set_region_interface_point(
@@ -9303,7 +9330,7 @@ class MainWindow(QtWidgets.QMainWindow):
         interface = self._active_interface()
         if region is None or interface is None or self.display_data is None or self.display_data.ascan_time_ns.size == 0:
             return
-        trace_index = int(np.clip(round(trace_value), 0, max(region.trace_count() - 1, 0)))
+        trace_index = self._trace_index_from_distance(self.display_data, float(trace_value))
         sample_index = int(np.argmin(np.abs(self.display_data.ascan_time_ns - float(time_ns))))
         line_index = int(self.app_controller.selection_state.line_index)
         current_pick = (region.region_id, interface.interface_id, line_index, trace_index, sample_index)
